@@ -1315,10 +1315,7 @@ async fn command_socket_runs_typed_commands_with_one_reply_per_line() -> anyhow:
     let replies = client.join().unwrap()?;
 
     assert!(
-        replies[0].starts_with(&format!(
-            "ok Reviewing 1 buffer(s) against git commit {}",
-            &commit[..8]
-        )),
+        replies[0].starts_with(&format!("ok Reviewing 1 buffer against {}", &commit[..8])),
         "{replies:?}"
     );
     assert!(

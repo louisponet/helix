@@ -39,6 +39,12 @@ pub(super) fn typable_allowed(editor: &Editor, name: &str) -> bool {
     !old_focused(editor) || OLD_FOCUS_TYPABLE.contains(&name)
 }
 
+/// Formats `count` followed by `noun`, pluralized with a trailing "s" unless `count` is 1.
+fn plural(count: usize, noun: &str) -> String {
+    let suffix = if count == 1 { "" } else { "s" };
+    format!("{count} {noun}{suffix}")
+}
+
 fn record_reviewed_file(editor: &mut Editor) {
     let (_, doc) = current_ref!(editor);
     if let (Some(path), Some(review)) = (doc.path(), &doc.review) {
@@ -333,7 +339,9 @@ pub(super) fn review_export(
     let files = cx.editor.review_batch.files().count();
     cx.editor.review_batch.export(&path, |_| true)?;
     cx.editor.set_status(format!(
-        "Exported {comments} comment(s) on {files} file(s) to {}",
+        "Exported {} on {} to {}",
+        plural(comments, "comment"),
+        plural(files, "file"),
         path.display()
     ));
     Ok(())
@@ -416,10 +424,18 @@ pub(super) fn review_baseline(
     let scrolloff = cx.editor.config().scrolloff;
     let (view, doc) = current!(cx.editor);
     view.ensure_cursor_in_view(doc, scrolloff);
-    cx.editor.set_status(format!(
-        "Reviewing {reviewed} buffer(s) against git commit {}; {unsaved} unsaved and {failed} unreviewable buffer(s) skipped",
+    let mut status = format!(
+        "Reviewing {} against {}",
+        plural(reviewed, "buffer"),
         &commit[..8]
-    ));
+    );
+    if unsaved > 0 {
+        status.push_str(&format!("; {unsaved} unsaved skipped"));
+    }
+    if failed > 0 {
+        status.push_str(&format!("; {failed} unreviewable skipped"));
+    }
+    cx.editor.set_status(status);
     Ok(())
 }
 
