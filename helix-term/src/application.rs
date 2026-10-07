@@ -257,7 +257,7 @@ impl Application {
             jobs,
             lsp_progress: LspProgressMap::new(),
             theme_mode,
-            command_socket: CommandSocket::bind(),
+            command_socket: CommandSocket::new(),
         };
 
         Ok(app)
@@ -609,6 +609,9 @@ impl Application {
     }
 
     pub async fn handle_idle_timeout(&mut self) {
+        if let Some(socket) = &mut self.command_socket {
+            socket.retry();
+        }
         let mut cx = crate::compositor::Context {
             editor: &mut self.editor,
             jobs: &mut self.jobs,

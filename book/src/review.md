@@ -145,7 +145,9 @@ the review in sync with an agent. The socket is `$HELIX_COMMAND_SOCKET` if set,
 otherwise `$XDG_RUNTIME_DIR/helix/<id>.sock` (or `/tmp/helix-<uid>/<id>.sock`),
 where `<id>` is the first 32 hex digits of the SHA-256 of the canonical
 workspace root. Only the first Helix instance in a workspace listens; the
-socket is removed on exit.
+socket is removed on exit, unless a newer instance has already replaced it. An
+instance that found the socket taken retries whenever the editor goes idle, so
+it takes over once the other instance exits.
 
 Each line sent is one typed command without the leading `:`, for example
 `review-baseline HEAD` or `open /abs/path.rs`. It runs exactly as if typed at

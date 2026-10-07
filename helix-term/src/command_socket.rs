@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -8,7 +8,8 @@ pub type Request = (String, oneshot::Sender<String>);
 /// A Unix socket on which processes of the same user run typed commands, one per line.
 pub struct CommandSocket {
     path: PathBuf,
-    requests: mpsc::UnboundedReceiver<Request>,
+    /// `None` while another live editor owns the socket.
+    listener: Option<Listener>,
 }
 
 impl CommandSocket {
@@ -41,18 +42,74 @@ impl CommandSocket {
 
     /// Listens on the command socket unless another live editor owns it.
     #[cfg(unix)]
-    pub fn bind() -> Option<Self> {
+    pub fn new() -> Option<Self> {
+        let path = Self::path()?;
+        let listener = Listener::bind(&path, log::Level::Warn);
+        Some(Self { path, listener })
+    }
+
+    #[cfg(not(unix))]
+    pub fn new() -> Option<Self> {
+        None
+    }
+
+    /// Listens if the editor that owned the socket has exited since.
+    pub fn retry(&mut self) {
+        if self.listener.is_none() {
+            self.listener = Listener::bind(&self.path, log::Level::Debug);
+            if self.listener.is_some() {
+                log::info!(
+                    "listening on {} after its owner exited",
+                    self.path.display()
+                );
+            }
+        }
+    }
+
+    /// The next request, or never if there is no socket.
+    pub async fn next(socket: &mut Option<Self>) -> Option<Request> {
+        match socket.as_mut().and_then(|socket| socket.listener.as_mut()) {
+            Some(listener) => listener.requests.recv().await,
+            None => std::future::pending().await,
+        }
+    }
+}
+
+/// A bound socket. Dropping it removes the socket file unless another editor replaced it.
+struct Listener {
+    path: PathBuf,
+    /// Device and inode of the socket file.
+    file: (u64, u64),
+    requests: mpsc::UnboundedReceiver<Request>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Listener {
+    #[cfg(unix)]
+    fn file_id(path: &Path) -> Option<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = std::fs::symlink_metadata(path).ok()?;
+        Some((metadata.dev(), metadata.ino()))
+    }
+
+    /// Binds `path` unless another live editor listens on it, logging failures at `level`.
+    #[cfg(unix)]
+    fn bind(path: &Path, level: log::Level) -> Option<Self> {
         use std::os::unix::fs::DirBuilderExt;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::UnixListener;
 
-        let path = Self::path()?;
         if path.exists() {
-            if std::os::unix::net::UnixStream::connect(&path).is_ok() {
-                log::info!("another editor listens on {}", path.display());
+            if std::os::unix::net::UnixStream::connect(path).is_ok() {
+                log::log!(
+                    level.max(log::Level::Info),
+                    "another editor listens on {}",
+                    path.display()
+                );
                 return None;
             }
-            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(path);
         }
         if let Some(dir) = path.parent() {
             let _ = std::fs::DirBuilder::new()
@@ -60,16 +117,17 @@ impl CommandSocket {
                 .mode(0o700)
                 .create(dir);
         }
-        let listener = match UnixListener::bind(&path) {
+        let listener = match UnixListener::bind(path) {
             Ok(listener) => listener,
             Err(err) => {
-                log::warn!("failed to listen on {}: {err}", path.display());
+                log::log!(level, "failed to listen on {}: {err}", path.display());
                 return None;
             }
         };
+        let file = Self::file_id(path)?;
 
         let (tx, requests) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             loop {
                 let stream = match listener.accept().await {
                     Ok((stream, _)) => stream,
@@ -101,25 +159,27 @@ impl CommandSocket {
                 });
             }
         });
-        Some(Self { path, requests })
+        Some(Self {
+            path: path.to_owned(),
+            file,
+            requests,
+            task,
+        })
     }
 
     #[cfg(not(unix))]
-    pub fn bind() -> Option<Self> {
+    fn bind(_path: &Path, _level: log::Level) -> Option<Self> {
         None
-    }
-
-    /// The next request, or never if there is no socket.
-    pub async fn next(socket: &mut Option<Self>) -> Option<Request> {
-        match socket {
-            Some(socket) => socket.requests.recv().await,
-            None => std::future::pending().await,
-        }
     }
 }
 
-impl Drop for CommandSocket {
+impl Drop for Listener {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        self.task.abort();
+        // A newer editor may have bound the path after this one stopped answering.
+        #[cfg(unix)]
+        if Self::file_id(&self.path) == Some(self.file) {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }

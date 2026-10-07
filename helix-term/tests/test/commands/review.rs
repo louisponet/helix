@@ -1422,6 +1422,60 @@ async fn command_socket_runs_typed_commands_with_one_reply_per_line() -> anyhow:
     Ok(())
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn command_socket_is_taken_over_when_free_and_left_to_a_successor() -> anyhow::Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    let repo = Repo::new("old\n", "old\n", "old\n");
+    let _cwd = Cwd::enter(repo.dir.path());
+    let socket = repo.dir.path().join("helix.sock");
+    let owner = UnixListener::bind(&socket)?;
+    std::env::set_var("HELIX_COMMAND_SOCKET", &socket);
+    let app = repo.app();
+    std::env::remove_var("HELIX_COMMAND_SOCKET");
+    let mut app = app?;
+
+    // The live owner keeps the socket: connections still reach it.
+    let _probe = UnixStream::connect(&socket)?;
+    owner.set_nonblocking(true)?;
+    owner.accept()?;
+    // The owner exits without removing its file, like a crashed editor.
+    drop(owner);
+    // A key re-arms the idle timer; an idle wait with nothing pending never returns once it
+    // has fired. The timeout retries binding before `send_keys` returns.
+    send_keys(&mut app, "<esc>").await?;
+
+    let path = socket.clone();
+    let client = std::thread::spawn(move || -> std::io::Result<String> {
+        let mut stream = UnixStream::connect(path)?;
+        stream.write_all(b"review-close\n")?;
+        let mut reply = String::new();
+        BufReader::new(stream).read_line(&mut reply)?;
+        Ok(reply)
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !client.is_finished() {
+            run_event_loop_until_idle(&mut app).await;
+        }
+    })
+    .await?;
+    let reply = client.join().unwrap()?;
+    assert_eq!(reply, "error 'review-close': not reviewing this buffer\n");
+
+    // A newer editor replaces the socket before this one exits.
+    fs::remove_file(&socket)?;
+    let successor = UnixListener::bind(&socket)?;
+    assert!(app.close().await.is_empty());
+    drop(app);
+    assert!(socket.exists());
+    let _probe = UnixStream::connect(&socket)?;
+    successor.set_nonblocking(true)?;
+    successor.accept()?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn handoff_exports_unmodified_reviews_on_write_and_suspends_auto_save() -> anyhow::Result<()>
 {
