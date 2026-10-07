@@ -223,6 +223,29 @@ impl Review {
         &self.baseline
     }
 
+    /// The status shown when the review starts.
+    pub fn summary(&self) -> String {
+        if self.hunks.is_empty() {
+            return format!("Reviewing against the {}: no changes", self.baseline);
+        }
+        let plural = |count: usize, noun: &str| match count {
+            1 => format!("1 {noun}"),
+            _ => format!("{count} {noun}s"),
+        };
+        if self.blocks.is_empty() {
+            return format!(
+                "Reviewing against the {}: {}, no old text",
+                self.baseline,
+                plural(self.hunks.len(), "added hunk")
+            );
+        }
+        format!(
+            "Reviewing against the {}: {} of old text, :review-old to inspect them",
+            self.baseline,
+            plural(self.blocks.len(), "block")
+        )
+    }
+
     /// All old blocks, ordered by their position in both the snapshot and the document.
     pub fn blocks(&self) -> &[OldBlock] {
         &self.blocks

@@ -79,11 +79,7 @@ fn start_review(cx: &mut compositor::Context, revision: Option<&str>) -> anyhow:
     let doc = doc_mut!(cx.editor);
     review.update(doc.text());
     ensure!(!review.is_suspended(), Review::LIMIT_MESSAGE);
-    let status = format!(
-        "Reviewing against the {}: {} block(s) of old text, :review-old to inspect them",
-        review.baseline(),
-        review.blocks().len()
-    );
+    let status = review.summary();
     doc.review = Some(review);
     let scrolloff = cx.editor.config().scrolloff;
     let (view, doc) = current!(cx.editor);

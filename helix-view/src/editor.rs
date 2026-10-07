@@ -2160,7 +2160,7 @@ impl Editor {
     }
 
     /// Starts reviewing the unmodified, unreviewed document `doc_id` against the review baseline
-    /// if it is in the workspace.
+    /// if it is in the workspace, and shows the review summary.
     pub fn start_baseline_review(&mut self, doc_id: DocumentId) -> anyhow::Result<()> {
         let (Some(commit), Some(doc)) = (&self.review_baseline, self.documents.get_mut(&doc_id))
         else {
@@ -2177,7 +2177,10 @@ impl Editor {
             .workspace_trust
             .query(doc.workspace_root(), TrustQuery::Git)
             .is_trusted();
-        doc.review = Some(doc.load_review(&self.diff_providers, trust_full, Some(commit))?);
+        let review = doc.load_review(&self.diff_providers, trust_full, Some(commit))?;
+        let status = review.summary();
+        doc.review = Some(review);
+        self.set_status(status);
         Ok(())
     }
 

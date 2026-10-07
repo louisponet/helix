@@ -1562,3 +1562,72 @@ async fn review_files_picks_files_changed_since_the_baseline() -> anyhow::Result
     .await?;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn buffers_reviewed_against_the_baseline_show_a_summary() -> anyhow::Result<()> {
+    let repo = Repo::new("old\n", "old\n", "old\n");
+    let dir = repo.dir.path();
+    fs::write(dir.join("same.txt"), "same\n")?;
+    fs::write(dir.join("changed.txt"), "a\nb\nc\n")?;
+    fs::write(dir.join("grown.txt"), "a\nb\n")?;
+    git_ok(dir, &["add", "same.txt", "changed.txt", "grown.txt"]);
+    git_ok(dir, &["commit", "-m", "more"]);
+    fs::write(dir.join("changed.txt"), "a\nB\n")?;
+    fs::write(dir.join("grown.txt"), "0\na\nx\nb\n")?;
+    let commit = git_ok(dir, &["rev-parse", "HEAD"]);
+    let short = commit[..8].to_owned();
+    let _cwd = Cwd::enter(dir);
+    let status = |app: &Application| {
+        let (status, severity) = app.editor.get_status().expect("expected a status");
+        assert_ne!(*severity, Severity::Error, "{status}");
+        status.to_string()
+    };
+    let changed = format!(
+        "Reviewing against the git commit {short}: 1 block of old text, :review-old to inspect them"
+    );
+
+    test_key_sequences(
+        &mut repo.app()?,
+        vec![
+            (
+                Some(":review-baseline HEAD<ret>"),
+                Some(&|app| assert_eq!(status(app), format!("Reviewing 1 buffer against {short}"))),
+            ),
+            (
+                Some(":o same.txt<ret>"),
+                Some(&|app| {
+                    assert!(doc!(app.editor).review.is_some());
+                    assert_eq!(
+                        status(app),
+                        format!("Reviewing against the git commit {short}: no changes")
+                    );
+                }),
+            ),
+            (
+                Some(":o grown.txt<ret>"),
+                Some(&|app| {
+                    assert_eq!(
+                        status(app),
+                        format!(
+                            "Reviewing against the git commit {short}: 2 added hunks, no old text"
+                        )
+                    );
+                }),
+            ),
+            (
+                Some(":o changed.txt<ret>"),
+                Some(&|app| assert_eq!(status(app), changed)),
+            ),
+            (
+                Some(":review-close<ret>:reload<ret>"),
+                Some(&|app| {
+                    assert!(doc!(app.editor).review.is_some());
+                    assert_eq!(status(app), changed);
+                }),
+            ),
+        ],
+        false,
+    )
+    .await?;
+    Ok(())
+}

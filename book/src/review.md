@@ -158,7 +158,8 @@ so only processes of the same user can connect; do not point
 for the editor. Every unmodified buffer in the workspace is reloaded from disk
 and reviewed against it; buffers with unsaved changes are skipped and picked up
 on their next write, and buffers opened or reloaded later are reviewed
-automatically. Sending the same commit again refreshes all unmodified reviewed
+automatically, showing the same status as `:review` (or `no changes` when the
+buffer matches the baseline). Sending the same commit again refreshes all unmodified reviewed
 buffers, keeping any baseline chosen per buffer with `:review`; a different
 commit switches all of them.
 
