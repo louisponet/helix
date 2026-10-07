@@ -2,7 +2,7 @@ use helix_core::doc_formatter::{DocumentFormatter, FormattedGrapheme, TextFormat
 use helix_core::line_ending::line_end_char_index;
 use helix_core::text_annotations::TextAnnotations;
 use helix_core::{Position, RopeSlice};
-use helix_view::graphics::Modifier;
+use helix_view::graphics::{Modifier, Rect};
 use helix_view::review::{OldFocus, Review};
 use helix_view::theme::Style;
 use helix_view::Theme;
@@ -64,6 +64,7 @@ impl<'a> ReviewDecoration<'a> {
         if row + height <= visible_rows.start || row >= visible_rows.end {
             return height;
         }
+        self.fill_rows(renderer, row, height);
         let snapshot = self.review.snapshot().slice(..);
         let line_start = snapshot.line_to_char(line);
         let has_line_ending =
@@ -97,6 +98,23 @@ impl<'a> ReviewDecoration<'a> {
             );
         }
         height
+    }
+
+    /// Paints the visible part of `height` virtual rows starting at `row` with the old style,
+    /// so its background covers the whole row rather than only the drawn graphemes.
+    fn fill_rows(&self, renderer: &mut TextRenderer, row: usize, height: usize) {
+        let visible = renderer.offset.row..renderer.offset.row + renderer.viewport.height as usize;
+        let top = row.max(visible.start);
+        let bottom = (row + height).min(visible.end);
+        if top < bottom {
+            let area = Rect::new(
+                renderer.viewport.x,
+                top as u16,
+                renderer.viewport.width,
+                (bottom - top) as u16,
+            );
+            renderer.set_style(area, self.old);
+        }
     }
 
     fn grapheme_style(
@@ -157,6 +175,7 @@ impl Decoration for ReviewDecoration<'_> {
         for block in self.review.blocks_at(line) {
             if let Some(label) = block.label() {
                 if is_visible(renderer, row) {
+                    self.fill_rows(renderer, row, 1);
                     renderer.set_string_truncated(
                         renderer.viewport.x,
                         row as u16,

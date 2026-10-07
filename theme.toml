@@ -40,6 +40,8 @@ tabstop = { modifiers = ["italic"], bg = "bossanova" }
 "diff.plus" = "#35bf86"
 "diff.minus" = "#f22c86"
 "diff.delta" = "#6f44f0"
+"diff.plus.review" = { bg = "#2f4d4a" }
+"diff.minus.review" = { fg = "#f22c86", bg = "#5e2550" }
 
 # TODO: differentiate doc comment
 # concat (ERROR) @error.syntax and "MISSING ;" selectors for errors

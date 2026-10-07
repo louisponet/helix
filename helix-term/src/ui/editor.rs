@@ -102,6 +102,20 @@ impl EditorView {
             decorations.add_decoration(Self::cursorline(doc, view, theme));
         }
 
+        if let Some(review) = &doc.review {
+            let style = theme.get("diff.plus.review");
+            let changed: Vec<_> = review.changed_lines().collect();
+            decorations.add_decoration(move |renderer: &mut TextRenderer, pos: LinePos| {
+                let next = changed.partition_point(|lines| lines.end <= pos.doc_line);
+                if changed
+                    .get(next)
+                    .is_some_and(|lines| lines.start <= pos.doc_line)
+                {
+                    renderer.set_style(Rect::new(inner.x, pos.visual_line, inner.width, 1), style);
+                }
+            });
+        }
+
         if is_focused && config.cursorcolumn && old_focus.is_none() {
             Self::highlight_cursorcolumn(doc, view, surface, theme, inner, &text_annotations);
         }
