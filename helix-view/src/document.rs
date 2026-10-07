@@ -208,8 +208,12 @@ pub struct Document {
     pub(crate) language_servers: HashMap<LanguageServerName, Arc<Client>>,
 
     diff_handle: Option<DiffHandle>,
+    /// The diff base from the diff providers. While a review is active, the differ compares
+    /// against its snapshot instead.
+    diff_base: Option<Rope>,
     version_control_head: Option<Arc<ArcSwap<Box<str>>>>,
-    /// Inline review against an index or commit snapshot, see [`Document::load_review`].
+    /// Inline review against an index or commit snapshot, see [`Document::load_review`]. Start
+    /// and close it with [`Document::set_review`] and [`Document::close_review`].
     pub review: Option<Review>,
 
     // when document was used for most-recent-used buffer picker
@@ -763,6 +767,7 @@ impl Document {
             modified_since_accessed: false,
             language_servers: HashMap::new(),
             diff_handle: None,
+            diff_base: None,
             config,
             version_control_head: None,
             review: None,
@@ -1320,10 +1325,7 @@ impl Document {
         self.pickup_last_saved_time();
         self.detect_indent_and_line_ending();
 
-        match provider_registry.get_diff_base(&path, trust_full) {
-            Some(diff_base) => self.set_diff_base(diff_base),
-            None => self.diff_handle = None,
-        }
+        self.refresh_diff_base(provider_registry, trust_full);
 
         self.version_control_head = provider_registry.get_current_head_name(&path, trust_full);
 
@@ -1543,7 +1545,11 @@ impl Document {
             diff_handle.update_document(self.text.clone(), false);
         }
         if let Some(review) = &mut self.review {
+            let active = !review.is_suspended();
             review.update(&self.text);
+            if active && review.is_suspended() {
+                self.update_differ();
+            }
         }
 
         // map diagnostics over changes too
@@ -2005,16 +2011,65 @@ impl Document {
         self.diff_handle.as_ref()
     }
 
-    /// Intialize/updates the differ for this document with a new base.
+    /// Sets the diff base from the diff providers. While a review is active, the differ keeps
+    /// comparing against the review snapshot.
     pub fn set_diff_base(&mut self, diff_base: Vec<u8>) {
-        if let Ok((diff_base, ..)) = from_reader(&mut diff_base.as_slice(), Some(self.encoding)) {
-            if let Some(differ) = &self.diff_handle {
-                differ.update_diff_base(diff_base);
-                return;
+        self.diff_base = from_reader(&mut diff_base.as_slice(), Some(self.encoding))
+            .ok()
+            .map(|(diff_base, ..)| diff_base);
+        self.update_differ();
+    }
+
+    /// Rereads the diff base from the diff providers.
+    pub fn refresh_diff_base(
+        &mut self,
+        provider_registry: &DiffProviderRegistry,
+        trust_full: bool,
+    ) {
+        match self
+            .path()
+            .and_then(|path| provider_registry.get_diff_base(path, trust_full))
+        {
+            Some(diff_base) => self.set_diff_base(diff_base),
+            None => {
+                self.diff_base = None;
+                self.update_differ();
             }
-            self.diff_handle = Some(DiffHandle::new(diff_base, self.text.clone()))
-        } else {
-            self.diff_handle = None;
+        }
+    }
+
+    /// Starts or replaces the review. The differ compares against its snapshot until the review
+    /// is closed or suspended.
+    pub fn set_review(&mut self, review: Review) {
+        self.review = Some(review);
+        self.update_differ();
+    }
+
+    /// Ends the review and restores the diff base from the diff providers. Returns the review.
+    pub fn close_review(
+        &mut self,
+        provider_registry: &DiffProviderRegistry,
+        trust_full: bool,
+    ) -> Option<Review> {
+        let review = self.review.take()?;
+        self.refresh_diff_base(provider_registry, trust_full);
+        Some(review)
+    }
+
+    /// Points the differ at the active review's snapshot, or else at the diff base.
+    fn update_differ(&mut self) {
+        let diff_base = match &self.review {
+            Some(review) if !review.is_suspended() => Some(review.snapshot().clone()),
+            _ => self.diff_base.clone(),
+        };
+        match (diff_base, &self.diff_handle) {
+            (Some(diff_base), Some(differ)) => {
+                differ.update_diff_base(diff_base);
+            }
+            (Some(diff_base), None) => {
+                self.diff_handle = Some(DiffHandle::new(diff_base, self.text.clone()))
+            }
+            (None, _) => self.diff_handle = None,
         }
     }
 

@@ -14,8 +14,11 @@ shades the whole row and leaves syntax colours in place, with the cursorline dra
 on top; themes without one fall back to the `diff.plus` and `diff.minus`
 foreground colours. The buffer itself is the ordinary
 document: editing, undo, saving, syntax highlighting and language servers work
-as usual and never see the old lines. The diff gutter keeps comparing against
-`HEAD`.
+as usual and never see the old lines. While the review is active, the diff
+gutter and the change motions (`]g`, `[g`, `]G`, `[G`) compare against the
+review baseline instead of the git index, so they follow the review even after
+its changes are committed. Closing the review, `:review-baseline clear` or
+hitting the [size limits](#size-limits) restores the ordinary diff.
 
 Old lines are shown directly above the lines that replaced them. Lines removed
 from the very start of the file cannot be shown above the first line, so they

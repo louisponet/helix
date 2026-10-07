@@ -81,7 +81,7 @@ fn start_review(cx: &mut compositor::Context, revision: Option<&str>) -> anyhow:
     review.update(doc.text());
     ensure!(!review.is_suspended(), Review::LIMIT_MESSAGE);
     let status = review.summary();
-    doc.review = Some(review);
+    doc.set_review(review);
     let scrolloff = cx.editor.config().scrolloff;
     let (view, doc) = current!(cx.editor);
     view.ensure_cursor_in_view(doc, scrolloff);
@@ -142,8 +142,12 @@ pub(super) fn review_close(
     }
 
     let scrolloff = cx.editor.config().scrolloff;
+    let trust_full = doc_trust_full(cx.editor);
     let (view, doc) = current!(cx.editor);
-    if doc.review.take().is_none() {
+    if doc
+        .close_review(&cx.editor.diff_providers, trust_full)
+        .is_none()
+    {
         bail!("not reviewing this buffer");
     }
     view.ensure_cursor_in_view(doc, scrolloff);
@@ -355,8 +359,15 @@ pub(super) fn review_baseline(
 
     if &args[0] == "clear" {
         cx.editor.review_baseline = None;
-        for doc in cx.editor.documents_mut() {
-            doc.review = None;
+        let doc_ids: Vec<_> = cx.editor.documents().map(Document::id).collect();
+        for doc_id in doc_ids {
+            let doc = doc_mut!(cx.editor, &doc_id);
+            let trust_full = cx
+                .editor
+                .workspace_trust
+                .query(doc.workspace_root(), TrustQuery::Git)
+                .is_trusted();
+            doc.close_review(&cx.editor.diff_providers, trust_full);
         }
         let scrolloff = cx.editor.config().scrolloff;
         let (view, doc) = current!(cx.editor);
@@ -402,11 +413,9 @@ pub(super) fn review_baseline(
                 .workspace_trust
                 .query(doc.workspace_root(), TrustQuery::Git)
                 .is_trusted();
-            doc.review = Some(doc.load_review(
-                &cx.editor.diff_providers,
-                trust_full,
-                revision.as_deref(),
-            )?);
+            let review =
+                doc.load_review(&cx.editor.diff_providers, trust_full, revision.as_deref())?;
+            doc.set_review(review);
             Ok(())
         });
         match result {

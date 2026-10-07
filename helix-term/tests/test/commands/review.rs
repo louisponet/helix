@@ -1679,3 +1679,48 @@ async fn review_send_exports_the_handoff_batch_without_writing() -> anyhow::Resu
     send_keys(&mut app, ":q!<ret>").await?;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn change_motions_follow_the_review_baseline_until_it_closes() -> anyhow::Result<()> {
+    let repo = Repo::new("a\nb\nc\nd\ne\n", "a\nb\nc\nd\ne\n", "a\nb\nc\nd\ne\n");
+    repo.write("a\nb\nC\nd\ne\n");
+    repo.stage();
+    git_ok(repo.dir.path(), &["commit", "-m", "agent"]);
+    let mut app = repo.app()?;
+    let cursor_line = |app: &Application| {
+        let (view, doc) = current_ref!(app.editor);
+        doc.selection(view.id)
+            .primary()
+            .cursor_line(doc.text().slice(..))
+    };
+    // The differ runs in the background; waits until it reports `hunks` hunks.
+    let wait_for_hunks = |app: &Application, hunks: u32| {
+        let doc = doc!(app.editor);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while doc.diff_handle().map_or(0, |diff| diff.load().len()) != hunks {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "expected {hunks} hunks"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    };
+
+    // The index is clean, so the ordinary diff has nothing to visit.
+    wait_for_hunks(&app, 0);
+    send_keys(&mut app, "]g").await?;
+    assert_eq!(cursor_line(&app), 0);
+
+    send_keys(&mut app, ":review HEAD~1<ret>").await?;
+    assert_status_not_error(&app.editor);
+    wait_for_hunks(&app, 1);
+    send_keys(&mut app, "]g").await?;
+    assert_eq!(cursor_line(&app), 2);
+    assert_eq!(old_focus(&app), None);
+
+    send_keys(&mut app, ":review-close<ret>").await?;
+    wait_for_hunks(&app, 0);
+    send_keys(&mut app, "gg]g").await?;
+    assert_eq!(cursor_line(&app), 0);
+    Ok(())
+}

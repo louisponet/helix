@@ -2179,7 +2179,7 @@ impl Editor {
             .is_trusted();
         let review = doc.load_review(&self.diff_providers, trust_full, Some(commit))?;
         let status = review.summary();
-        doc.review = Some(review);
+        doc.set_review(review);
         self.set_status(status);
         Ok(())
     }
