@@ -5,12 +5,14 @@ use crate::{
     editor::{GutterConfig, GutterType},
     graphics::Rect,
     handlers::diagnostics::DiagnosticsHandler,
+    review::ReviewLines,
     Align, Document, DocumentId, Theme, ViewId,
 };
 
 use helix_core::{
     char_idx_at_visual_offset,
     doc_formatter::TextFormat,
+    line_ending::line_end_char_index,
     text_annotations::TextAnnotations,
     visual_offset_from_anchor, visual_offset_from_block, Position, RopeSlice, Selection,
     Transaction,
@@ -351,6 +353,14 @@ impl View {
     }
 
     pub fn ensure_cursor_in_view(&self, doc: &mut Document, scrolloff: usize) {
+        if doc
+            .review
+            .as_ref()
+            .is_some_and(|review| review.focus(self.id).is_some())
+        {
+            self.ensure_review_focus_in_view(doc, scrolloff);
+            return;
+        }
         if let Some(offset) = self.offset_coords_to_in_view_center::<false>(doc, scrolloff) {
             doc.set_view_offset(self.id, offset);
         }
@@ -362,6 +372,77 @@ impl View {
         } else {
             align_view(doc, self, Align::Center);
         }
+    }
+
+    /// Scrolls so that the cursor in the focused old text of a review is visible.
+    pub fn ensure_review_focus_in_view(&self, doc: &mut Document, scrolloff: usize) {
+        let viewport = self.inner_area(doc);
+        let text_fmt = doc.text_format(viewport.width, None);
+        let Some((line, focus_pos)) = doc
+            .review
+            .as_ref()
+            .and_then(|review| review.focus_position(self.id, &text_fmt))
+        else {
+            return;
+        };
+        let text = doc.text().slice(..);
+        let annotations = self.text_annotations(doc, None);
+        let mut offset = doc.view_offset(self.id);
+        let height = viewport.height as usize;
+        let scrolloff_top = scrolloff.min(height.saturating_sub(1) / 2);
+        let scrolloff_bottom = scrolloff.min(height / 2);
+        let line_end = line_end_char_index(&text, line);
+
+        // Old lines start on the row after the last row of `line`.
+        let row = visual_offset_from_anchor(
+            text,
+            offset.anchor,
+            line_end,
+            &text_fmt,
+            &annotations,
+            offset.vertical_offset + height,
+        )
+        .map(|(pos, _)| pos.row + 1 + focus_pos.row);
+        let target_row = match row {
+            Ok(row) if row < offset.vertical_offset + scrolloff_top => Some(scrolloff_top),
+            Ok(row) if row + scrolloff_bottom >= offset.vertical_offset + height => {
+                Some(height.saturating_sub(1 + scrolloff_bottom))
+            }
+            Ok(_) => None,
+            Err(PosBeforeAnchorRow) => Some(scrolloff_top),
+            Err(PosAfterMaxRow) => Some(height.saturating_sub(1 + scrolloff_bottom)),
+        };
+        if let Some(target_row) = target_row {
+            let line_start = text.line_to_char(line);
+            let rows_from_line_start =
+                visual_offset_from_block(text, line_start, line_end, &text_fmt, &annotations)
+                    .0
+                    .row
+                    + 1
+                    + focus_pos.row;
+            (offset.anchor, offset.vertical_offset) =
+                match rows_from_line_start.checked_sub(target_row) {
+                    Some(vertical_offset) => (line_start, vertical_offset),
+                    None => char_idx_at_visual_offset(
+                        text,
+                        line_start,
+                        -((target_row - rows_from_line_start) as isize),
+                        0,
+                        &text_fmt,
+                        &annotations,
+                    ),
+                };
+        }
+        if !text_fmt.soft_wrap {
+            let width = viewport.width as usize;
+            if focus_pos.col < offset.horizontal_offset {
+                offset.horizontal_offset = focus_pos.col;
+            } else if focus_pos.col >= offset.horizontal_offset + width {
+                offset.horizontal_offset = focus_pos.col + 1 - width;
+            }
+        }
+        drop(annotations);
+        doc.set_view_offset(self.id, offset);
     }
 
     pub fn is_cursor_in_view(&mut self, doc: &Document, scrolloff: usize) -> bool {
@@ -510,6 +591,14 @@ impl View {
         }
 
         let width = self.inner_width(doc);
+        // Added before other line annotations so old lines directly follow their line.
+        if let Some(review) = &doc.review {
+            text_annotations.add_line_annotation(ReviewLines::new(
+                review,
+                doc.text().slice(..),
+                doc.text_format(width, None),
+            ));
+        }
         let enable_cursor_line = self
             .diagnostics_handler
             .show_cursorline_diagnostics(doc, self.id);

@@ -280,8 +280,10 @@ See also [#2380]
 - `diff` - version control changes
   - `plus` - additions
     - `gutter` - gutter indicator
+    - `review` - lines changed since the selected baseline during [`:review`](./review.md)
   - `minus` - deletions
     - `gutter` - gutter indicator
+    - `review` - old baseline lines shown inline during [`:review`](./review.md)
   - `delta` - modifications
     - `moved` - renamed or moved files/changes
     - `conflict` - merge conflicts

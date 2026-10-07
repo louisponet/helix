@@ -1,0 +1,178 @@
+use helix_core::doc_formatter::{DocumentFormatter, FormattedGrapheme, TextFormat};
+use helix_core::line_ending::line_end_char_index;
+use helix_core::text_annotations::TextAnnotations;
+use helix_core::{Position, RopeSlice};
+use helix_view::graphics::Modifier;
+use helix_view::review::{OldFocus, Review};
+use helix_view::theme::Style;
+use helix_view::Theme;
+
+use crate::ui::document::{LinePos, TextRenderer};
+use crate::ui::text_decorations::Decoration;
+
+/// Draws the old lines of a review into the virtual rows reserved below document lines by
+/// `helix_view::review::ReviewLines`.
+pub struct ReviewDecoration<'a> {
+    review: &'a Review,
+    text: RopeSlice<'a>,
+    text_fmt: TextFormat,
+    focus: Option<OldFocus>,
+    /// Gutter column for the removed-line marker.
+    marker_col: Option<u16>,
+    old: Style,
+    selection: Style,
+    cursor: Style,
+    next_block: usize,
+    /// Document line whose end was just rendered and that has old lines below it.
+    pending_line: Option<usize>,
+}
+
+impl<'a> ReviewDecoration<'a> {
+    pub fn new(
+        review: &'a Review,
+        text: RopeSlice<'a>,
+        text_fmt: TextFormat,
+        focus: Option<OldFocus>,
+        marker_col: Option<u16>,
+        theme: &Theme,
+    ) -> Self {
+        ReviewDecoration {
+            review,
+            text,
+            text_fmt,
+            focus,
+            marker_col,
+            old: theme.get("diff.minus.review"),
+            selection: theme.get("ui.selection.primary"),
+            cursor: theme.get("ui.cursor.primary"),
+            next_block: 0,
+            pending_line: None,
+        }
+    }
+
+    fn anchor_char(&self, block: usize) -> usize {
+        self.review.blocks().get(block).map_or(usize::MAX, |block| {
+            line_end_char_index(&self.text, block.anchor_line)
+        })
+    }
+
+    /// Draws snapshot line `line` starting at `row` and returns the number of rows it took.
+    fn draw_old_line(&self, renderer: &mut TextRenderer, row: usize, line: usize) -> usize {
+        let height = self.review.old_line_height(line, &self.text_fmt);
+        let visible_rows =
+            renderer.offset.row..renderer.offset.row + renderer.viewport.height as usize;
+        if row + height <= visible_rows.start || row >= visible_rows.end {
+            return height;
+        }
+        let snapshot = self.review.snapshot().slice(..);
+        let line_start = snapshot.line_to_char(line);
+        let has_line_ending =
+            line_end_char_index(&snapshot, line) < snapshot.line_to_char(line + 1);
+        if let Some(col) = self.marker_col.filter(|_| is_visible(renderer, row)) {
+            renderer.set_string(col, row as u16, "-", self.old);
+        }
+
+        let annotations = TextAnnotations::default();
+        let formatter = DocumentFormatter::new_at_prev_checkpoint(
+            self.review.old_line(line),
+            &self.text_fmt,
+            &annotations,
+            0,
+        );
+        for grapheme in formatter {
+            let style = self.grapheme_style(&grapheme, line_start + grapheme.char_idx, snapshot);
+            // The end of the line stands for its line ending, which is only drawn when focused.
+            if grapheme.source.is_eof() && !(has_line_ending && style != self.old) {
+                continue;
+            }
+            if !renderer.column_in_bounds(grapheme.visual_pos.col, grapheme.width()) {
+                continue;
+            }
+            let col = grapheme.visual_pos.col - renderer.offset.col;
+            renderer.draw_decoration_grapheme(
+                grapheme.raw,
+                style,
+                (row + grapheme.visual_pos.row) as u16,
+                col as u16,
+            );
+        }
+        height
+    }
+
+    fn grapheme_style(
+        &self,
+        grapheme: &FormattedGrapheme,
+        char_idx: usize,
+        snapshot: RopeSlice,
+    ) -> Style {
+        let Some(focus) = self.focus.filter(|_| !grapheme.is_virtual()) else {
+            return self.old;
+        };
+        if focus.range.cursor(snapshot) == char_idx {
+            self.old.patch(self.cursor)
+        } else if focus.range.from() <= char_idx && char_idx < focus.range.to() {
+            self.old.patch(self.selection)
+        } else {
+            self.old
+        }
+    }
+}
+
+fn is_visible(renderer: &TextRenderer, row: usize) -> bool {
+    (renderer.offset.row..renderer.offset.row + renderer.viewport.height as usize).contains(&row)
+}
+
+impl Decoration for ReviewDecoration<'_> {
+    fn reset_pos(&mut self, pos: usize) -> usize {
+        self.pending_line = None;
+        self.next_block = self
+            .review
+            .blocks()
+            .partition_point(|block| line_end_char_index(&self.text, block.anchor_line) < pos);
+        self.anchor_char(self.next_block)
+    }
+
+    fn decorate_grapheme(
+        &mut self,
+        _renderer: &mut TextRenderer,
+        _grapheme: &FormattedGrapheme,
+    ) -> usize {
+        let line = self.review.blocks()[self.next_block].anchor_line;
+        self.pending_line = Some(line);
+        self.next_block += self.review.blocks_at(line).len();
+        self.anchor_char(self.next_block)
+    }
+
+    fn render_virt_lines(
+        &mut self,
+        renderer: &mut TextRenderer,
+        pos: LinePos,
+        virt_off: Position,
+    ) -> Position {
+        let Some(line) = self.pending_line.take() else {
+            return Position::new(0, 0);
+        };
+        let first_row = pos.visual_line as usize + virt_off.row;
+        let mut row = first_row;
+        for block in self.review.blocks_at(line) {
+            if let Some(label) = block.label() {
+                if is_visible(renderer, row) {
+                    renderer.set_string_truncated(
+                        renderer.viewport.x,
+                        row as u16,
+                        &label,
+                        renderer.viewport.width as usize,
+                        |_| self.old.add_modifier(Modifier::ITALIC),
+                        true,
+                        false,
+                    );
+                }
+                row += 1;
+            }
+            for old_line in block.old.clone() {
+                row += self.draw_old_line(renderer, row, old_line);
+            }
+        }
+        Position::new(row - first_row, 0)
+    }
+}

@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use arc_swap::ArcSwap;
 use gix::filter::plumbing::driver::apply::Delay;
+use gix::index::entry::{Flags, Stage};
 use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use gix::status::{
 };
 use gix::{Commit, ObjectId, Repository, ThreadSafeRepository};
 
-use crate::FileChange;
+use crate::{CommitBase, CommitInfo, FileChange};
 
 #[cfg(test)]
 mod test;
@@ -39,10 +40,89 @@ pub fn get_diff_base(file: &Path, trust_full: bool) -> Result<Vec<u8>> {
         .context("failed to open git repo")?
         .to_thread_local();
     let head = repo.head_commit()?;
-    let file_oid = find_file_in_commit(&repo, &head, &file)?;
+    let file_oid = find_file_in_commit(&repo, &head, &file)?.context("file is untracked")?;
 
     let file_object = repo.find_object(file_oid)?;
     let data = file_object.detach().data;
+    convert_to_worktree(&repo, &file, data)
+}
+
+/// Returns the content of `file` staged in the git index (converted to its worktree form) and
+/// the id of the index blob.
+pub fn get_index_base(file: &Path, trust_full: bool) -> Result<(Vec<u8>, ObjectId)> {
+    debug_assert!(file.is_absolute());
+    let file = gix::path::realpath(file).context("resolve symlinks")?;
+
+    let repo = open_repo(get_repo_dir(&file)?, trust_full)
+        .context("failed to open git repo")?
+        .to_thread_local();
+    let work_dir = repo.workdir().context("repo has no worktree")?;
+    let rela_path = gix::path::to_unix_separators_on_windows(gix::path::try_into_bstr(
+        file.strip_prefix(work_dir)?,
+    )?);
+    let index = repo.index_or_empty()?;
+    let entries = index
+        .entry_range(rela_path.as_ref())
+        .map_or(&[][..], |range| &index.entries()[range]);
+    let entry = match entries {
+        [] => bail!("{} is not in the git index", file.display()),
+        [entry] if entry.stage() == Stage::Unconflicted => entry,
+        _ => bail!("{} has unmerged entries in the git index", file.display()),
+    };
+    match entry.mode.to_tree_entry_mode().map(|mode| mode.kind()) {
+        Some(EntryKind::Blob | EntryKind::BlobExecutable) => (),
+        kind => bail!("index entry at {} is not a file: {kind:?}", file.display()),
+    }
+    // `git add --intent-to-add` stages the empty blob without writing it to the object database.
+    let data = if entry.flags.contains(Flags::INTENT_TO_ADD) || entry.id.is_empty_blob() {
+        Vec::new()
+    } else {
+        repo.find_object(entry.id)?.detach().data
+    };
+    Ok((convert_to_worktree(&repo, &file, data)?, entry.id))
+}
+
+pub fn get_commit_base(file: &Path, revision: &str, trust_full: bool) -> Result<CommitBase> {
+    let file = gix::path::realpath(file).context("resolve symlinks")?;
+    let repo = open_repo(get_repo_dir(&file)?, trust_full)?.to_thread_local();
+    let commit = repo
+        .rev_parse_single(revision)?
+        .object()?
+        .peel_to_commit()?;
+    let blob_id = find_file_in_commit(&repo, &commit, &file)?;
+    let data = match blob_id {
+        Some(id) => convert_to_worktree(&repo, &file, repo.find_object(id)?.detach().data)?,
+        None => Vec::new(),
+    };
+    Ok(CommitBase {
+        data,
+        commit_id: commit.id.to_hex().to_string(),
+        blob_id: blob_id.map(|id| id.to_hex().to_string()),
+    })
+}
+
+pub fn get_commit_history(file: &Path, trust_full: bool) -> Result<Vec<CommitInfo>> {
+    let file = gix::path::realpath(file).context("resolve symlinks")?;
+    let repo = open_repo(get_repo_dir(&file)?, trust_full)?.to_thread_local();
+    let walk = repo
+        .head_id()?
+        .ancestors()
+        .sorting(gix::revision::walk::Sorting::ByCommitTime(
+            gix::traverse::commit::simple::CommitTimeOrder::NewestFirst,
+        ))
+        .all()?;
+    walk.take(200)
+        .map(|entry| {
+            let commit = entry?.object()?;
+            Ok(CommitInfo {
+                id: commit.id.to_hex().to_string(),
+                summary: commit.message()?.summary().to_string(),
+            })
+        })
+        .collect()
+}
+
+fn convert_to_worktree(repo: &Repository, file: &Path, data: Vec<u8>) -> Result<Vec<u8>> {
     // Get the actual data that git would make out of the git object.
     // This will apply the user's git config or attributes like crlf conversions.
     //
@@ -220,19 +300,23 @@ fn status(repo: &Repository, f: impl Fn(Result<FileChange>) -> bool) -> Result<(
 }
 
 /// Finds the object that contains the contents of a file at a specific commit.
-fn find_file_in_commit(repo: &Repository, commit: &Commit, file: &Path) -> Result<ObjectId> {
+fn find_file_in_commit(
+    repo: &Repository,
+    commit: &Commit,
+    file: &Path,
+) -> Result<Option<ObjectId>> {
     let repo_dir = repo.workdir().context("repo has no worktree")?;
     let rel_path = file.strip_prefix(repo_dir)?;
     let tree = commit.tree()?;
-    let tree_entry = tree
-        .lookup_entry_by_path(rel_path)?
-        .context("file is untracked")?;
+    let Some(tree_entry) = tree.lookup_entry_by_path(rel_path)? else {
+        return Ok(None);
+    };
     match tree_entry.mode().kind() {
         // not a file, everything is new, do not show diff
         mode @ (EntryKind::Tree | EntryKind::Commit | EntryKind::Link) => {
             bail!("entry at {} is not a file but a {mode:?}", file.display())
         }
         // found a file
-        EntryKind::Blob | EntryKind::BlobExecutable => Ok(tree_entry.object_id()),
+        EntryKind::Blob | EntryKind::BlobExecutable => Ok(Some(tree_entry.object_id())),
     }
 }

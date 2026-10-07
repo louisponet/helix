@@ -87,6 +87,13 @@
 | `:pipe`, `:\|` | Pipe each selection to the shell command. |
 | `:pipe-to` | Pipe each selection to the shell command, ignoring output. |
 | `:run-shell-command`, `:sh`, `:!` | Run a shell command |
+| `:review` | Review the buffer against the git index, or a commit revision such as HEAD~1, showing old lines inline. |
+| `:review-commits` | Choose a commit baseline from the latest 200 commits reachable from HEAD, then review against the current buffer. |
+| `:review-old` | Focus the old text nearest the cursor. It can be selected, yanked and commented on but not edited; Esc returns. |
+| `:review-refresh` | Reload an unmodified reviewed buffer from disk and refresh its index baseline or retain its selected commit. |
+| `:review-comment` | Add a pending review comment on the primary selection, or on the selected old text. Use %% for a literal %. |
+| `:review-export` | Write pending review comments and reviewed files as JSON to a new file. Reviewed buffers must be written first. |
+| `:review-close` | Stop reviewing the buffer. Pending comments are kept for :review-export. |
 | `:reset-diff-change`, `:diffget`, `:diffg` | Reset the diff change at the cursor position. |
 | `:clear-register` | Clear given register. If no argument is provided, clear all registers. |
 | `:set-register` | Set contents of the given register. |

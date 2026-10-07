@@ -63,6 +63,18 @@ pub fn render(context: &mut RenderContext, viewport: Rect, surface: &mut Surface
 
     let config = context.editor.config();
 
+    if context
+        .doc
+        .review
+        .as_ref()
+        .is_some_and(|review| review.is_suspended())
+    {
+        context.parts.left.0.push(Span::styled(
+            "Review suspended (limit; :review-refresh) ",
+            context.editor.theme.get("error"),
+        ));
+    }
+
     for element_id in &config.statusline.left {
         let render = get_render_function(*element_id);
         (render)(context, |context, span| {

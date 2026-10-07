@@ -10,6 +10,7 @@ use crate::{
     info::Info,
     input::KeyEvent,
     register::Registers,
+    review::ReviewBatch,
     theme::{self, Theme},
     tree::{self, Tree},
     Document, DocumentId, View, ViewId,
@@ -1291,6 +1292,8 @@ pub struct Editor {
     pub language_servers: helix_lsp::Registry,
     pub diagnostics: Diagnostics,
     pub diff_providers: DiffProviderRegistry,
+    /// Review comments and reviewed files waiting for `:review-export`.
+    pub review_batch: ReviewBatch,
 
     pub debug_adapters: dap::registry::Registry,
     pub breakpoints: HashMap<PathBuf, Vec<Breakpoint>>,
@@ -1441,6 +1444,7 @@ impl Editor {
             language_servers,
             diagnostics: Diagnostics::new(),
             diff_providers: DiffProviderRegistry::default(),
+            review_batch: ReviewBatch::default(),
             debug_adapters: dap::registry::Registry::new(),
             breakpoints: HashMap::new(),
             syn_loader,

@@ -1585,7 +1585,11 @@ fn get_character_info(
 }
 
 /// Reload the [`Document`] from its source file.
-fn reload(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyhow::Result<()> {
+pub(super) fn reload(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
     if event != PromptEvent::Validate {
         return Ok(());
     }
@@ -3975,6 +3979,84 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         signature: SHELL_SIGNATURE,
     },
     TypableCommand {
+        name: "review",
+        aliases: &[],
+        doc: "Review the buffer against the git index, or a commit revision such as HEAD~1, showing old lines inline.",
+        fun: review::review,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(1)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-commits",
+        aliases: &[],
+        doc: "Choose a commit baseline from the latest 200 commits reachable from HEAD, then review against the current buffer.",
+        fun: review::review_commits,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-old",
+        aliases: &[],
+        doc: "Focus the old text nearest the cursor. It can be selected, yanked and commented on but not edited; Esc returns.",
+        fun: review::review_old,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-refresh",
+        aliases: &[],
+        doc: "Reload an unmodified reviewed buffer from disk and refresh its index baseline or retain its selected commit.",
+        fun: review::review_refresh,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-comment",
+        aliases: &[],
+        doc: "Add a pending review comment on the primary selection, or on the selected old text. Use %% for a literal %.",
+        fun: review::review_comment,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (1, Some(1)),
+            raw_after: Some(0),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-export",
+        aliases: &[],
+        doc: "Write pending review comments and reviewed files as JSON to a new file. Reviewed buffers must be written first.",
+        fun: review::review_export,
+        completer: CommandCompleter::positional(&[completers::filename]),
+        signature: Signature {
+            positionals: (1, Some(1)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-close",
+        aliases: &[],
+        doc: "Stop reviewing the buffer. Pending comments are kept for :review-export.",
+        fun: review::review_close,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
         name: "reset-diff-change",
         aliases: &["diffget", "diffg"],
         doc: "Reset the diff change at the cursor position.",
@@ -4151,6 +4233,16 @@ pub(super) fn execute_command(
     args: &str,
     event: PromptEvent,
 ) -> anyhow::Result<()> {
+    if !review::typable_allowed(cx.editor, cmd.name) {
+        return match event {
+            PromptEvent::Validate => Err(anyhow!(
+                "'{}' is not available on old review text (Esc returns)",
+                cmd.name
+            )),
+            _ => Ok(()),
+        };
+    }
+
     let args = if event == PromptEvent::Validate {
         Args::parse(args, cmd.signature, true, |token| {
             expansion::expand(cx.editor, token).map_err(|err| err.into())
@@ -4546,7 +4638,7 @@ fn current_workspace(cx: &compositor::Context) -> std::path::PathBuf {
 
 /// Whether the currently focused document's workspace is trusted for git operations (gix
 /// `Trust::Full`).
-fn doc_trust_full(editor: &helix_view::Editor) -> bool {
+pub(super) fn doc_trust_full(editor: &helix_view::Editor) -> bool {
     let (_, doc) = current_ref!(editor);
     editor
         .workspace_trust

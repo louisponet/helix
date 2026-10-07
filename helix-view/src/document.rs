@@ -47,6 +47,7 @@ use crate::{
     editor::Config,
     events::{DocumentDidChange, SelectionDidChange},
     expansion,
+    review::{Review, ReviewBaseline},
     view::ViewPosition,
     DocumentId, Editor, Theme, View, ViewId,
 };
@@ -208,6 +209,8 @@ pub struct Document {
 
     diff_handle: Option<DiffHandle>,
     version_control_head: Option<Arc<ArcSwap<Box<str>>>>,
+    /// Inline review against an index or commit snapshot, see [`Document::load_review`].
+    pub review: Option<Review>,
 
     // when document was used for most-recent-used buffer picker
     pub focused_at: std::time::Instant,
@@ -762,6 +765,7 @@ impl Document {
             diff_handle: None,
             config,
             version_control_head: None,
+            review: None,
             focused_at: std::time::Instant::now(),
             readonly: false,
             jump_labels: HashMap::new(),
@@ -1269,6 +1273,12 @@ impl Document {
         };
     }
 
+    /// Whether saving would overwrite a newer external change. Missing or unreadable files fail.
+    pub fn is_modified_on_disk(&self) -> Result<bool, Error> {
+        let path = self.path().ok_or_else(|| anyhow!("buffer has no path"))?;
+        Ok(self.last_saved_time < path.metadata()?.modified()?)
+    }
+
     // Detect if the file is readonly and change the readonly field if necessary (unix only)
     pub fn detect_readonly(&mut self) {
         // Allows setting the flag for files the user cannot modify, like root files
@@ -1446,6 +1456,9 @@ impl Document {
         self.document_highlight_controllers.remove(&view_id);
         self.code_action_hints.remove(&view_id);
         self.code_action_controllers.remove(&view_id);
+        if let Some(review) = &mut self.review {
+            review.remove_view(view_id);
+        }
     }
 
     /// Apply a [`Transaction`] to the [`Document`] to change its text.
@@ -1528,6 +1541,9 @@ impl Document {
         // start computing the diff in parallel
         if let Some(diff_handle) = &self.diff_handle {
             diff_handle.update_document(self.text.clone(), false);
+        }
+        if let Some(review) = &mut self.review {
+            review.update(&self.text);
         }
 
         // map diagnostics over changes too
@@ -2000,6 +2016,34 @@ impl Document {
         } else {
             self.diff_handle = None;
         }
+    }
+
+    /// Loads a candidate review without replacing the active review.
+    pub fn load_review(
+        &self,
+        provider_registry: &DiffProviderRegistry,
+        trust_full: bool,
+        revision: Option<&str>,
+    ) -> Result<Review, Error> {
+        let path = self.path().ok_or_else(|| anyhow!("buffer has no path"))?;
+        let (data, baseline) = match revision {
+            Some(revision) => {
+                let base = provider_registry.get_commit_base(path, revision, trust_full)?;
+                (
+                    base.data,
+                    ReviewBaseline::GitCommit {
+                        commit_oid: base.commit_id,
+                        blob_oid: base.blob_id,
+                    },
+                )
+            }
+            None => {
+                let (data, blob_oid) = provider_registry.get_index_base(path, trust_full)?;
+                (data, ReviewBaseline::GitIndex { blob_oid })
+            }
+        };
+        let (snapshot, ..) = from_reader(&mut data.as_slice(), Some(self.encoding))?;
+        Review::new(snapshot, baseline, &self.text)
     }
 
     pub fn version_control_head(&self) -> Option<Arc<Box<str>>> {

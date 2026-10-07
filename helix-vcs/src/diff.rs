@@ -9,6 +9,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use crate::diff::line_cache::InternedRopeLines;
 use crate::diff::worker::DiffWorker;
 
 pub use imara_diff::Hunk;
@@ -110,6 +111,15 @@ impl DiffHandle {
         };
         self.channel.send(event).is_ok()
     }
+}
+
+/// Computes the hunks between `diff_base` and `doc` on the calling thread. Returns `None` if
+/// either text is too large to diff.
+pub fn compute_hunks(diff_base: Rope, doc: Rope) -> Option<Vec<Hunk>> {
+    let lines = InternedRopeLines::new(diff_base, doc);
+    let mut diff = imara_diff::Diff::default();
+    worker::diff_lines(&mut diff, lines.interned_lines()?);
+    Some(diff.hunks().collect())
 }
 
 /// synchronous debounce value should be low

@@ -14,11 +14,22 @@ mod git;
 
 mod diff;
 
-pub use diff::{DiffHandle, Hunk};
+pub use diff::{compute_hunks, DiffHandle, Hunk};
 
 mod status;
 
 pub use status::FileChange;
+
+pub struct CommitBase {
+    pub data: Vec<u8>,
+    pub commit_id: String,
+    pub blob_id: Option<String>,
+}
+
+pub struct CommitInfo {
+    pub id: String,
+    pub summary: String,
+}
 
 /// Contains all active diff providers. Diff providers are compiled in via features. Currently
 /// only `git` is supported.
@@ -41,6 +52,52 @@ impl DiffProviderRegistry {
                     None
                 }
             })
+    }
+
+    /// Get the given file's content staged in the VCS index together with a hex identifier of
+    /// that content. Unlike [`Self::get_diff_base`] the reason for a failure is returned.
+    pub fn get_index_base(&self, file: &Path, trust_full: bool) -> Result<(Vec<u8>, String)> {
+        let mut first_err = None;
+        for provider in &self.providers {
+            match provider.get_index_base(file, trust_full) {
+                Ok(res) => return Ok(res),
+                Err(err) => {
+                    first_err.get_or_insert(err);
+                }
+            }
+        }
+        Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
+    }
+
+    pub fn get_commit_base(
+        &self,
+        file: &Path,
+        revision: &str,
+        trust_full: bool,
+    ) -> Result<CommitBase> {
+        let mut first_err = None;
+        for provider in &self.providers {
+            match provider.get_commit_base(file, revision, trust_full) {
+                Ok(base) => return Ok(base),
+                Err(err) => {
+                    first_err.get_or_insert(err);
+                }
+            }
+        }
+        Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
+    }
+
+    pub fn get_commit_history(&self, file: &Path, trust_full: bool) -> Result<Vec<CommitInfo>> {
+        let mut first_err = None;
+        for provider in &self.providers {
+            match provider.get_commit_history(file, trust_full) {
+                Ok(commits) => return Ok(commits),
+                Err(err) => {
+                    first_err.get_or_insert(err);
+                }
+            }
+        }
+        Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
     }
 
     /// Get the current name of the current [HEAD](https://stackoverflow.com/questions/2304087/what-is-head-in-git).
@@ -111,6 +168,31 @@ impl DiffProvider {
         match self {
             #[cfg(feature = "git")]
             Self::Git => git::get_diff_base(file, trust_full),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn get_index_base(&self, file: &Path, trust_full: bool) -> Result<(Vec<u8>, String)> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::get_index_base(file, trust_full)
+                .map(|(data, oid)| (data, oid.to_hex().to_string())),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn get_commit_base(&self, file: &Path, revision: &str, trust_full: bool) -> Result<CommitBase> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::get_commit_base(file, revision, trust_full),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn get_commit_history(&self, file: &Path, trust_full: bool) -> Result<Vec<CommitInfo>> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::get_commit_history(file, trust_full),
             Self::None => bail!("No diff support compiled in"),
         }
     }
