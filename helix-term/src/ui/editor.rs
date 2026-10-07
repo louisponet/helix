@@ -98,12 +98,10 @@ impl EditorView {
         // While old review text is focused the current selection is hidden.
         let old_focus = doc.review.as_ref().and_then(|review| review.focus(view.id));
 
-        if is_focused && config.cursorline && old_focus.is_none() {
-            decorations.add_decoration(Self::cursorline(doc, view, theme));
-        }
-
-        if let Some(review) = &doc.review {
-            let style = theme.get("diff.plus.review");
+        // A background on diff.plus.review shades whole changed rows and leaves the text
+        // colours alone; without one the changed text itself is coloured (see below).
+        let review_style = theme.get("diff.plus.review");
+        if let Some(review) = doc.review.as_ref().filter(|_| review_style.bg.is_some()) {
             let changed: Vec<_> = review.changed_lines().collect();
             decorations.add_decoration(move |renderer: &mut TextRenderer, pos: LinePos| {
                 let next = changed.partition_point(|lines| lines.end <= pos.doc_line);
@@ -111,9 +109,14 @@ impl EditorView {
                     .get(next)
                     .is_some_and(|lines| lines.start <= pos.doc_line)
                 {
-                    renderer.set_style(Rect::new(inner.x, pos.visual_line, inner.width, 1), style);
+                    let area = Rect::new(inner.x, pos.visual_line, inner.width, 1);
+                    renderer.set_style(area, review_style);
                 }
             });
+        }
+
+        if is_focused && config.cursorline && old_focus.is_none() {
+            decorations.add_decoration(Self::cursorline(doc, view, theme));
         }
 
         if is_focused && config.cursorcolumn && old_focus.is_none() {
@@ -163,7 +166,7 @@ impl EditorView {
 
         Self::doc_diagnostics_highlights_into(doc, theme, &mut overlays);
 
-        if let Some(review) = &doc.review {
+        if let Some(review) = doc.review.as_ref().filter(|_| review_style.bg.is_none()) {
             if let Some(highlight) = theme.find_highlight("diff.plus.review") {
                 let text = doc.text().slice(..);
                 overlays.push(OverlayHighlights::Homogeneous {

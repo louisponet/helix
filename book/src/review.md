@@ -10,8 +10,9 @@ External changes use the same modification-time check as ordinary write conflict
 Lines that differ from the baseline are highlighted with `diff.plus.review`.
 Old lines that were removed or replaced are shown inline as read-only virtual lines with
 `diff.minus.review` and a `-` in the gutter. A background colour on either scope
-shades the whole row; themes without one fall back to the `diff.plus` and
-`diff.minus` foreground colours. The buffer itself is the ordinary
+shades the whole row and leaves syntax colours in place, with the cursorline drawn
+on top; themes without one fall back to the `diff.plus` and `diff.minus`
+foreground colours. The buffer itself is the ordinary
 document: editing, undo, saving, syntax highlighting and language servers work
 as usual and never see the old lines. The diff gutter keeps comparing against
 `HEAD`.
