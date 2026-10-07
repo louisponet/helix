@@ -77,6 +77,16 @@ impl OldBlock {
         }
     }
 
+    /// The document line next to the old lines: the first replacing line, or the line the old
+    /// lines are shown below if they were removed without replacement.
+    pub fn adjacent_line(&self) -> usize {
+        if self.current.is_empty() {
+            self.anchor_line
+        } else {
+            self.current.start
+        }
+    }
+
     /// Whether the old lines are shown below the place they were removed from.
     pub fn is_displaced(&self) -> bool {
         self.current.start == 0

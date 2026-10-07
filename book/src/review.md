@@ -71,7 +71,9 @@ rejected with an error and nothing is changed:
 - `y`, `Space y`, `Space Y`: yank the old selection.
 - `:` with only `:review-comment`, `:review-export`, `:review-close` and
   `:review-old`.
-- `Esc` returns to the current text and its unchanged selection.
+- `Esc` returns to the current text with the cursor on the first line that
+  replaced the focused block, or on the line it is shown below if nothing
+  replaced it.
 
 Mouse input and pasting are ignored while old text is focused.
 

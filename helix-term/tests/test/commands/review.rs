@@ -461,9 +461,19 @@ async fn old_focus_keymaps_and_exit_keep_the_correct_cursor_visible() -> anyhow:
     let index: String = (0..300).map(|i| format!("line {i}\n")).collect();
     let disk: String = (0..300)
         .filter(|i| !(150..250).contains(i))
-        .map(|i| format!("line {i}\n"))
+        .map(|i| match i {
+            280 => "new 280\n".to_owned(),
+            _ => format!("line {i}\n"),
+        })
         .collect();
     let repo = Repo::new(&index, &index, &disk);
+    let cursor_line = |app: &Application| {
+        let (view, doc) = current_ref!(app.editor);
+        doc.selection(view.id)
+            .primary()
+            .cursor_line(doc.text().slice(..))
+    };
+    let shows = |app: &Application, line: &str| render(app).iter().any(|(_, text)| text == line);
     let mut config = Config::load(
         Ok(&"[keys.normal]\nF9 = ':review-old'\n".to_owned()),
         Err(ConfigLoadError::default()),
@@ -485,24 +495,30 @@ async fn old_focus_keymaps_and_exit_keep_the_correct_cursor_visible() -> anyhow:
                 }),
             ),
             (
+                // Esc puts the cursor on the line the removed block hangs under.
                 Some("geZ<esc>j"),
                 Some(&|app| {
                     assert_eq!(old_focus(app), None);
-                    let (view, doc) = current_ref!(app.editor);
-                    assert_eq!(
-                        doc.selection(view.id)
-                            .primary()
-                            .cursor_line(doc.text().slice(..)),
-                        1
-                    );
-                    assert_eq!(render(app)[0].1, "line 0");
+                    assert_eq!(cursor_line(app), 150);
+                    assert!(shows(app, "line 149"));
+                    assert!(shows(app, "line 250"));
+                }),
+            ),
+            (
+                // After ]g, Esc puts the cursor on the first line replacing the later block.
+                Some("<F9>]g<esc>"),
+                Some(&|app| {
+                    assert_eq!(old_focus(app), None);
+                    assert_eq!(cursor_line(app), 180);
+                    assert!(shows(app, "new 280"));
                 }),
             ),
             (
                 Some("<F9>ge:review-close<ret>"),
                 Some(&|app| {
                     assert!(doc!(app.editor).review.is_none());
-                    assert_eq!(render(app)[0].1, "line 0");
+                    assert_eq!(cursor_line(app), 180);
+                    assert!(shows(app, "new 280"));
                     assert_eq!(repo.disk(), disk);
                 }),
             ),

@@ -596,7 +596,11 @@ pub(crate) fn old_focus_command(cx: &mut Context, name: &str) -> bool {
 
     match name {
         "normal_mode" => {
+            let line = review.blocks()[current].adjacent_line();
             review.clear_focus(view_id);
+            let text = doc.text().slice(..);
+            let pos = text.line_to_char(line.min(text.len_lines() - 1));
+            doc.set_selection(view_id, Selection::point(pos));
             cx.editor.set_status("Returned to the current text");
         }
         "select_mode" => review.update_focus(view_id, |_, focus, _| OldFocus {
