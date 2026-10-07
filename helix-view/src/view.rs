@@ -374,6 +374,70 @@ impl View {
         }
     }
 
+    /// Centers the focused old block of a review together with the current lines that replaced
+    /// it, unless both are already fully visible. When they don't fit, the block's top is shown.
+    pub fn center_review_block_in_view(&self, doc: &mut Document, scrolloff: usize) {
+        let viewport = self.inner_area(doc);
+        let text_fmt = doc.text_format(viewport.width, None);
+        let height = viewport.height as usize;
+        let Some(review) = &doc.review else {
+            return;
+        };
+        let Some(idx) = review.focused_block_index(self.id) else {
+            return;
+        };
+        let block = &review.blocks()[idx];
+        let text = doc.text().slice(..);
+        let annotations = self.text_annotations(doc, None);
+        let start = text.line_to_char(block.anchor_line.min(block.current.start));
+        let rows_to = |char_idx| {
+            visual_offset_from_block(text, start, char_idx, &text_fmt, &annotations)
+                .0
+                .row
+        };
+
+        let block_top = rows_to(line_end_char_index(&text, block.anchor_line))
+            + 1
+            + review.block_row(idx, &text_fmt);
+        let mut top = block_top;
+        let mut bottom = block_top + review.block_height(block, &text_fmt) - 1;
+        if !block.current.is_empty() {
+            top = top.min(rows_to(text.line_to_char(block.current.start)));
+            bottom = bottom.max(rows_to(line_end_char_index(&text, block.current.end - 1)));
+        }
+
+        let mut offset = doc.view_offset(self.id);
+        let visible = visual_offset_from_anchor(
+            text,
+            offset.anchor,
+            start,
+            &text_fmt,
+            &annotations,
+            offset.vertical_offset + height,
+        )
+        .is_ok_and(|(pos, _)| {
+            pos.row + top >= offset.vertical_offset
+                && pos.row + bottom < offset.vertical_offset + height
+        });
+        if !visible {
+            let rows = bottom - top + 1;
+            // Screen row of `start`.
+            let row = if rows <= height {
+                ((height - rows) / 2) as isize - top as isize
+            } else {
+                scrolloff.min(height.saturating_sub(1) / 2) as isize - block_top as isize
+            };
+            (offset.anchor, offset.vertical_offset) = if row <= 0 {
+                (start, row.unsigned_abs())
+            } else {
+                char_idx_at_visual_offset(text, start, -row, 0, &text_fmt, &annotations)
+            };
+        }
+        drop(annotations);
+        doc.set_view_offset(self.id, offset);
+        self.ensure_review_focus_in_view(doc, scrolloff);
+    }
+
     /// Scrolls so that the cursor in the focused old text of a review is visible.
     pub fn ensure_review_focus_in_view(&self, doc: &mut Document, scrolloff: usize) {
         let viewport = self.inner_area(doc);

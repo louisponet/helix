@@ -187,7 +187,7 @@ pub(super) fn review_old(
         .position(|block| block.current.end.max(block.current.start + 1) > cursor_line)
         .unwrap_or(blocks.len() - 1);
     review.focus_block(view.id, idx);
-    view.ensure_review_focus_in_view(doc, scrolloff);
+    view.center_review_block_in_view(doc, scrolloff);
     cx.editor.set_status(OLD_FOCUS_HELP);
     Ok(())
 }
@@ -582,6 +582,7 @@ pub(super) fn review_files(
 /// allowed there; only selection, navigation and yank commands are.
 pub(crate) fn old_focus_command(cx: &mut Context, name: &str) -> bool {
     let count = cx.count();
+    let scrolloff = cx.editor.config().scrolloff;
     let register = cx
         .register
         .unwrap_or(cx.editor.config().default_yank_register);
@@ -627,6 +628,7 @@ pub(crate) fn old_focus_command(cx: &mut Context, name: &str) -> bool {
                 _ => last,
             };
             review.focus_block(view_id, idx);
+            view.center_review_block_in_view(doc, scrolloff);
         }
         _ => {
             let (extend, motion) = match name.strip_prefix("extend_") {

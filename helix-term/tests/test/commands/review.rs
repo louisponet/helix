@@ -530,6 +530,73 @@ async fn old_focus_keymaps_and_exit_keep_the_correct_cursor_visible() -> anyhow:
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn old_blocks_are_centered_with_their_replacement_unless_visible() -> anyhow::Result<()> {
+    let index: String = (0..1000).map(|i| format!("line {i}\n")).collect();
+    let disk: String = (0..1000)
+        .map(|i| match i {
+            400 | 800 | 810 => format!("new {i}\n"),
+            _ => format!("line {i}\n"),
+        })
+        .collect();
+    let repo = Repo::new(&index, &index, &disk);
+    let row_of = |app: &Application, line: &str| {
+        render(app)
+            .iter()
+            .position(|(_, text)| text == line)
+            .unwrap_or_else(|| panic!("{line} is not visible"))
+    };
+    let assert_centered = |app: &Application, i: usize| {
+        let height = render(app).len();
+        let old = row_of(app, &format!("line {i}"));
+        assert_eq!(row_of(app, &format!("new {i}")), old + 1);
+        assert!(old.abs_diff((height - 2) / 2) <= 1, "{old} of {height}");
+    };
+    let top_row = |app: &Application| render(app)[0].1.clone();
+    let top = std::cell::RefCell::new(String::new());
+    test_key_sequences(
+        &mut repo.app()?,
+        vec![
+            (
+                Some(":review<ret>:review-old<ret>"),
+                Some(&|app| assert_centered(app, 400)),
+            ),
+            (
+                Some("]g"),
+                Some(&|app| {
+                    assert_centered(app, 800);
+                    *top.borrow_mut() = top_row(app);
+                }),
+            ),
+            (
+                // The next block is already visible with its replacement, so nothing scrolls.
+                Some("]g"),
+                Some(&|app| {
+                    assert_eq!(top_row(app), *top.borrow());
+                    assert!(row_of(app, "line 810") + 1 == row_of(app, "new 810"));
+                }),
+            ),
+            (
+                Some("<esc>"),
+                Some(&|app| {
+                    assert_eq!(old_focus(app), None);
+                    assert_eq!(top_row(app), *top.borrow());
+                    let (view, doc) = current_ref!(app.editor);
+                    let text = doc.text().slice(..);
+                    assert_eq!(doc.selection(view.id).primary().cursor_line(text), 810);
+                }),
+            ),
+            (
+                Some(":review-old<ret>[g[g"),
+                Some(&|app| assert_centered(app, 400)),
+            ),
+        ],
+        false,
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn review_compares_against_the_index() -> anyhow::Result<()> {
     // Only the unstaged change of the last line is under review.
     let repo = Repo::new(

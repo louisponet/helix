@@ -282,6 +282,16 @@ impl Review {
                 .sum::<usize>()
     }
 
+    /// The first virtual row, counting its label, of block `index` below its anchor line.
+    pub fn block_row(&self, index: usize, text_fmt: &TextFormat) -> usize {
+        let block = &self.blocks[index];
+        self.blocks_at(block.anchor_line)
+            .iter()
+            .take_while(|other| other.old.start < block.old.start)
+            .map(|other| self.block_height(other, text_fmt))
+            .sum()
+    }
+
     pub fn focus(&self, view_id: ViewId) -> Option<OldFocus> {
         self.focus.get(&view_id).copied()
     }
@@ -344,12 +354,7 @@ impl Review {
         let text = self.snapshot.slice(..);
         let cursor = self.focus[&view_id].range.cursor(text);
         let line = text.char_to_line(cursor);
-        let mut row: usize = self
-            .blocks_at(block.anchor_line)
-            .iter()
-            .take_while(|other| other.old.start < block.old.start)
-            .map(|other| self.block_height(other, text_fmt))
-            .sum();
+        let mut row = self.block_row(idx, text_fmt);
         row += block.is_displaced() as usize;
         row += (block.old.start..line)
             .map(|line| self.old_line_height(line, text_fmt))

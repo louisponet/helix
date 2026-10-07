@@ -68,6 +68,8 @@ rejected with an error and nothing is changed:
   `gg` `ge`, `x` `X`, `%` (the whole block), `;`, `Alt-;`, `v` (toggle
   extending) and counts. Selections stay inside one block of old lines.
 - `]g` / `[g` / `[G` / `]G`: next, previous, first and last block of old lines.
+  Like `:review-old`, they center the block and the lines that replaced it
+  unless both are already fully visible.
 - `y`, `Space y`, `Space Y`: yank the old selection.
 - `:` with only `:review-comment`, `:review-export`, `:review-close` and
   `:review-old`.
