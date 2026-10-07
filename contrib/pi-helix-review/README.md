@@ -7,9 +7,9 @@ inline-review batch into the pi session you choose. It adds one command:
 /helix-review <batch-file>
 ```
 
-The batch format is described in [`schema.md`](schema.md) (version 2). Helix
-never notifies pi: nothing is watched, polled, or sent until you run the
-command yourself.
+The batch format is described in [`schema.md`](schema.md) (version 2). With
+the command alone Helix never notifies pi; [hook mode](#hook-mode) lets a saved
+review in Helix hand itself back to the agent.
 
 ## Setup
 
@@ -86,6 +86,45 @@ run directly (no shell) with literal pathspecs, validated full object ids, and
 so no repository hook, filter, or driver runs. Blob contents are not read. A
 symlink is resolved first, as Helix does, so its target's entry is compared.
 
+## Hook mode
+
+When pi starts in a Git repository, the extension also keeps a running Helix
+in sync with the agent over Helix's command socket (see "Driving Helix from
+pi" in the Helix book). The socket is `$HELIX_COMMAND_SOCKET`, or
+`$XDG_RUNTIME_DIR/helix/<id>.sock` (`/tmp/helix-<uid>/<id>.sock` without
+`XDG_RUNTIME_DIR`), where `<id>` is the first 32 hex digits of the SHA-256 of
+the canonical `git rev-parse --show-toplevel`. Helix not running is normal:
+nothing is reported.
+
+The mailbox is `<repo>/.pi/helix-review/` with an `outbox/` directory and
+`state.json` (the review baseline and the per-file turn snapshots); ignore
+`.pi/` in Git.
+
+- At the start of an agent turn the baseline becomes `HEAD`, unless the
+  previous baseline has not been handed back yet (it is sticky until a
+  handoff). pi sends `review-handoff <outbox>` and `review-baseline <commit>`,
+  so Helix reviews every open file in the workspace against that commit and
+  writes a batch into the outbox whenever you save a reviewed file. A new pi
+  session restores the same commands from `state.json`.
+- After `edit`, `write` and `bash` tool results (coalesced within 200 ms) and
+  at the end of the turn pi sends `review-baseline <commit>` again, which
+  refreshes Helix's review.
+- At the end of the turn pi stores a snapshot (`git hash-object -w`) of every
+  file changed since the baseline, including untracked files.
+- Each batch in the outbox becomes one `helix-review:handoff` message: your
+  edits as unified-diff hunks against the turn snapshot (or the batch's
+  baseline blob when there is none), every `AGENT: <request>` line in the
+  saved file (marked `new` when you added it in this review), and the review
+  comments. It starts a turn when pi is idle and steers the running turn
+  otherwise. The baseline is then acknowledged and the batch deleted. A batch
+  with no edits, markers or comments is dropped silently but still
+  acknowledged. Invalid batches stay in the outbox untouched.
+- While the mailbox exists, the system prompt explains the handoff and the
+  `AGENT:` convention: integrate your edits, never revert them, address each
+  `AGENT:` comment and delete its marker once handled.
+
+The JSON in the handoff message is described in [`schema.md`](schema.md).
+
 ## Tests
 
 Requires Node 23.6 or newer (TypeScript type stripping) and `git`; no install
@@ -95,8 +134,9 @@ step:
 cd contrib/pi-helix-review && npm test   # or: node --test helix-review.test.ts
 ```
 
-The tests drive the registered `/helix-review` command against temporary Git
-repositories and batch files, with a recording stand-in for pi's message API.
+The tests drive the registered `/helix-review` command and the hook-mode
+events against temporary Git repositories and batch files, with a recording
+stand-in for pi's event and message API and a fake Helix command socket.
 
 ## Limitations
 

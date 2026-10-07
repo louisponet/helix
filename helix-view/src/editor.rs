@@ -1294,6 +1294,10 @@ pub struct Editor {
     pub diff_providers: DiffProviderRegistry,
     /// Review comments and reviewed files waiting for `:review-export`.
     pub review_batch: ReviewBatch,
+    /// Commit that documents in the workspace are reviewed against, see `:review-baseline`.
+    pub review_baseline: Option<String>,
+    /// Directory that writes of reviewed documents export review batches to.
+    pub review_handoff: Option<PathBuf>,
 
     pub debug_adapters: dap::registry::Registry,
     pub breakpoints: HashMap<PathBuf, Vec<Breakpoint>>,
@@ -1445,6 +1449,8 @@ impl Editor {
             diagnostics: Diagnostics::new(),
             diff_providers: DiffProviderRegistry::default(),
             review_batch: ReviewBatch::default(),
+            review_baseline: None,
+            review_handoff: None,
             debug_adapters: dap::registry::Registry::new(),
             breakpoints: HashMap::new(),
             syn_loader,
@@ -2141,12 +2147,38 @@ impl Editor {
                 doc: id,
             });
 
+            if let Err(err) = self.start_baseline_review(id) {
+                log::info!("not reviewing {}: {err:#}", path.display());
+            }
+
             id
         };
 
         self.switch(id, action);
 
         Ok(id)
+    }
+
+    /// Starts reviewing the unmodified, unreviewed document `doc_id` against the review baseline
+    /// if it is in the workspace.
+    pub fn start_baseline_review(&mut self, doc_id: DocumentId) -> anyhow::Result<()> {
+        let (Some(commit), Some(doc)) = (&self.review_baseline, self.documents.get_mut(&doc_id))
+        else {
+            return Ok(());
+        };
+        let workspace = helix_loader::find_workspace().0;
+        if doc.review.is_some()
+            || doc.is_modified()
+            || !doc.path().is_some_and(|path| path.starts_with(&workspace))
+        {
+            return Ok(());
+        }
+        let trust_full = self
+            .workspace_trust
+            .query(doc.workspace_root(), TrustQuery::Git)
+            .is_trusted();
+        doc.review = Some(doc.load_review(&self.diff_providers, trust_full, Some(commit))?);
+        Ok(())
     }
 
     pub fn close(&mut self, id: ViewId) {

@@ -94,6 +94,9 @@
 | `:review-comment` | Add a pending review comment on the primary selection, or on the selected old text. Use %% for a literal %. |
 | `:review-export` | Write pending review comments and reviewed files as JSON to a new file. Reviewed buffers must be written first. |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept for :review-export. |
+| `:review-baseline` | Review every unmodified buffer in the workspace, and buffers opened later, against a commit revision such as HEAD. Repeating the same commit refreshes the reviews; `clear` closes them. |
+| `:review-handoff` | On every write of a reviewed buffer, export a review batch to a new file in the given directory; auto-save skips reviewed buffers meanwhile. `clear` stops it. |
+| `:review-files` | Pick a workspace file added (A), modified (M) or deleted (D) since the review baseline commit. |
 | `:reset-diff-change`, `:diffget`, `:diffg` | Reset the diff change at the cursor position. |
 | `:clear-register` | Clear given register. If no argument is provided, clear all registers. |
 | `:set-register` | Set contents of the given register. |

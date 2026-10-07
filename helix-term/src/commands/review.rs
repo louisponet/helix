@@ -1,6 +1,8 @@
 //! Inline review of a buffer against an index or commit snapshot.
 
+use std::collections::HashSet;
 use std::ops;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use helix_core::command_line::Args;
 use helix_core::doc_formatter::TextFormat;
@@ -9,7 +11,10 @@ use helix_core::line_ending::line_end_char_index;
 use helix_core::text_annotations::TextAnnotations;
 use helix_view::review::{OldFocus, Review, ReviewComment, ReviewSide};
 
-use super::typed::{doc_trust_full, reload};
+use helix_loader::workspace_trust::TrustQuery;
+use helix_vcs::FileChange;
+
+use super::typed::{doc_trust_full, reload, reload_document};
 use super::*;
 
 const OLD_FOCUS_HELP: &str = "Old text (read-only): move, select, y yank, ]g/[g next/prev block, :review-comment <text>, Esc returns";
@@ -326,11 +331,234 @@ pub(super) fn review_export(
 
     let comments = cx.editor.review_batch.comments().len();
     let files = cx.editor.review_batch.files().count();
-    cx.editor.review_batch.export(&path)?;
+    cx.editor.review_batch.export(&path, |_| true)?;
     cx.editor.set_status(format!(
         "Exported {comments} comment(s) on {files} file(s) to {}",
         path.display()
     ));
+    Ok(())
+}
+
+pub(super) fn review_baseline(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    if &args[0] == "clear" {
+        cx.editor.review_baseline = None;
+        for doc in cx.editor.documents_mut() {
+            doc.review = None;
+        }
+        let scrolloff = cx.editor.config().scrolloff;
+        let (view, doc) = current!(cx.editor);
+        view.ensure_cursor_in_view(doc, scrolloff);
+        cx.editor.set_status("Review baseline cleared");
+        return Ok(());
+    }
+
+    let workspace = helix_loader::find_workspace().0;
+    let trust_full = cx
+        .editor
+        .workspace_trust
+        .query(&workspace, TrustQuery::Git)
+        .is_trusted();
+    let commit = cx
+        .editor
+        .diff_providers
+        .resolve_commit(&workspace, &args[0], trust_full)?;
+    let refresh = cx.editor.review_baseline.as_ref() == Some(&commit);
+    cx.editor.review_baseline = Some(commit.clone());
+
+    let doc_ids: Vec<_> = cx
+        .editor
+        .documents()
+        .filter(|doc| doc.path().is_some_and(|path| path.starts_with(&workspace)))
+        .map(Document::id)
+        .collect();
+    let (mut reviewed, mut unsaved, mut failed) = (0, 0, 0);
+    for doc_id in doc_ids {
+        let doc = doc!(cx.editor, &doc_id);
+        if doc.is_modified() {
+            unsaved += 1;
+            continue;
+        }
+        let revision = match &doc.review {
+            Some(review) if refresh => review.baseline().revision().map(str::to_owned),
+            _ => Some(commit.clone()),
+        };
+        let result = reload_document(cx.editor, doc_id).and_then(|()| {
+            let doc = doc_mut!(cx.editor, &doc_id);
+            let trust_full = cx
+                .editor
+                .workspace_trust
+                .query(doc.workspace_root(), TrustQuery::Git)
+                .is_trusted();
+            doc.review = Some(doc.load_review(
+                &cx.editor.diff_providers,
+                trust_full,
+                revision.as_deref(),
+            )?);
+            Ok(())
+        });
+        match result {
+            Ok(()) => reviewed += 1,
+            Err(err) => {
+                log::info!("not reviewing document {doc_id}: {err:#}");
+                failed += 1;
+            }
+        }
+    }
+
+    let scrolloff = cx.editor.config().scrolloff;
+    let (view, doc) = current!(cx.editor);
+    view.ensure_cursor_in_view(doc, scrolloff);
+    cx.editor.set_status(format!(
+        "Reviewing {reviewed} buffer(s) against git commit {}; {unsaved} unsaved and {failed} unreviewable buffer(s) skipped",
+        &commit[..8]
+    ));
+    Ok(())
+}
+
+pub(super) fn review_handoff(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    if &args[0] == "clear" {
+        cx.editor.review_handoff = None;
+        cx.editor.set_status("Review handoff cleared");
+        return Ok(());
+    }
+    let dir = PathBuf::from(&args[0]);
+    ensure!(
+        dir.is_absolute() && dir.is_dir(),
+        "{} is not an absolute path to a directory",
+        dir.display()
+    );
+    cx.editor.set_status(format!(
+        "Writing a reviewed buffer exports a review batch to {}",
+        dir.display()
+    ));
+    cx.editor.review_handoff = Some(dir);
+    Ok(())
+}
+
+/// Starts reviewing the written document against the review baseline and exports a review batch
+/// if a handoff directory is set.
+pub(crate) fn document_written(editor: &mut Editor, doc_id: DocumentId) {
+    if let Err(err) = editor.start_baseline_review(doc_id) {
+        log::info!("not reviewing document {doc_id}: {err:#}");
+    }
+    let Some(dir) = editor.review_handoff.clone() else {
+        return;
+    };
+    if doc!(editor, &doc_id).review.is_none() {
+        return;
+    }
+    match export_handoff(editor, &dir) {
+        Ok(path) => editor.set_status(format!("Exported review batch {}", path.display())),
+        Err(err) => editor.set_error(format!("review handoff failed: {err:#}")),
+    }
+}
+
+/// Exports every unmodified reviewed document and its comments to a new file in `dir`.
+fn export_handoff(editor: &mut Editor, dir: &Path) -> anyhow::Result<PathBuf> {
+    let mut modified = HashSet::new();
+    let mut reviewed = Vec::new();
+    for doc in editor.documents() {
+        let Some(path) = doc.path() else {
+            continue;
+        };
+        if doc.is_modified() {
+            modified.insert(path.to_path_buf());
+        } else if let Some(review) = &doc.review {
+            reviewed.push((path.to_path_buf(), review.baseline().clone()));
+        }
+    }
+    for (file, baseline) in reviewed {
+        editor.review_batch.add_file(file, baseline);
+    }
+
+    let millis = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+    let path = dir.join(format!("{millis}-{}.json", std::process::id()));
+    let temp = path.with_extension("json.tmp");
+    editor
+        .review_batch
+        .export(&temp, |file| !modified.contains(file))?;
+    std::fs::rename(&temp, &path)
+        .with_context(|| format!("failed to rename {} to {}", temp.display(), path.display()))?;
+    Ok(path)
+}
+
+pub(super) fn review_files(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    let commit = cx
+        .editor
+        .review_baseline
+        .clone()
+        .context("no review baseline, use :review-baseline first")?;
+    let workspace = helix_loader::find_workspace().0;
+    let trust_full = cx
+        .editor
+        .workspace_trust
+        .query(&workspace, TrustQuery::Git)
+        .is_trusted();
+    let changes = cx
+        .editor
+        .diff_providers
+        .get_changed_files_since(&workspace, &commit, trust_full)?;
+    cx.jobs.callback(async move {
+        let callback: job::Callback =
+            Callback::EditorCompositor(Box::new(move |_editor, compositor| {
+                let columns = [
+                    ui::PickerColumn::new("change", |change: &FileChange, _| {
+                        match change {
+                            FileChange::Untracked { .. } => "A",
+                            FileChange::Deleted { .. } => "D",
+                            _ => "M",
+                        }
+                        .into()
+                    }),
+                    ui::PickerColumn::new("path", |change: &FileChange, workspace: &PathBuf| {
+                        let path = change.path();
+                        path.strip_prefix(workspace)
+                            .unwrap_or(path)
+                            .display()
+                            .to_string()
+                            .into()
+                    }),
+                ];
+                let picker = ui::Picker::new(
+                    columns,
+                    1,
+                    changes,
+                    workspace,
+                    |cx, change: &FileChange, action| {
+                        if let Err(err) = cx.editor.open(change.path(), action) {
+                            cx.editor.set_error(format!("{err:#}"));
+                        }
+                    },
+                )
+                .with_preview(|_editor, change| Some((change.path().into(), None)));
+                compositor.push(Box::new(overlaid(picker)));
+            }));
+        Ok(callback)
+    });
     Ok(())
 }
 

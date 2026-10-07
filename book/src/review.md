@@ -32,6 +32,9 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-comment <text>` | Add a pending comment on the primary selection, or on the selected old text while it is focused. Use `%%` for a literal `%`. |
 | `:review-export <path>` | Write all pending comments and reviewed files to a new JSON file. |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept. |
+| `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. `clear` closes all reviews. |
+| `:review-handoff <dir>` | Export a batch to `<dir>` on every write of a reviewed buffer. `clear` stops it. |
+| `:review-files` | Pick a file added (`A`), modified (`M`) or deleted (`D`) since the review baseline. |
 
 ### Choosing a commit range
 
@@ -45,7 +48,8 @@ a particular commit and everything after it, choose its parent
 The picker shows repository history, not only commits touching the current file.
 Type a subject or hash to filter, press `Enter` to select, or `Esc` to cancel.
 Use `:review <revision>` for commits beyond the picker's 200-entry window.
-Review is per buffer: opening another file does not automatically review it.
+Review is per buffer: opening another file does not automatically review it,
+unless an editor-wide baseline is set with `:review-baseline`.
 
 A revision is resolved to a fixed commit ID. `:review-refresh` keeps that same
 commit even after the branch advances; choose another baseline explicitly to
@@ -125,3 +129,38 @@ diff before handing it off.
 
 Commit-aware batches use schema version 2 and require the updated pi extension.
 Version 1 batches are rejected; use matching editor and extension versions.
+
+### Driving Helix from pi
+
+Helix listens on a Unix socket for typed commands, so the pi extension can keep
+the review in sync with an agent. The socket is `$HELIX_COMMAND_SOCKET` if set,
+otherwise `$XDG_RUNTIME_DIR/helix/<id>.sock` (or `/tmp/helix-<uid>/<id>.sock`),
+where `<id>` is the first 32 hex digits of the SHA-256 of the canonical
+workspace root. Only the first Helix instance in a workspace listens; the
+socket is removed on exit.
+
+Each line sent is one typed command without the leading `:`, for example
+`review-baseline HEAD` or `open /abs/path.rs`. It runs exactly as if typed at
+the `:` prompt, and Helix replies with one line per command: `ok`,
+`ok <status message>` or `error <message>`. Relative paths resolve against
+Helix's working directory.
+
+Any typed command can be run through the socket, including ones that write
+files or run shell commands. The socket directory is created with mode `0700`,
+so only processes of the same user can connect; do not point
+`HELIX_COMMAND_SOCKET` into a directory other users can access.
+
+`:review-baseline <revision>` resolves the revision once and pins the commit
+for the editor. Every unmodified buffer in the workspace is reloaded from disk
+and reviewed against it; buffers with unsaved changes are skipped and picked up
+on their next write, and buffers opened or reloaded later are reviewed
+automatically. Sending the same commit again refreshes all unmodified reviewed
+buffers, keeping any baseline chosen per buffer with `:review`; a different
+commit switches all of them.
+
+While `:review-handoff <dir>` is set, auto-save skips reviewed buffers, and
+writing a reviewed buffer exports a batch (the same version 2 JSON as
+`:review-export`) to `<dir>/<unix-ms>-<pid>.json`. The file is first written
+under a `.json.tmp` name and then renamed. The batch covers every unmodified
+reviewed buffer with its pending comments; comments on buffers with unsaved
+changes stay pending for a later write.

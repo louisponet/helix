@@ -21,12 +21,14 @@ use tui::backend::Backend;
 
 use crate::{
     args::Args,
+    command_socket::CommandSocket,
+    commands,
     compositor::{Compositor, Event},
     config::Config,
     handlers,
     job::Jobs,
     keymap::Keymaps,
-    ui::{self, overlay::overlaid},
+    ui::{self, overlay::overlaid, PromptEvent},
 };
 
 use log::{debug, error, info, warn};
@@ -79,6 +81,8 @@ pub struct Application {
     lsp_progress: LspProgressMap,
 
     theme_mode: Option<theme::Mode>,
+
+    command_socket: Option<CommandSocket>,
 }
 
 #[cfg(feature = "integration")]
@@ -253,6 +257,7 @@ impl Application {
             jobs,
             lsp_progress: LspProgressMap::new(),
             theme_mode,
+            command_socket: CommandSocket::bind(),
         };
 
         Ok(app)
@@ -343,6 +348,10 @@ impl Application {
                     self.editor.status_msg = Some((msg.message, severity));
                     helix_event::request_redraw();
                 }
+                Some((line, reply)) = CommandSocket::next(&mut self.command_socket) => {
+                    let _ = reply.send(self.run_socket_command(&line));
+                    self.render().await;
+                }
                 Some(callback) = self.jobs.wait_futures.next() => {
                     if let Some(job) = self.jobs.handle_callback(&mut self.editor, &mut self.compositor, callback) {
                         self.jobs.add(job);
@@ -372,6 +381,29 @@ impl Application {
                 self.editor.reset_idle_timer();
             }
         }
+    }
+
+    /// Runs the typed command line `line` like the `:` prompt and returns its one-line reply.
+    fn run_socket_command(&mut self, line: &str) -> String {
+        let mut cx = crate::compositor::Context {
+            editor: &mut self.editor,
+            jobs: &mut self.jobs,
+            scroll: None,
+        };
+        cx.editor.clear_status();
+        let reply =
+            match commands::typed::execute_command_line(&mut cx, line, PromptEvent::Validate) {
+                Err(err) => {
+                    cx.editor.set_error(err.to_string());
+                    format!("error {err}")
+                }
+                Ok(()) => match cx.editor.get_status() {
+                    Some((status, Severity::Error)) => format!("error {status}"),
+                    Some((status, _)) => format!("ok {status}"),
+                    None => "ok".to_owned(),
+                },
+            };
+        reply.replace('\n', " ")
     }
 
     pub fn handle_config_events(&mut self, config_event: ConfigEvent) {
@@ -654,6 +686,7 @@ impl Application {
             "'{}' written, {lines}L {size}",
             get_relative_path(&doc_save_event.path).to_string_lossy(),
         ));
+        commands::review::document_written(&mut self.editor, doc_save_event.doc_id);
     }
 
     #[inline(always)]

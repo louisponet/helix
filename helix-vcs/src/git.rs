@@ -2,11 +2,12 @@ use anyhow::{bail, Context, Result};
 use arc_swap::ArcSwap;
 use gix::filter::plumbing::driver::apply::Delay;
 use gix::index::entry::{Flags, Stage};
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
-use gix::bstr::ByteSlice;
+use gix::bstr::{BString, ByteSlice};
 use gix::diff::Rewrites;
 use gix::dir::entry::Status;
 use gix::objs::tree::EntryKind;
@@ -171,6 +172,83 @@ pub fn for_each_changed_file(
     f: impl Fn(Result<FileChange>) -> bool,
 ) -> Result<()> {
     status(&open_repo(cwd, trust_full)?.to_thread_local(), f)
+}
+
+pub fn resolve_commit(cwd: &Path, revision: &str, trust_full: bool) -> Result<String> {
+    let repo = open_repo(cwd, trust_full)?.to_thread_local();
+    let commit = repo
+        .rev_parse_single(revision)?
+        .object()?
+        .peel_to_commit()?;
+    Ok(commit.id.to_hex().to_string())
+}
+
+pub fn get_changed_files_since(
+    cwd: &Path,
+    commit: &str,
+    trust_full: bool,
+) -> Result<Vec<FileChange>> {
+    let repo = open_repo(cwd, trust_full)?.to_thread_local();
+    let work_dir = repo
+        .workdir()
+        .context("repo has no worktree")?
+        .to_path_buf();
+    let tree = repo
+        .rev_parse_single(commit)?
+        .object()?
+        .peel_to_commit()?
+        .tree_id()?;
+    let status = repo
+        .status(gix::progress::Discard)?
+        .untracked_files(UntrackedFiles::Files)
+        .head_tree(tree)
+        .tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled)
+        .into_iter(Vec::new())?;
+
+    // Per path, the change from the commit to the index and from the index to the worktree.
+    let mut changes: BTreeMap<BString, (Option<char>, Option<char>)> = BTreeMap::new();
+    for item in status {
+        match item? {
+            gix::status::Item::TreeIndex(change) => {
+                let kind = match change {
+                    gix::diff::index::Change::Addition { .. } => 'A',
+                    gix::diff::index::Change::Deletion { .. } => 'D',
+                    _ => 'M',
+                };
+                changes.entry(change.location().to_owned()).or_default().0 = Some(kind);
+            }
+            gix::status::Item::IndexWorktree(Item::Modification {
+                rela_path, status, ..
+            }) => {
+                let kind = match status {
+                    EntryStatus::Change(Change::Removed) => 'D',
+                    EntryStatus::IntentToAdd => '?',
+                    _ => 'M',
+                };
+                changes.entry(rela_path).or_default().1 = Some(kind);
+            }
+            gix::status::Item::IndexWorktree(Item::DirectoryContents { entry, .. })
+                if entry.status == Status::Untracked =>
+            {
+                changes.entry(entry.rela_path).or_default().1 = Some('?');
+            }
+            _ => (),
+        }
+    }
+
+    let mut files = Vec::new();
+    for (rela_path, (index, worktree)) in changes {
+        let in_commit = index.map_or(worktree != Some('?'), |kind| kind != 'A');
+        let in_worktree = worktree.map_or(index != Some('D'), |kind| kind != 'D');
+        let path = work_dir.join(rela_path.to_path()?);
+        files.push(match (in_commit, in_worktree) {
+            (true, true) => FileChange::Modified { path },
+            (true, false) => FileChange::Deleted { path },
+            (false, true) => FileChange::Untracked { path },
+            (false, false) => continue,
+        });
+    }
+    Ok(files)
 }
 
 fn open_repo(path: &Path, trust_full: bool) -> Result<ThreadSafeRepository> {

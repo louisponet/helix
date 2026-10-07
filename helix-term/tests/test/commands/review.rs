@@ -16,7 +16,7 @@ use helix_term::{
 };
 use helix_view::{
     current_ref, doc,
-    editor::Severity,
+    editor::{AutoSaveAfterDelay, Severity},
     graphics::Rect,
     input::parse_macro,
     review::{OldBlock, ReviewBaseline},
@@ -168,6 +168,33 @@ async fn send_keys_and_paste(app: &mut Application, keys: &str, paste: &str) -> 
     app.event_loop_until_idle(&mut UnboundedReceiverStream::new(rx))
         .await;
     Ok(())
+}
+
+async fn send_keys(app: &mut Application, keys: &str) -> anyhow::Result<()> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    for key in parse_macro(keys)? {
+        tx.send(Ok(TerminalEvent::Key(TerminalKey::from(key))))?;
+    }
+    app.event_loop_until_idle(&mut UnboundedReceiverStream::new(rx))
+        .await;
+    Ok(())
+}
+
+/// Sets the working directory, and so the workspace, until dropped.
+struct Cwd(PathBuf);
+
+impl Cwd {
+    fn enter(dir: &Path) -> Cwd {
+        let previous = helix_stdx::env::current_working_dir();
+        helix_stdx::env::set_current_working_dir(dir).unwrap();
+        Cwd(previous)
+    }
+}
+
+impl Drop for Cwd {
+    fn drop(&mut self) {
+        helix_stdx::env::set_current_working_dir(&self.0).unwrap();
+    }
 }
 
 fn old_focus(app: &Application) -> Option<Range> {
@@ -1249,6 +1276,206 @@ async fn comments_export_as_one_batch() -> anyhow::Result<()> {
                     );
                 }),
             ),
+        ],
+        false,
+    )
+    .await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn command_socket_runs_typed_commands_with_one_reply_per_line() -> anyhow::Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let repo = Repo::new("old\nkeep\n", "old\nkeep\n", "new\nkeep\n");
+    let _cwd = Cwd::enter(repo.dir.path());
+    let commit = git_ok(repo.dir.path(), &["rev-parse", "HEAD"]);
+    let socket = repo.dir.path().join("helix.sock");
+    std::env::set_var("HELIX_COMMAND_SOCKET", &socket);
+    let app = repo.app();
+    std::env::remove_var("HELIX_COMMAND_SOCKET");
+    let mut app = app?;
+    assert!(socket.exists());
+
+    let request = format!("review-baseline {commit}\nno-such-command\n");
+    let path = socket.clone();
+    let client = std::thread::spawn(move || -> std::io::Result<Vec<String>> {
+        let mut stream = UnixStream::connect(path)?;
+        stream.write_all(request.as_bytes())?;
+        BufReader::new(stream).lines().take(2).collect()
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !client.is_finished() {
+            run_event_loop_until_idle(&mut app).await;
+        }
+    })
+    .await?;
+    let replies = client.join().unwrap()?;
+
+    assert!(
+        replies[0].starts_with(&format!(
+            "ok Reviewing 1 buffer(s) against git commit {}",
+            &commit[..8]
+        )),
+        "{replies:?}"
+    );
+    assert!(
+        replies[1].starts_with("error no such command"),
+        "{replies:?}"
+    );
+    assert_eq!(
+        doc!(app.editor)
+            .review
+            .as_ref()
+            .unwrap()
+            .baseline()
+            .revision(),
+        Some(commit.as_str())
+    );
+    assert!(render(&app).iter().any(|(_, text)| text == "old"));
+
+    assert!(app.close().await.is_empty());
+    drop(app);
+    assert!(!socket.exists());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn handoff_exports_unmodified_reviews_on_write_and_suspends_auto_save() -> anyhow::Result<()>
+{
+    let repo = Repo::new("old\nkeep\n", "old\nkeep\n", "old\nkeep\n");
+    let other = repo.dir.path().join("other.txt");
+    fs::write(&other, "other\n")?;
+    git_ok(repo.dir.path(), &["add", "other.txt"]);
+    git_ok(repo.dir.path(), &["commit", "-m", "other"]);
+    let commit = git_ok(repo.dir.path(), &["rev-parse", "HEAD"]);
+    let blob = git_ok(repo.dir.path(), &["rev-parse", "HEAD:file.txt"]);
+    let _cwd = Cwd::enter(repo.dir.path());
+    let outbox = tempfile::tempdir()?;
+    let file = helix_stdx::path::canonicalize(&repo.file);
+    // Lets the auto-save debounce fire; the following key makes the event loop process it,
+    // since an idle wait with nothing pending never returns.
+    let settle = || tokio::time::sleep(std::time::Duration::from_millis(100));
+
+    let mut config = test_config();
+    config.editor.auto_save.after_delay = AutoSaveAfterDelay {
+        enable: true,
+        timeout: 10,
+    };
+    let mut app = AppBuilder::new()
+        .with_file(&repo.file, None)
+        .with_config(config)
+        .build()?;
+
+    // Without a handoff directory, auto-save writes reviewed buffers.
+    send_keys(&mut app, ":review-baseline HEAD<ret>ix<esc>").await?;
+    settle().await;
+    send_keys(&mut app, "<esc>").await?;
+    assert!(doc!(app.editor).review.is_some());
+    assert!(!doc!(app.editor).is_modified());
+    assert_eq!(repo.disk(), "xold\nkeep\n");
+
+    let handoff = format!(":review-handoff {}<ret>", outbox.path().display());
+    send_keys(&mut app, &format!("{handoff}iy<esc>")).await?;
+    settle().await;
+    send_keys(&mut app, "<esc>").await?;
+    assert!(doc!(app.editor).is_modified());
+    assert_eq!(repo.disk(), "xold\nkeep\n");
+    assert_eq!(fs::read_dir(outbox.path())?.count(), 0);
+
+    let keys = format!(
+        ":o {}<ret>iz<esc>:review-comment still editing<ret>:o {}<ret>:review-comment mine<ret>:w<ret>",
+        other.display(),
+        repo.file.display()
+    );
+    send_keys(&mut app, &keys).await?;
+
+    assert_eq!(repo.disk(), "xyold\nkeep\n");
+    assert_eq!(fs::read_to_string(&other)?, "other\n");
+    let exported: Vec<_> = fs::read_dir(outbox.path())?
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(exported.len(), 1, "{exported:?}");
+    let name = exported[0].file_name().unwrap().to_str().unwrap();
+    assert!(
+        name.ends_with(&format!("-{}.json", std::process::id())),
+        "{name}"
+    );
+    let (status, _) = app.editor.get_status().unwrap();
+    assert!(status.contains(name), "{status}");
+
+    let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(&exported[0])?)?;
+    let baseline =
+        serde_json::json!({ "kind": "git-commit", "commit_oid": commit, "blob_oid": blob });
+    assert_eq!(json["format"], "helix-review-batch");
+    assert_eq!(json["version"], 2);
+    assert_eq!(
+        json["files"],
+        serde_json::json!([{ "path": file, "baseline": baseline }])
+    );
+    assert_eq!(json["comments"].as_array().unwrap().len(), 1);
+    assert_eq!(json["comments"][0]["comment"], "mine");
+    assert_eq!(json["comments"][0]["baseline"], baseline);
+    let pending = app.editor.review_batch.comments();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].comment, "still editing");
+
+    send_keys(&mut app, ":q!<ret>:q!<ret>").await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_files_picks_files_changed_since_the_baseline() -> anyhow::Result<()> {
+    let repo = Repo::new("old\n", "old\n", "old\n");
+    let dir = repo.dir.path();
+    for name in ["same.txt", "gone.txt"] {
+        fs::write(dir.join(name), "content\n")?;
+    }
+    git_ok(dir, &["add", "same.txt", "gone.txt"]);
+    git_ok(dir, &["commit", "-m", "more"]);
+    fs::remove_file(dir.join("gone.txt"))?;
+    fs::write(dir.join("staged.txt"), "staged\n")?;
+    git_ok(dir, &["add", "staged.txt"]);
+    fs::write(dir.join("added.txt"), "added\n")?;
+    repo.write("new\n");
+    let _cwd = Cwd::enter(dir);
+    let opened = |name: &'static str| {
+        move |app: &Application| {
+            assert_status_not_error(&app.editor);
+            let doc = doc!(app.editor);
+            assert_eq!(doc.path().unwrap().file_name().unwrap(), name);
+            assert!(doc.review.is_some());
+        }
+    };
+    let (added, staged, gone, file) = (
+        opened("added.txt"),
+        opened("staged.txt"),
+        opened("gone.txt"),
+        opened("file.txt"),
+    );
+
+    test_key_sequences(
+        &mut repo.app()?,
+        vec![
+            (
+                Some(":review-files<ret>"),
+                Some(&|app| assert_error(app, "no review baseline")),
+            ),
+            (
+                Some(":review-baseline HEAD<ret>:o same.txt<ret>:review-files<ret>"),
+                None,
+            ),
+            (Some("added<ret>"), Some(&added)),
+            (Some(":review-files<ret>"), None),
+            (Some("staged<ret>"), Some(&staged)),
+            (Some(":review-files<ret>"), None),
+            (Some("gone<ret>"), Some(&gone)),
+            (Some(":review-files<ret>"), None),
+            (Some("file.txt<ret>"), Some(&file)),
+            (Some(":review-files<ret>"), None),
+            (Some("same<ret><esc>"), Some(&file)),
         ],
         false,
     )

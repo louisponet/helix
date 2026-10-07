@@ -147,3 +147,52 @@ not mapped onto them. Consumers should locate comments by `selected_text` plus
 context, and use the line numbers only to disambiguate repeated matches.
 `context_before + selected_text + context_after` is a contiguous slice of the
 snapshot.
+
+## Hook-mode handoff message
+
+In hook mode the pi extension turns each batch Helix writes into its outbox
+into one custom message (`customType: "helix-review:handoff"`). This is not a
+new batch version: the batch above is its input. The message `details`, also
+quoted as a fenced JSON block in its content, is:
+
+```json
+{
+  "format": "helix-review-handoff",
+  "version": 1,
+  "baseline": "8f2c1d0e4b7a9c3e5f6a1b2c3d4e5f6a7b8c9d0e",
+  "files": [
+    {
+      "path": "/abs/repo/src/lib.rs",
+      "user_edits": {
+        "against": "turn-snapshot",
+        "hunks": ["@@ -3 +3,2 @@\n-fn b() {}\n+fn b() -> u8 { 1 }\n+// AGENT: rename b\n"]
+      },
+      "agent_comments": [{ "line": 4, "text": "rename b", "new": true }],
+      "review_comments": [
+        {
+          "side": "current",
+          "start_line": 1,
+          "end_line": 1,
+          "current_line": 1,
+          "selected_text": "fn a() {}",
+          "context_before": "",
+          "context_after": "\n",
+          "comment": "document a"
+        }
+      ]
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `baseline` | The commit the agent's turn was reviewed against, or `null` if pi has none. |
+| `files[].path` | Absolute path from the batch (its files and comment paths). |
+| `files[].user_edits.against` | `"turn-snapshot"`: the file as the agent left it at the end of its last turn. `"baseline"`: the batch's baseline blob for the file (empty when absent). |
+| `files[].user_edits.hunks` | Unified-diff hunks (`git diff` of the raw bytes) from that content to the saved file. |
+| `files[].agent_comments` | Every line of the saved file matching `/\bAGENT:\s*(.+)$/`: 1-based `line`, the request `text`, and `new` when the line is not in the compared-against content. |
+| `files[].review_comments` | The batch's comments for the file, with the batch fields except `path` and `baseline`. |
+
+Files without edits, markers or comments are omitted; a handoff with no files
+is not sent.

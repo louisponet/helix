@@ -1,7 +1,10 @@
 import { execFile } from "node:child_process";
-import { readFile, realpath, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { existsSync, type FSWatcher, watch } from "node:fs";
+import { mkdir, readdir, readFile, realpath, stat, unlink, writeFile } from "node:fs/promises";
+import { connect } from "node:net";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
@@ -390,6 +393,223 @@ function quote(label: string, body: string): string[] {
 	return [`${label}:`, fence, body.endsWith("\n") ? body.slice(0, -1) : body, fence];
 }
 
+interface HookState {
+	baseline?: { commit_oid: string; acknowledged: boolean };
+	snapshots: Record<string, string>;
+}
+
+const GUIDELINES = `## Helix review handoff
+The user reviews your changes in Helix against the commit at the start of your turn and hands them back by saving. A handoff arrives as a "helix-review:handoff" message with a JSON block: per file, user_edits are the user's edits as unified-diff hunks (integrate them, never revert them), agent_comments are lines containing "AGENT: <request>" that the user left for you (new: true when added in this review), and review_comments are inline review comments. Address each AGENT: comment and delete its marker line or comment once handled.`;
+
+class Hook {
+	private pi: ExtensionAPI;
+	readonly repo: string;
+	readonly dir: string;
+	private state: HookState;
+	private watcher?: FSWatcher;
+	private timer?: NodeJS.Timeout;
+	private queue = Promise.resolve();
+	private seen = new Set<string>();
+
+	constructor(pi: ExtensionAPI, repo: string, dir: string, state: HookState) {
+		this.pi = pi;
+		this.repo = repo;
+		this.dir = dir;
+		this.state = state;
+	}
+
+	static async open(pi: ExtensionAPI, cwd: string): Promise<Hook | undefined> {
+		let repo: string;
+		try {
+			repo = await realpath((await git(cwd, ["rev-parse", "--show-toplevel"])).trim());
+		} catch {
+			return undefined;
+		}
+		const dir = join(repo, ".pi", "helix-review");
+		await mkdir(join(dir, "outbox"), { recursive: true });
+		if (!existsSync(join(dir, ".gitignore"))) await writeFile(join(dir, ".gitignore"), "*\n");
+		const state: HookState = await readFile(join(dir, "state.json"), "utf8")
+			.then((text) => JSON.parse(text) as HookState)
+			.catch(() => ({ snapshots: {} }));
+		return new Hook(pi, repo, dir, state);
+	}
+
+	get outbox(): string {
+		return join(this.dir, "outbox");
+	}
+
+	get socket(): string {
+		if (process.env.HELIX_COMMAND_SOCKET) return process.env.HELIX_COMMAND_SOCKET;
+		const id = createHash("sha256").update(this.repo).digest("hex").slice(0, 32);
+		const runtime = process.env.XDG_RUNTIME_DIR;
+		return join(runtime ? join(runtime, "helix") : `/tmp/helix-${process.getuid?.()}`, `${id}.sock`);
+	}
+
+	start(): void {
+		this.watcher = watch(this.outbox, (_event, name) => name && this.enqueue(name));
+		void readdir(this.outbox).then((names) => names.forEach((name) => this.enqueue(name)));
+	}
+
+	stop(): void {
+		this.watcher?.close();
+		clearTimeout(this.timer);
+	}
+
+	async begin(): Promise<void> {
+		if (!this.state.baseline || this.state.baseline.acknowledged) {
+			const head = (await git(this.repo, ["rev-parse", "HEAD"])).trim();
+			this.state.baseline = { commit_oid: head, acknowledged: false };
+			await this.save();
+		}
+		await this.attach();
+	}
+
+	async attach(): Promise<void> {
+		if (this.state.baseline) {
+			await helix(this.socket, [`review-handoff ${this.outbox}`, `review-baseline ${this.state.baseline.commit_oid}`]);
+		}
+	}
+
+	refreshSoon(): void {
+		clearTimeout(this.timer);
+		this.timer = setTimeout(() => void this.refresh(), 200);
+	}
+
+	async refresh(): Promise<void> {
+		clearTimeout(this.timer);
+		if (this.state.baseline) await helix(this.socket, [`review-baseline ${this.state.baseline.commit_oid}`]);
+	}
+
+	async snapshot(): Promise<void> {
+		if (!this.state.baseline) return;
+		const changed = await git(this.repo, ["diff", "--name-only", "-z", this.state.baseline.commit_oid]);
+		const untracked = await git(this.repo, ["ls-files", "--others", "--exclude-standard", "-z"]);
+		const paths: string[] = [];
+		for (const name of new Set(`${changed}${untracked}`.split("\0").filter(Boolean))) {
+			const path = join(this.repo, name);
+			if (!path.startsWith(this.dir) && (await stat(path).catch(() => undefined))?.isFile()) paths.push(path);
+		}
+		const oids = paths.length ? (await git(this.repo, ["hash-object", "-w", "--no-filters", "--", ...paths])).split("\n") : [];
+		this.state.snapshots = Object.fromEntries(paths.map((path, i) => [path, oids[i]]));
+		await this.save();
+	}
+
+	guidelines(): string | undefined {
+		return existsSync(this.dir) ? GUIDELINES : undefined;
+	}
+
+	private enqueue(name: string): void {
+		if (!name.endsWith(".json") || this.seen.has(name)) return;
+		this.seen.add(name);
+		this.queue = this.queue.then(() => this.handle(join(this.outbox, name))).catch(() => undefined);
+	}
+
+	private async handle(path: string): Promise<void> {
+		let batch: ReviewBatch;
+		try {
+			batch = await ReviewBatch.read(path);
+		} catch (error) {
+			if (error instanceof BatchError) return;
+			throw error;
+		}
+		const baselines = new Map<string, Baseline>();
+		for (const { path, baseline } of [...batch.files, ...batch.comments]) if (!baselines.has(path)) baselines.set(path, baseline);
+		const files = [];
+		for (const [file, baseline] of baselines) {
+			const current = (await readCurrent(file)).text ?? "";
+			const snapshot = this.state.snapshots[file];
+			const against = snapshot ? "turn-snapshot" : "baseline";
+			const oldOid = snapshot ?? baseline.blobOid ?? (await git(this.repo, ["hash-object", "-w", "--stdin"], "")).trim();
+			const old = await git(this.repo, ["cat-file", "blob", oldOid]);
+			let hunks: string[] = [];
+			if (old !== current) {
+				const newOid = (await git(this.repo, ["hash-object", "-w", "--no-filters", "--stdin"], current)).trim();
+				const diff = await git(this.repo, ["diff", "--no-color", "--no-ext-diff", "--no-textconv", oldOid, newOid]);
+				hunks = diff.split(/^(?=@@ )/m).slice(1);
+			}
+			const oldLines = new Set(old.split("\n"));
+			const agentComments = current.split("\n").flatMap((line, i) => {
+				const marker = /\bAGENT:\s*(.+)$/.exec(line);
+				return marker ? [{ line: i + 1, text: marker[1], new: !oldLines.has(line) }] : [];
+			});
+			const reviewComments = batch.comments
+				.filter((comment) => comment.path === file)
+				.map((c) => ({
+					side: c.side,
+					start_line: c.startLine,
+					end_line: c.endLine,
+					current_line: c.currentLine,
+					selected_text: c.selectedText,
+					context_before: c.contextBefore,
+					context_after: c.contextAfter,
+					comment: c.comment,
+				}));
+			if (hunks.length || agentComments.length || reviewComments.length) {
+				files.push({ path: file, user_edits: { against, hunks }, agent_comments: agentComments, review_comments: reviewComments });
+			}
+		}
+		if (files.length > 0) {
+			const details = {
+				format: "helix-review-handoff",
+				version: 1,
+				baseline: this.state.baseline?.commit_oid ?? null,
+				files,
+			};
+			const content = [
+				`The user reviewed your changes in Helix and saved ${files.length} file(s).`,
+				"Re-read those files from disk and act on the handoff below.",
+				...quote("Handoff", JSON.stringify(details, null, 2)),
+				"Integrate the user's edits and never revert them. Address each AGENT: comment and delete its marker line or comment once handled. Then continue editing or committing normally; that refreshes the review in Helix.",
+			].join("\n");
+			this.pi.sendMessage(
+				{ customType: "helix-review:handoff", content, display: true, details },
+				{ triggerTurn: true, deliverAs: "steer" },
+			);
+		}
+		if (this.state.baseline) this.state.baseline.acknowledged = true;
+		await this.save();
+		await unlink(path);
+	}
+
+	private save(): Promise<void> {
+		return writeFile(join(this.dir, "state.json"), `${JSON.stringify(this.state, null, 2)}\n`);
+	}
+}
+
+function git(cwd: string, args: string[], input?: string): Promise<string> {
+	return new Promise((done, fail) => {
+		const child = execFile(
+			"git",
+			["-C", cwd, ...args],
+			{ encoding: "utf8", maxBuffer: 64 * 1024 * 1024, windowsHide: true },
+			(error, stdout) => (error ? fail(error) : done(stdout)),
+		);
+		if (input !== undefined) child.stdin?.end(input);
+	});
+}
+
+function helix(path: string, commands: string[]): Promise<string[] | undefined> {
+	return new Promise((done) => {
+		const replies: string[] = [];
+		let pending = "";
+		const socket = connect(path);
+		const finish = () => {
+			socket.destroy();
+			done(replies.length === commands.length ? replies : undefined);
+		};
+		socket.setTimeout(2000, finish);
+		socket.on("error", finish);
+		socket.on("close", finish);
+		socket.on("connect", () => socket.write(commands.map((command) => `${command}\n`).join("")));
+		socket.on("data", (chunk) => {
+			const lines = (pending + chunk.toString("utf8")).split("\n");
+			pending = lines.pop()!;
+			replies.push(...lines);
+			if (replies.length >= commands.length) finish();
+		});
+	});
+}
+
 function busyReason(ctx: ExtensionCommandContext): string | undefined {
 	if (!ctx.isIdle()) return "pi is busy";
 	if (ctx.hasPendingMessages()) return "pi has queued messages";
@@ -398,6 +618,27 @@ function busyReason(ctx: ExtensionCommandContext): string | undefined {
 
 export default function helixReview(pi: ExtensionAPI): void {
 	let importing = false;
+	let hook: Hook | undefined;
+
+	pi.on("session_start", async (_event, ctx) => {
+		hook?.stop();
+		hook = await Hook.open(pi, ctx.cwd);
+		hook?.start();
+		await hook?.attach();
+	});
+	pi.on("session_shutdown", () => hook?.stop());
+	pi.on("before_agent_start", (event) => {
+		const guidelines = hook?.guidelines();
+		if (guidelines) event.systemPromptOptions.promptGuidelines.push(guidelines);
+	});
+	pi.on("agent_start", () => hook?.begin());
+	pi.on("tool_result", (event) => {
+		if (event.toolName === "edit" || event.toolName === "write" || event.toolName === "bash") hook?.refreshSoon();
+	});
+	pi.on("agent_end", async () => {
+		await hook?.refresh();
+		await hook?.snapshot();
+	});
 
 	pi.registerCommand("helix-review", {
 		description: "Send a Helix :review-export batch to this idle session",

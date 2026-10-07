@@ -1,6 +1,20 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	renameSync,
+	rmSync,
+	symlinkSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type TestContext, test } from "node:test";
@@ -46,8 +60,16 @@ function workspace(t: TestContext) {
 function piSession(cwd: string) {
 	const sent: { content: unknown; options: unknown }[] = [];
 	const notes: { message: string; type?: string }[] = [];
+	const messages: { message: { customType: string; content: string; display: boolean; details: any }; options: unknown }[] = [];
+	const handlers = new Map<string, ((event: unknown, ctx: unknown) => unknown)[]>();
 	let handler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
 	helixReview({
+		on(event: string, handler: (event: unknown, ctx: unknown) => unknown) {
+			handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+		},
+		sendMessage(message: (typeof messages)[number]["message"], options?: unknown) {
+			messages.push({ message, options });
+		},
 		registerCommand(name: string, command: { handler: typeof handler }) {
 			assert.equal(name, "helix-review");
 			handler = command.handler;
@@ -63,7 +85,12 @@ function piSession(cwd: string) {
 		hasPendingMessages: () => false,
 		sessionManager: { getSessionId: () => "session-1" },
 	};
-	return { sent, notes, ctx, run: (args: string) => handler!(args, ctx) };
+	const emit = async (type: string, event: object = {}) => {
+		let result: unknown;
+		for (const h of handlers.get(type) ?? []) result = (await h({ type, ...event }, ctx)) ?? result;
+		return result;
+	};
+	return { sent, notes, messages, ctx, emit, run: (args: string) => handler!(args, ctx) };
 }
 
 function simpleBatch(t: TestContext) {
@@ -573,4 +600,179 @@ test("commit baselines that do not match the commit, or name an unavailable comm
 	assert.equal(warnings.split(mismatchX).length, 2, "a shared baseline is reported once");
 	assert.ok(!warnings.includes("Git index"), warnings);
 	assert.equal(session.notes.at(-1)?.type, "warning");
+});
+
+function fakeHelix(t: TestContext, path: string) {
+	const lines: string[] = [];
+	const server = createServer((socket) => {
+		let pending = "";
+		socket.on("data", (chunk) => {
+			const parts = (pending + chunk.toString()).split("\n");
+			pending = parts.pop()!;
+			for (const line of parts) {
+				lines.push(line);
+				socket.write(line.startsWith("review-") ? "ok\n" : `error unknown command ${line}\n`);
+			}
+		});
+	});
+	t.after(() => server.close());
+	return new Promise<string[]>((done) => server.listen(path, () => done(lines)));
+}
+
+function withEnv(t: TestContext, vars: Record<string, string | undefined>) {
+	const saved = Object.fromEntries(Object.keys(vars).map((key) => [key, process.env[key]]));
+	const apply = (values: Record<string, string | undefined>) => {
+		for (const [key, value] of Object.entries(values)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	};
+	apply(vars);
+	t.after(() => apply(saved));
+}
+
+async function until(condition: () => boolean, what: string) {
+	for (let i = 0; i < 200 && !condition(); i++) await new Promise((wake) => setTimeout(wake, 25));
+	assert.ok(condition(), `timed out waiting for ${what}`);
+}
+
+test("hook mode drives Helix over its socket and turns a saved review into one steering handoff", async (t) => {
+	const w = workspace(t);
+	const runtime = join(w.root, "run");
+	mkdirSync(join(runtime, "helix"), { recursive: true });
+	withEnv(t, { HELIX_COMMAND_SOCKET: undefined, XDG_RUNTIME_DIR: runtime });
+	const repo = realpathSync(w.repo);
+	const id = createHash("sha256").update(repo).digest("hex").slice(0, 32);
+	const lines = await fakeHelix(t, join(runtime, "helix", `${id}.sock`));
+
+	const file = join(repo, "a.rs");
+	w.stage("a.rs", "fn a() {}\n");
+	const head = w.commit();
+	const outbox = join(repo, ".pi", "helix-review", "outbox");
+	const state = () => JSON.parse(readFileSync(join(repo, ".pi", "helix-review", "state.json"), "utf8"));
+
+	const session = piSession(join(repo));
+	t.after(() => session.emit("session_shutdown"));
+	await session.emit("session_start", { reason: "startup" });
+	assert.ok(existsSync(outbox));
+	assert.deepEqual(lines, [], "nothing to restore without a baseline");
+	assert.ok(existsSync(join(repo, ".pi", "helix-review", ".gitignore")));
+	const promptGuidelines: string[] = [];
+	await session.emit("before_agent_start", { prompt: "p", systemPrompt: "base", systemPromptOptions: { promptGuidelines } });
+	assert.equal(promptGuidelines.length, 1);
+	assert.match(promptGuidelines[0], /^## Helix review handoff\n.*AGENT:/s);
+
+	await session.emit("agent_start");
+	assert.deepEqual(lines, [`review-handoff ${outbox}`, `review-baseline ${head}`]);
+	assert.deepEqual(state().baseline, { commit_oid: head, acknowledged: false });
+
+	writeFileSync(file, "fn a() {}\n// AGENT: old request\nfn b() {}\n");
+	for (const toolName of ["edit", "write", "bash", "read"]) await session.emit("tool_result", { toolName, input: {}, content: [], isError: false });
+	await until(() => lines.length === 3, "the coalesced refresh");
+	await new Promise((wake) => setTimeout(wake, 300));
+	assert.deepEqual(lines.slice(2), [`review-baseline ${head}`]);
+
+	w.stage("a.rs", "fn a() {}\n// AGENT: old request\nfn b() {}\n");
+	const next = w.commit();
+	writeFileSync(join(repo, "new.rs"), "fn new() {}\n");
+	await session.emit("agent_end", { messages: [] });
+	assert.deepEqual(lines.slice(3), [`review-baseline ${head}`]);
+	const snapshots = state().snapshots;
+	assert.deepEqual(Object.keys(snapshots).sort(), [file, join(repo, "new.rs")]);
+	assert.equal(snapshots[file], git(repo, "rev-parse", `${next}:a.rs`));
+
+	await session.emit("agent_start");
+	assert.deepEqual(lines.slice(4), [`review-handoff ${outbox}`, `review-baseline ${head}`], "the baseline is sticky");
+
+	writeFileSync(file, "fn a() {}\n// AGENT: old request\nfn b() -> u8 { 1 }\n// AGENT: rename b\n");
+	const blob = git(repo, "rev-parse", `${head}:a.rs`);
+	const batch = join(outbox, "1-1.json");
+	writeFileSync(
+		`${batch}.tmp`,
+		JSON.stringify({
+			format: "helix-review-batch",
+			version: 2,
+			files: [{ path: file, baseline: commitBase(head, blob) }],
+			comments: [
+				{
+					path: file,
+					side: "current",
+					baseline: commitBase(head, blob),
+					start_line: 1,
+					end_line: 1,
+					current_line: 1,
+					selected_text: "fn a() {}",
+					context_before: "",
+					context_after: "\n",
+					comment: "document a",
+				},
+			],
+		}),
+	);
+	renameSync(`${batch}.tmp`, batch);
+	await until(() => !existsSync(batch), "the batch to be consumed");
+
+	assert.equal(session.messages.length, 1);
+	const { message, options } = session.messages[0];
+	assert.deepEqual(options, { triggerTurn: true, deliverAs: "steer" });
+	assert.equal(message.customType, "helix-review:handoff");
+	assert.equal(message.display, true);
+	assert.equal(message.details.format, "helix-review-handoff");
+	assert.equal(message.details.version, 1);
+	assert.equal(message.details.baseline, head);
+	assert.equal(message.details.files.length, 1);
+	const handoff = message.details.files[0];
+	assert.equal(handoff.path, file);
+	assert.equal(handoff.user_edits.against, "turn-snapshot");
+	assert.equal(handoff.user_edits.hunks.length, 1);
+	assert.match(handoff.user_edits.hunks[0], /^@@ .* @@\n.*-fn b\(\) \{\}\n\+fn b\(\) -> u8 \{ 1 \}\n\+\/\/ AGENT: rename b\n$/s);
+	assert.deepEqual(handoff.agent_comments, [
+		{ line: 2, text: "old request", new: false },
+		{ line: 4, text: "rename b", new: true },
+	]);
+	assert.deepEqual(handoff.review_comments.map((c: { comment: string }) => c.comment), ["document a"]);
+	assert.ok(message.content.includes(JSON.stringify(message.details, null, 2)), message.content);
+	assert.match(message.content, /never revert them/);
+	assert.equal(state().baseline.acknowledged, true);
+
+	await session.emit("agent_start");
+	assert.deepEqual(lines.slice(6), [`review-handoff ${outbox}`, `review-baseline ${next}`], "an acknowledged baseline moves to HEAD");
+
+	const restarted = piSession(repo);
+	t.after(() => restarted.emit("session_shutdown"));
+	await restarted.emit("session_start", { reason: "startup" });
+	assert.deepEqual(lines.slice(8), [`review-handoff ${outbox}`, `review-baseline ${next}`], "session_start restores the baseline");
+});
+
+test("an unreachable Helix never fails the hook, and an empty handoff is dropped but acknowledged", async (t) => {
+	const w = workspace(t);
+	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });
+	const repo = realpathSync(w.repo);
+	const file = join(repo, "a.rs");
+	w.stage("a.rs", "a\n");
+	const head = w.commit();
+	const outbox = join(repo, ".pi", "helix-review", "outbox");
+
+	const session = piSession(repo);
+	t.after(() => session.emit("session_shutdown"));
+	await session.emit("session_start", { reason: "startup" });
+	await session.emit("agent_start");
+	await session.emit("tool_result", { toolName: "edit", input: {}, content: [], isError: false });
+	await new Promise((wake) => setTimeout(wake, 300));
+	await session.emit("agent_end", { messages: [] });
+
+	const batch = join(outbox, "2-2.json");
+	writeFileSync(
+		batch,
+		JSON.stringify({
+			format: "helix-review-batch",
+			version: 2,
+			files: [{ path: file, baseline: commitBase(head, git(repo, "rev-parse", `${head}:a.rs`)) }],
+			comments: [],
+		}),
+	);
+	await until(() => !existsSync(batch), "the batch to be consumed");
+	assert.equal(session.messages.length, 0);
+	const state = JSON.parse(readFileSync(join(repo, ".pi", "helix-review", "state.json"), "utf8"));
+	assert.deepEqual(state.baseline, { commit_oid: head, acknowledged: true });
 });

@@ -506,9 +506,9 @@ impl ReviewBatch {
         self.files.is_empty() && self.comments.is_empty()
     }
 
-    /// Writes the batch as JSON to the new file `path` and clears it. Nothing is cleared if
-    /// writing fails.
-    pub fn export(&mut self, path: &Path) -> Result<()> {
+    /// Writes the files accepted by `include` and their comments as JSON to the new file `path`
+    /// and removes them from the batch. Nothing is removed if writing fails.
+    pub fn export(&mut self, path: &Path, include: impl Fn(&Path) -> bool) -> Result<()> {
         #[derive(Serialize)]
         struct File<'a> {
             path: &'a Path,
@@ -519,7 +519,7 @@ impl ReviewBatch {
             format: &'static str,
             version: u32,
             files: Vec<File<'a>>,
-            comments: &'a [ReviewComment],
+            comments: Vec<&'a ReviewComment>,
         }
 
         let batch = Batch {
@@ -528,9 +528,14 @@ impl ReviewBatch {
             files: self
                 .files
                 .iter()
+                .filter(|(path, _)| include(path))
                 .map(|(path, baseline)| File { path, baseline })
                 .collect(),
-            comments: &self.comments,
+            comments: self
+                .comments
+                .iter()
+                .filter(|comment| include(&comment.path))
+                .collect(),
         };
         let mut json = serde_json::to_vec_pretty(&batch)?;
         json.push(b'\n');
@@ -546,8 +551,8 @@ impl ReviewBatch {
             let _ = std::fs::remove_file(path);
             return Err(anyhow!("failed to write {}: {err}", path.display()));
         }
-        self.files.clear();
-        self.comments.clear();
+        self.files.retain(|path, _| !include(path));
+        self.comments.retain(|comment| !include(&comment.path));
         Ok(())
     }
 }

@@ -100,6 +100,40 @@ impl DiffProviderRegistry {
         Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
     }
 
+    /// Resolves `revision` in the repository containing `cwd` to the hex id of a commit.
+    pub fn resolve_commit(&self, cwd: &Path, revision: &str, trust_full: bool) -> Result<String> {
+        let mut first_err = None;
+        for provider in &self.providers {
+            match provider.resolve_commit(cwd, revision, trust_full) {
+                Ok(id) => return Ok(id),
+                Err(err) => {
+                    first_err.get_or_insert(err);
+                }
+            }
+        }
+        Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
+    }
+
+    /// Lists the files of the worktree containing `cwd` that differ from `commit`, staged or
+    /// not. Files added since `commit` are reported as [`FileChange::Untracked`].
+    pub fn get_changed_files_since(
+        &self,
+        cwd: &Path,
+        commit: &str,
+        trust_full: bool,
+    ) -> Result<Vec<FileChange>> {
+        let mut first_err = None;
+        for provider in &self.providers {
+            match provider.get_changed_files_since(cwd, commit, trust_full) {
+                Ok(changes) => return Ok(changes),
+                Err(err) => {
+                    first_err.get_or_insert(err);
+                }
+            }
+        }
+        Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
+    }
+
     /// Get the current name of the current [HEAD](https://stackoverflow.com/questions/2304087/what-is-head-in-git).
     pub fn get_current_head_name(
         &self,
@@ -193,6 +227,27 @@ impl DiffProvider {
         match self {
             #[cfg(feature = "git")]
             Self::Git => git::get_commit_history(file, trust_full),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn resolve_commit(&self, cwd: &Path, revision: &str, trust_full: bool) -> Result<String> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::resolve_commit(cwd, revision, trust_full),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn get_changed_files_since(
+        &self,
+        cwd: &Path,
+        commit: &str,
+        trust_full: bool,
+    ) -> Result<Vec<FileChange>> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::get_changed_files_since(cwd, commit, trust_full),
             Self::None => bail!("No diff support compiled in"),
         }
     }

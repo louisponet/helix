@@ -90,6 +90,7 @@ fn request_auto_save(editor: &mut Editor) {
     let options = commands::WriteAllOptions {
         force: false,
         write_scratch: false,
+        auto_save: true,
         auto_format: false,
         code_actions: false,
     };

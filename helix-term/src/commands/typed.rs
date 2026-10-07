@@ -853,6 +853,8 @@ pub(super) fn buffers_remaining_impl(editor: &mut Editor) -> anyhow::Result<()> 
 pub struct WriteAllOptions {
     pub force: bool,
     pub write_scratch: bool,
+    /// Skips documents under review while a review handoff directory is set.
+    pub auto_save: bool,
     pub auto_format: bool,
     pub code_actions: bool,
 }
@@ -872,7 +874,9 @@ pub fn write_all_impl(
         .into_iter()
         .filter_map(|id| {
             let doc = doc!(cx.editor, &id);
-            if !doc.is_modified() {
+            if !doc.is_modified()
+                || options.auto_save && cx.editor.review_handoff.is_some() && doc.review.is_some()
+            {
                 return None;
             }
             if doc.path().is_none() {
@@ -976,6 +980,7 @@ fn write_all(cx: &mut compositor::Context, args: Args, event: PromptEvent) -> an
         WriteAllOptions {
             force: false,
             write_scratch: true,
+            auto_save: false,
             auto_format: !args.has_flag(WRITE_NO_FORMAT_FLAG.name),
             code_actions: !args.has_flag(WRITE_NO_CODE_ACTIONS_FLAG.name),
         },
@@ -996,6 +1001,7 @@ fn force_write_all(
         WriteAllOptions {
             force: true,
             write_scratch: true,
+            auto_save: false,
             auto_format: !args.has_flag(WRITE_NO_FORMAT_FLAG.name),
             code_actions: !args.has_flag(WRITE_NO_CODE_ACTIONS_FLAG.name),
         },
@@ -1015,6 +1021,7 @@ fn write_all_quit(
         WriteAllOptions {
             force: false,
             write_scratch: true,
+            auto_save: false,
             auto_format: !args.has_flag(WRITE_NO_FORMAT_FLAG.name),
             code_actions: !args.has_flag(WRITE_NO_CODE_ACTIONS_FLAG.name),
         },
@@ -1035,6 +1042,7 @@ fn force_write_all_quit(
         WriteAllOptions {
             force: true,
             write_scratch: true,
+            auto_save: false,
             auto_format: !args.has_flag(WRITE_NO_FORMAT_FLAG.name),
             code_actions: !args.has_flag(WRITE_NO_CODE_ACTIONS_FLAG.name),
         },
@@ -1601,11 +1609,15 @@ pub(super) fn reload(
         .map(|_| {
             view.ensure_cursor_in_view(doc, scrolloff);
         })?;
+    let doc_id = doc.id();
     if let Some(path) = doc.path().map(ToOwned::to_owned) {
         cx.editor
             .language_servers
             .file_event_handler
             .file_changed(path);
+    }
+    if let Err(err) = cx.editor.start_baseline_review(doc_id) {
+        log::info!("not reviewing the reloaded buffer: {err:#}");
     }
     Ok(())
 }
@@ -1615,72 +1627,68 @@ fn reload_all(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
         return Ok(());
     }
 
-    let scrolloff = cx.editor.config().scrolloff;
-    let view_id = view!(cx.editor).id;
-
-    let docs_view_ids: Vec<(DocumentId, Vec<ViewId>)> = cx
-        .editor
-        .documents_mut()
-        .map(|doc| {
-            let mut view_ids: Vec<_> = doc.selections().keys().cloned().collect();
-
-            if view_ids.is_empty() {
-                doc.ensure_view_init(view_id);
-                view_ids.push(view_id);
-            };
-
-            (doc.id(), view_ids)
-        })
-        .collect();
-
-    for (doc_id, view_ids) in docs_view_ids {
-        let doc = doc_mut!(cx.editor, &doc_id);
-
-        // Every doc is guaranteed to have at least 1 view at this point.
-        let view = view_mut!(cx.editor, view_ids[0]);
-
-        // Ensure that the view is synced with the document's history.
-        view.sync_changes(doc);
-
-        // Per-document trust: each doc's workspace may differ.
-        let trust_full = cx
-            .editor
-            .workspace_trust
-            .query(
-                doc.workspace_root(),
-                helix_loader::workspace_trust::TrustQuery::Git,
-            )
-            .is_trusted();
-        if let Err(error) = doc.reload(view, &cx.editor.diff_providers, trust_full) {
+    let doc_ids: Vec<_> = cx.editor.documents().map(Document::id).collect();
+    for doc_id in doc_ids {
+        if let Err(error) = reload_document(cx.editor, doc_id) {
             cx.editor.set_error(format!("{}", error));
             continue;
         }
-
-        if let Some(path) = doc.path().map(ToOwned::to_owned) {
-            cx.editor
-                .language_servers
-                .file_event_handler
-                .file_changed(path);
-        }
-
-        for view_id in view_ids {
-            let view = view_mut!(cx.editor, view_id);
-            if view.doc.eq(&doc_id) {
-                // Reloading commits the diff against disk through the first view
-                // only (above). Any other view onto this document is left
-                // pointing at the pre-reload revision, so sync it now; otherwise
-                // its jumplist entries keep referencing the old (e.g. larger)
-                // text and a later commit panics when mapping them through a
-                // changeset whose pre-image no longer contains them.
-                view.sync_changes(doc);
-                view.ensure_cursor_in_view(doc, scrolloff);
-            }
+        if let Err(err) = cx.editor.start_baseline_review(doc_id) {
+            log::info!("not reviewing a reloaded buffer: {err:#}");
         }
     }
 
     Ok(())
 }
 
+/// Reloads the document `doc_id` from disk and syncs every view of it.
+pub(super) fn reload_document(editor: &mut Editor, doc_id: DocumentId) -> anyhow::Result<()> {
+    let scrolloff = editor.config().scrolloff;
+    let view_id = view!(editor).id;
+    let doc = doc_mut!(editor, &doc_id);
+    let mut view_ids: Vec<_> = doc.selections().keys().cloned().collect();
+    if view_ids.is_empty() {
+        doc.ensure_view_init(view_id);
+        view_ids.push(view_id);
+    };
+
+    let view = view_mut!(editor, view_ids[0]);
+
+    // Ensure that the view is synced with the document's history.
+    view.sync_changes(doc);
+
+    // Per-document trust: each doc's workspace may differ.
+    let trust_full = editor
+        .workspace_trust
+        .query(
+            doc.workspace_root(),
+            helix_loader::workspace_trust::TrustQuery::Git,
+        )
+        .is_trusted();
+    doc.reload(view, &editor.diff_providers, trust_full)?;
+
+    if let Some(path) = doc.path().map(ToOwned::to_owned) {
+        editor
+            .language_servers
+            .file_event_handler
+            .file_changed(path);
+    }
+
+    for view_id in view_ids {
+        let view = view_mut!(editor, view_id);
+        if view.doc.eq(&doc_id) {
+            // Reloading commits the diff against disk through the first view
+            // only (above). Any other view onto this document is left
+            // pointing at the pre-reload revision, so sync it now; otherwise
+            // its jumplist entries keep referencing the old (e.g. larger)
+            // text and a later commit panics when mapping them through a
+            // changeset whose pre-image no longer contains them.
+            view.sync_changes(doc);
+            view.ensure_cursor_in_view(doc, scrolloff);
+        }
+    }
+    Ok(())
+}
 /// Update the [`Document`] if it has been modified.
 fn update(cx: &mut compositor::Context, args: Args, event: PromptEvent) -> anyhow::Result<()> {
     if event != PromptEvent::Validate {
@@ -4057,6 +4065,39 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         },
     },
     TypableCommand {
+        name: "review-baseline",
+        aliases: &[],
+        doc: "Review every unmodified buffer in the workspace, and buffers opened later, against a commit revision such as HEAD. Repeating the same commit refreshes the reviews; `clear` closes them.",
+        fun: review::review_baseline,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (1, Some(1)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-handoff",
+        aliases: &[],
+        doc: "On every write of a reviewed buffer, export a review batch to a new file in the given directory; auto-save skips reviewed buffers meanwhile. `clear` stops it.",
+        fun: review::review_handoff,
+        completer: CommandCompleter::positional(&[completers::directory]),
+        signature: Signature {
+            positionals: (1, Some(1)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-files",
+        aliases: &[],
+        doc: "Pick a workspace file added (A), modified (M) or deleted (D) since the review baseline commit.",
+        fun: review::review_files,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
         name: "reset-diff-change",
         aliases: &["diffget", "diffg"],
         doc: "Reset the diff change at the cursor position.",
@@ -4204,7 +4245,7 @@ pub static TYPABLE_COMMAND_MAP: LazyLock<HashMap<&'static str, &'static TypableC
             .collect()
     });
 
-fn execute_command_line(
+pub(crate) fn execute_command_line(
     cx: &mut compositor::Context,
     input: &str,
     event: PromptEvent,
