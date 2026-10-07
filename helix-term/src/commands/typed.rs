@@ -4087,6 +4087,17 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         },
     },
     TypableCommand {
+        name: "review-send",
+        aliases: &[],
+        doc: "Export a review batch to the handoff directory now, as a write would, without writing any file. Refuses while a reviewed buffer has unsaved changes.",
+        fun: review::review_send,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
         name: "review-files",
         aliases: &[],
         doc: "Pick a workspace file added (A), modified (M) or deleted (D) since the review baseline commit.",

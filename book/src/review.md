@@ -34,6 +34,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept. |
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. `clear` closes all reviews. |
 | `:review-handoff <dir>` | Export a batch to `<dir>` on every write of a reviewed buffer. `clear` stops it. |
+| `:review-send` | Export the handoff batch now without writing any file, for example to acknowledge a review without edits. |
 | `:review-files` | Pick a file added (`A`), modified (`M`) or deleted (`D`) since the review baseline. |
 
 ### Choosing a commit range
@@ -169,3 +170,8 @@ writing a reviewed buffer exports a batch (the same version 2 JSON as
 under a `.json.tmp` name and then renamed. The batch covers every unmodified
 reviewed buffer with its pending comments; comments on buffers with unsaved
 changes stay pending for a later write.
+
+`:review-send` exports the same batch immediately without writing any file, so
+a review without edits can be handed back without touching the disk. It fails
+when no handoff directory is set, and names the reviewed buffers that have
+unsaved changes instead of exporting.

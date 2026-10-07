@@ -1631,3 +1631,51 @@ async fn buffers_reviewed_against_the_baseline_show_a_summary() -> anyhow::Resul
     .await?;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_send_exports_the_handoff_batch_without_writing() -> anyhow::Result<()> {
+    let repo = Repo::new("old\nkeep\n", "old\nkeep\n", "old\nkeep\n");
+    let commit = git_ok(repo.dir.path(), &["rev-parse", "HEAD"]);
+    let _cwd = Cwd::enter(repo.dir.path());
+    let outbox = tempfile::tempdir()?;
+    let file = helix_stdx::path::canonicalize(&repo.file);
+    let modified = || fs::metadata(&repo.file).unwrap().modified().unwrap();
+    let exported = || -> Vec<PathBuf> {
+        fs::read_dir(outbox.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect()
+    };
+    let mut app = repo.app()?;
+
+    send_keys(&mut app, ":review-baseline HEAD<ret>:review-send<ret>").await?;
+    assert_error(&app, "no review handoff directory");
+
+    let before = modified();
+    let keys = format!(
+        ":review-handoff {}<ret>:review-comment looks good<ret>:review-send<ret>",
+        outbox.path().display()
+    );
+    send_keys(&mut app, &keys).await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(modified(), before);
+    assert_eq!(repo.disk(), "old\nkeep\n");
+    let batches = exported();
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    let (status, _) = app.editor.get_status().unwrap();
+    let name = batches[0].file_name().unwrap().to_str().unwrap();
+    assert!(status.contains(name), "{status}");
+    let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(&batches[0])?)?;
+    assert_eq!(json["files"][0]["path"], serde_json::json!(file));
+    assert_eq!(json["files"][0]["baseline"]["commit_oid"], commit);
+    assert_eq!(json["comments"][0]["comment"], "looks good");
+    assert!(app.editor.review_batch.comments().is_empty());
+
+    send_keys(&mut app, "ix<esc>:review-send<ret>").await?;
+    assert_error(&app, "unsaved changes: file.txt");
+    assert_eq!(exported().len(), 1);
+    assert_eq!(modified(), before);
+
+    send_keys(&mut app, ":q!<ret>").await?;
+    Ok(())
+}

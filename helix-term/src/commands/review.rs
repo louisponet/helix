@@ -23,6 +23,7 @@ const OLD_FOCUS_HELP: &str = "Old text (read-only): move, select, y yank, ]g/[g 
 const OLD_FOCUS_TYPABLE: &[&str] = &[
     "review-comment",
     "review-export",
+    "review-send",
     "review-close",
     "review-old",
 ];
@@ -460,6 +461,37 @@ pub(super) fn review_handoff(
         dir.display()
     ));
     cx.editor.review_handoff = Some(dir);
+    Ok(())
+}
+
+pub(super) fn review_send(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    let dir = cx
+        .editor
+        .review_handoff
+        .clone()
+        .context("no review handoff directory, use :review-handoff <dir> first")?;
+    let unsaved: Vec<_> = cx
+        .editor
+        .documents()
+        .filter(|doc| doc.review.is_some() && doc.is_modified())
+        .map(|doc| doc.display_name().into_owned())
+        .collect();
+    ensure!(
+        unsaved.is_empty(),
+        "reviewed buffers have unsaved changes: {}; write or undo them before :review-send",
+        unsaved.join(", ")
+    );
+    let path = export_handoff(cx.editor, &dir)?;
+    cx.editor
+        .set_status(format!("Exported review batch {}", path.display()));
     Ok(())
 }
 
