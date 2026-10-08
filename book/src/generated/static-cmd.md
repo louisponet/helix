@@ -186,20 +186,20 @@
 | `review_diff_buffer` | Show the review as one diff | normal: `` Gd ``, select: `` Gd `` |
 | `review_diff_open_hunk` | Open the file of the review diff hunk under the cursor | normal: `` Gg ``, select: `` Gg `` |
 | `review_old_text` | Focus the old review text nearest the cursor | normal: `` Go ``, select: `` Go `` |
-| `review_comments_picker` | Pick a pending review comment | normal: `` Gc ``, select: `` Gc `` |
+| `review_comments_picker` | Pick a pending review comment | normal: `` GC ``, select: `` GC `` |
 | `review_uncomment_latest` | Drop the latest pending review comment | normal: `` Gu ``, select: `` Gu `` |
 | `review_toggle_stage` | Stage or unstage the review hunks the selections touch | normal: `` Gs ``, select: `` Gs `` |
 | `review_revert_change` | Revert the change under the cursor to the review baseline | normal: `` Gr ``, select: `` Gr `` |
 | `review_close_buffer` | Close the review of the buffer | normal: `` Gx ``, select: `` Gx `` |
 | `review_refresh_buffer` | Refresh the review of the buffer | normal: `` Gb ``, select: `` Gb `` |
-| `review_commit_staged` | Hand the review back asking to commit the staged hunks | normal: `` GC ``, select: `` GC `` |
+| `review_commit_staged` | Hand the review back asking to commit the staged hunks | normal: `` Gm ``, select: `` Gm `` |
 | `review_send_handoff` | Hand the review back now | normal: `` GS ``, select: `` GS `` |
-| `review_commit_all` | Stage every changed file and hand the review back asking to commit | normal: `` GA ``, select: `` GA `` |
+| `review_commit_all` | Stage every changed file and hand the review back asking to commit | normal: `` GM ``, select: `` GM `` |
 | `review_next_change` | Go to the next review change, across changed files | normal: `` Gn ``, select: `` Gn `` |
 | `review_prev_change` | Go to the previous review change, across changed files | normal: `` GN ``, select: `` GN `` |
 | `review_baseline_older` | Move the review baseline one commit older | normal: `` G<minus> ``, select: `` G<minus> `` |
 | `review_baseline_newer` | Move the review baseline one commit newer | normal: `` G+ ``, select: `` G+ `` |
-| `review_comment_prompt` | Comment on the selection for the review | normal: `` Gm ``, select: `` Gm `` |
+| `review_comment_prompt` | Comment on the selection for the review | normal: `` Gc ``, select: `` Gc `` |
 | `review_ask_prompt` | Ask the agent about the selections | normal: `` Ga ``, select: `` Ga `` |
 | `redo` | Redo change | normal: `` U ``, select: `` U `` |
 | `earlier` | Move backward in history | normal: `` <A-u> ``, select: `` <A-u> `` |

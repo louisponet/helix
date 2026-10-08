@@ -2204,7 +2204,7 @@ async fn commit_all_stages_every_changed_file_and_asks_for_a_commit() -> anyhow:
     );
 
     git_ok(dir, &["commit", "-m", "all"]);
-    send_keys(&mut app, ":review-baseline HEAD<ret>GA").await?;
+    send_keys(&mut app, ":review-baseline HEAD<ret>GM").await?;
     assert_error(&app, "no changes since");
     Ok(())
 }
@@ -2276,11 +2276,11 @@ async fn the_g_menu_runs_review_commands_next_to_user_keys() -> anyhow::Result<(
     let text = doc.text().slice(..);
     assert_eq!(doc.selection(view.id).primary().cursor_line(text), 1);
 
-    // The user's G l still extends, and G m opens the comment prompt prefilled.
+    // The user's G l still extends, and G c opens the comment prompt prefilled.
     send_keys(&mut app, "ggGl").await?;
     let (view, doc) = current_ref!(app.editor);
     assert_eq!(doc.selection(view.id).primary().to(), 2);
-    send_keys(&mut app, "Gmlooks good<ret>").await?;
+    send_keys(&mut app, "Gclooks good<ret>").await?;
     let comments = app.editor.review_batch.comments();
     assert_eq!(comments.len(), 1);
     assert_eq!(comments[0].comment, "looks good");

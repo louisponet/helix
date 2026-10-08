@@ -51,7 +51,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `Enter` | In normal mode, runs `:review-toggle-stage` while the buffer is reviewed or is the `:review-diff` buffer, and does nothing otherwise. |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept. Under a `:review-baseline`, the buffer is not reviewed again until a different baseline, `:review-baseline clear`, or an explicit `:review` on it. |
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. `clear` closes all reviews. |
-| `:review-commit-all [subject]` | Stage every file changed since the baseline (modified, deleted and untracked, like `git add -A` limited to them), then hand back like `:review-commit`. Refuses unsaved reviewed buffers, and says `no changes since <commit>` when there is nothing. `G A` in the default keymap. |
+| `:review-commit-all [subject]` | Stage every file changed since the baseline (modified, deleted and untracked, like `git add -A` limited to them), then hand back like `:review-commit`. Refuses unsaved reviewed buffers, and says `no changes since <commit>` when there is nothing. `G M` in the default keymap. |
 | `:review-next` | Go to the next changed block; after the last one, open the next file changed since the baseline (`:review-files` order, wrapping around) at its first block. Shows `<file>: hunk 2 of 5`. `G n` in the default keymap, which takes a count. |
 | `:review-prev` | Like `:review-next` backwards, landing on the previous file's last block. `G N` in the default keymap. |
 | `:review-older` | Move the baseline to its first parent (pinning `HEAD` first when none is set) and refresh every review; the status shows `Baseline <commit> <subject> (N behind HEAD)`. `G -` in the default keymap. |
@@ -223,7 +223,7 @@ like this:
    anything when there is nothing to save; `:review-send <text>` adds an
    instruction for the agent. `:review-commit [subject]` hands back and asks
    the agent to commit exactly what you staged (and nothing else);
-   `:review-commit-all [subject]` (`G A`) stages everything first. The status
+   `:review-commit-all [subject]` (`G M`) stages everything first. The status
    line then confirms it, for example `pi-1 received your review: 1 file with
    edits, 1 review comment`. With several pi sessions hooked to the repository,
    a handoff goes to the session that last changed its files (the `agent`
@@ -244,8 +244,8 @@ does stepping back to where you started.
 
 These commands are built into the default keymap under `G` in normal mode
 (see [review mode](./keymap.md#review-mode)): `G f` picks a file, `G d` shows the
-diff, `G o` focuses old text, `G m` comments, `G s` stages, `G C` asks the agent
-to commit and `G n` / `G N` move between changes, on into the next or previous
+diff, `G o` focuses old text, `G c` comments (`G C` lists them), `G s` stages, `G m` asks the agent
+to commit (`G M` stages everything first) and `G n` / `G N` move between changes, on into the next or previous
 changed file (`:review-files` order, wrapping around) at its edge. Keys you map under
 `[keys.normal.G]` in `config.toml` are added to that menu.
 
