@@ -567,7 +567,20 @@ pub(super) fn review_baseline(
         cx.editor.set_status("Review baseline cleared");
         return Ok(());
     }
+    pin_review_baseline(cx, &args[0])
+}
 
+/// The editor-wide review baseline, pinning `HEAD` like `:review-baseline HEAD` when none is set.
+fn review_baseline_or_head(cx: &mut compositor::Context) -> anyhow::Result<String> {
+    if cx.editor.review_baseline.is_none() {
+        pin_review_baseline(cx, "HEAD")
+            .context("no review baseline, and HEAD cannot be resolved")?;
+    }
+    Ok(cx.editor.review_baseline.clone().unwrap())
+}
+
+/// Pins `revision` as the editor-wide review baseline and reviews the workspace buffers against it.
+fn pin_review_baseline(cx: &mut compositor::Context, revision: &str) -> anyhow::Result<()> {
     let workspace = helix_loader::find_workspace().0;
     let trust_full = cx
         .editor
@@ -577,7 +590,7 @@ pub(super) fn review_baseline(
     let commit = cx
         .editor
         .diff_providers
-        .resolve_commit(&workspace, &args[0], trust_full)?;
+        .resolve_commit(&workspace, revision, trust_full)?;
     let refresh = cx.editor.review_baseline.as_ref() == Some(&commit);
     cx.editor.review_baseline = Some(commit.clone());
 
@@ -806,11 +819,7 @@ pub(super) fn review_files(
         return Ok(());
     }
 
-    let commit = cx
-        .editor
-        .review_baseline
-        .clone()
-        .context("no review baseline, use :review-baseline first")?;
+    let commit = review_baseline_or_head(cx)?;
     let workspace = helix_loader::find_workspace().0;
     let trust_full = cx
         .editor
@@ -895,11 +904,7 @@ pub(super) fn review_diff(
         return Ok(());
     }
 
-    let commit = cx
-        .editor
-        .review_baseline
-        .clone()
-        .context("no review baseline, use :review-baseline first")?;
+    let commit = review_baseline_or_head(cx)?;
     let (diff, files) = review_diff_text(cx.editor, &commit)?;
     if files == 0 {
         cx.editor

@@ -44,9 +44,9 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. `clear` closes all reviews. |
 | `:review-handoff <dir>` | Export a batch to `<dir>` on every write of a reviewed buffer. `clear` stops it. |
 | `:review-send` | Export the handoff batch now without writing any file, for example to acknowledge a review without edits. |
-| `:review-diff` | Show one unified diff of every file changed since the review baseline in a read-only scratch buffer; running it again, or `:review-baseline` (as the pi hook does after each edit), refreshes that buffer in place. File headers are workspace-relative paths (`--- <path>`), so `gf` opens a file. |
+| `:review-diff` | Show one unified diff of every file changed since the review baseline (with none set, `HEAD` is pinned as it, like `:review-baseline HEAD`) in a read-only scratch buffer; running it again, or `:review-baseline` (as the pi hook does after each edit), refreshes that buffer in place. File headers are workspace-relative paths (`--- <path>`), so `gf` opens a file. |
 | `:review-diff-open` | In the `:review-diff` buffer, open the file of the hunk under the cursor at the current line it shows (the next current line on a removed line). |
-| `:review-files` | Pick a file added (`A`), modified (`M`) or deleted (`D`) since the review baseline, and open it at its first change. |
+| `:review-files` | Pick a file added (`A`), modified (`M`) or deleted (`D`) since the review baseline, and open it at its first change. With no baseline set, it first pins `HEAD` like `:review-baseline HEAD`. |
 
 ### Choosing a commit range
 
@@ -220,9 +220,9 @@ comment count; add it with, for example,
 - No `pi hook attached` status: Helix was not listening when pi started (it
   was started after pi, or in another workspace, which has its own socket).
   Open Helix in the repository and run `/reload` in pi (or restart pi); the
-  next agent turn also attaches. Meanwhile `:review-baseline HEAD` re-pins the
-  baseline and reviews the open buffers by hand, but only pi sets the handoff
-  directory, so saving hands nothing back until it attaches.
+  next agent turn also attaches. Meanwhile `:review-files` reviews against
+  `HEAD` on its own, but only pi sets the handoff directory, so saving hands
+  nothing back until it attaches.
 - `:review-files` says `no files changed since <commit>` although the agent did
   work: it committed, and after your last handoff the next turn moved the
   baseline to that commit. `:review-baseline <commit>` (for example

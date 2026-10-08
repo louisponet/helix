@@ -1604,10 +1604,10 @@ async fn review_diff_shows_every_change_in_one_scratch_buffer() -> anyhow::Resul
         (doc.id(), doc.text().to_string())
     };
 
+    // Without a baseline, HEAD is pinned as the editor-wide one.
     send_keys(&mut app, ":review-diff<ret>").await?;
-    assert_error(&app, "no review baseline");
-
-    send_keys(&mut app, ":review-baseline HEAD<ret>:review-diff<ret>").await?;
+    let head = git_ok(dir, &["rev-parse", "HEAD"]);
+    assert_eq!(app.editor.review_baseline.as_deref(), Some(head.as_str()));
     let (first, text) = diff_buffer(&app);
     assert!(
         text.contains("--- file.txt\n+++ file.txt\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"),
@@ -2125,17 +2125,21 @@ async fn review_files_picks_files_changed_since_the_baseline() -> anyhow::Result
         opened("file.txt", 3),
     );
 
+    // Without a baseline, :review-files pins HEAD and reviews the pick against it.
+    let head = git_ok(dir, &["rev-parse", "HEAD"]);
+    let pinned = |app: &Application| {
+        file(app);
+        assert_eq!(app.editor.review_baseline.as_deref(), Some(head.as_str()));
+        let review = doc!(app.editor).review.as_ref().unwrap();
+        assert_eq!(review.baseline().revision(), Some(head.as_str()));
+    };
+
     test_key_sequences(
         &mut repo.app()?,
         vec![
-            (
-                Some(":review-files<ret>"),
-                Some(&|app| assert_error(app, "no review baseline")),
-            ),
-            (
-                Some(":review-baseline HEAD<ret>:o same.txt<ret>:review-files<ret>"),
-                None,
-            ),
+            (Some(":review-files<ret>"), None),
+            (Some("file.txt<ret>"), Some(&pinned)),
+            (Some(":o same.txt<ret>:review-files<ret>"), None),
             (Some("added<ret>"), Some(&added)),
             (Some(":review-files<ret>"), None),
             (Some("staged<ret>"), Some(&staged)),
