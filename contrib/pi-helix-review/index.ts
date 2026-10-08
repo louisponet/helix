@@ -667,6 +667,14 @@ class Hook {
 			if (error instanceof BatchError) return;
 			throw error;
 		}
+		// Another checkout's Helix (or a test) may have used this mailbox: such a batch is not for this agent.
+		const paths = [...batch.files, ...batch.comments].map((entry) => entry.path);
+		const inRepo = await Promise.all(paths.map(async (p) => (await realpath(p).catch(() => p)).startsWith(this.repo + sep)));
+		if (paths.length > 0 && !inRepo.includes(true)) {
+			console.warn(`helix-review: dropped ${q(path)}: none of its files is in ${q(this.repo)}`);
+			await unlink(path);
+			return;
+		}
 		const baselines = new Map<string, Baseline>();
 		for (const { path, baseline } of [...batch.files, ...batch.comments]) {
 			if (!baselines.has(path) && !this.isPiState(path)) baselines.set(path, baseline);

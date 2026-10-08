@@ -132,6 +132,9 @@ The mailbox is `<repo>/.pi/helix-review/` with an `outbox/` directory and
   state under `<repo>/.pi/`, and then echoes a summary such as `Agent turn
   done: 3 files changed since 1a832de9 (:review-files)` to Helix's status line. A failing echo is ignored like
   every other socket command.
+- A batch none of whose files is in the repository (after `realpath`) is
+  meant for another agent: pi logs one line and deletes it, without a turn or a
+  receipt.
 - Each batch in the outbox becomes one `helix-review:handoff` message (entries
   under `<repo>/.pi/` are skipped): your edits as unified-diff hunks against the turn snapshot (or the batch's
   baseline blob when there is none; at most 200 hunk lines per file, the rest

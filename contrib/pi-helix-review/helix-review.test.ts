@@ -989,6 +989,44 @@ test("a Helix started after pi, or restarted, is attached once its socket appear
 	assert.deepEqual(second.lines, [`review-handoff ${outbox}`, `review-baseline ${head}`, `echo pi hook attached, baseline ${head.slice(0, 8)}`]);
 });
 
+test("a batch about files outside the repository is dropped without a turn or a receipt", async (t) => {
+	const w = workspace(t);
+	const socket = join(w.root, "helix.sock");
+	withEnv(t, { HELIX_COMMAND_SOCKET: socket });
+	const { lines } = await fakeHelix(t, socket);
+	const warn = t.mock.method(console, "warn", () => {});
+	const repo = realpathSync(w.repo);
+	w.stage("a.rs", "a\n");
+	const head = w.commit();
+	const outside = join(w.root, "file.txt");
+	writeFileSync(outside, "x\n");
+	const outbox = join(repo, ".pi", "helix-review", "outbox");
+
+	const session = piSession(repo);
+	t.after(() => session.emit("session_shutdown"));
+	await session.emit("session_start", { reason: "startup" });
+	await session.emit("agent_start");
+	lines.splice(0);
+	const batch = join(outbox, "3-1.json");
+	writeFileSync(
+		batch,
+		JSON.stringify({
+			format: "helix-review-batch",
+			version: 2,
+			files: [{ path: outside, baseline: commitBase(head, null) }],
+			comments: [],
+			request: { kind: "message", text: "not for this agent" },
+		}),
+	);
+	await until(() => !existsSync(batch), "the batch to be dropped");
+	await new Promise((wake) => setTimeout(wake, 100));
+	assert.equal(session.messages.length, 0);
+	assert.deepEqual(lines, [], "no receipt is echoed");
+	assert.equal(warn.mock.callCount(), 1);
+	const state = JSON.parse(readFileSync(join(repo, ".pi", "helix-review", "state.json"), "utf8"));
+	assert.deepEqual(state.baseline, { commit_oid: head, acknowledged: false });
+});
+
 test("an unreachable Helix never fails the hook, and an empty handoff is dropped but acknowledged", async (t) => {
 	const w = workspace(t);
 	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });
