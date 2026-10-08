@@ -9,7 +9,7 @@ use helix_core::doc_formatter::TextFormat;
 use helix_core::graphemes::prev_grapheme_boundary;
 use helix_core::line_ending::line_end_char_index;
 use helix_core::text_annotations::TextAnnotations;
-use helix_view::review::{OldFocus, Review, ReviewAsk, ReviewComment, ReviewRequest, ReviewSide};
+use helix_view::review::{OldFocus, Review, ReviewComment, ReviewRequest, ReviewSide};
 
 use helix_loader::workspace_trust::TrustQuery;
 use helix_vcs::FileChange;
@@ -30,7 +30,6 @@ const OLD_FOCUS_TYPABLE: &[&str] = &[
     "review-ask",
     "review-comments",
     "review-uncomment",
-    "review-dismiss",
     "review-export",
     "review-send",
     "review-commit",
@@ -46,7 +45,6 @@ const OLD_FOCUS_STATIC: &[&str] = &[
     "review_ask_prompt",
     "review_comments_picker",
     "review_uncomment_latest",
-    "review_dismiss_latest",
     "review_toggle_stage",
     "review_revert_change",
     "review_close_buffer",
@@ -449,73 +447,6 @@ fn enclosing_text(doc: &Document, range: Range) -> Option<String> {
     Some(text.byte_slice(start..end).to_string())
 }
 
-/// Shows the agent's reply from the JSON file `args[0]` (`{path, current_line, text}`) in the
-/// reviewed buffer of `path`; ignored when that buffer is not open or not reviewed.
-pub(super) fn review_reply(
-    cx: &mut compositor::Context,
-    args: Args,
-    event: PromptEvent,
-) -> anyhow::Result<()> {
-    if event != PromptEvent::Validate {
-        return Ok(());
-    }
-    #[derive(serde::Deserialize)]
-    struct Reply {
-        path: PathBuf,
-        current_line: usize,
-        text: String,
-    }
-    let file = &args[0];
-    let json = std::fs::read_to_string(file).with_context(|| format!("failed to read {file}"))?;
-    let reply: Reply =
-        serde_json::from_str(&json).with_context(|| format!("invalid reply in {file}"))?;
-    let path = helix_stdx::path::canonicalize(&reply.path);
-    let Some(doc) = cx.editor.document_by_path_mut(&path) else {
-        log::info!("not showing the reply for {}: not open", path.display());
-        return Ok(());
-    };
-    let Some(review) = &mut doc.review else {
-        log::info!("not showing the reply for {}: not reviewed", path.display());
-        return Ok(());
-    };
-    review.add_reply(reply.current_line.saturating_sub(1), reply.text);
-    let name = doc.display_name().into_owned();
-    cx.editor.set_status(format!(
-        "The agent replied in {name}; :review-dismiss hides it"
-    ));
-    Ok(())
-}
-
-pub(super) fn review_dismiss(
-    cx: &mut compositor::Context,
-    args: Args,
-    event: PromptEvent,
-) -> anyhow::Result<()> {
-    if event != PromptEvent::Validate {
-        return Ok(());
-    }
-    let count = match args.first() {
-        Some(count) => count
-            .parse::<usize>()
-            .ok()
-            .filter(|&count| count > 0)
-            .context("count must be a positive number")?,
-        None => 1,
-    };
-    let review = doc_mut!(cx.editor)
-        .review
-        .as_mut()
-        .context("not reviewing this buffer")?;
-    let removed = review.dismiss_asks(count);
-    ensure!(removed > 0, "no questions or replies to dismiss");
-    let left = review.asks().len();
-    cx.editor.set_status(format!(
-        "Dismissed {}, {left} left",
-        plural(removed, "question")
-    ));
-    Ok(())
-}
-
 pub(super) fn review_ask(
     cx: &mut compositor::Context,
     args: Args,
@@ -532,16 +463,8 @@ pub(super) fn review_ask(
     ensure_review(cx)?;
     let comments = selection_comments(cx.editor, &args[0], true)?;
     let count = comments.len();
-    let ask = ReviewAsk {
-        message: args[0].to_string(),
-        lines: comments.iter().map(|c| c.current_line - 1).collect(),
-        reply: None,
-    };
     for comment in comments {
-        cx.editor.review_batch.add_comment(ReviewComment {
-            reply_requested: true,
-            ..comment
-        });
+        cx.editor.review_batch.add_comment(comment);
     }
     cx.editor.review_batch.set_request(ReviewRequest::Ask);
     if doc!(cx.editor).is_modified() {
@@ -557,9 +480,6 @@ pub(super) fn review_ask(
         )?;
     } else {
         hand_off(cx.editor, None, ":review-ask")?;
-    }
-    if let Some(review) = &mut doc_mut!(cx.editor).review {
-        review.add_ask(ask);
     }
     cx.editor.set_status(format!(
         "Asked the agent about {}",

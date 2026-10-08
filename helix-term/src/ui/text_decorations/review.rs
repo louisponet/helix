@@ -3,7 +3,7 @@ use helix_core::line_ending::line_end_char_index;
 use helix_core::text_annotations::TextAnnotations;
 use helix_core::{Position, RopeSlice};
 use helix_view::graphics::{Modifier, Rect};
-use helix_view::review::{OldFocus, Review, ReviewNote};
+use helix_view::review::{OldFocus, Review};
 use helix_view::theme::Style;
 use helix_view::Theme;
 
@@ -24,12 +24,7 @@ pub struct ReviewDecoration<'a> {
     old_staged: Style,
     selection: Style,
     cursor: Style,
-    /// Styles of the question placeholders and of the agent's replies.
-    ask: Style,
-    reply: Style,
-    /// Document lines with old lines or notes below them, ascending.
-    anchors: Vec<usize>,
-    next_anchor: usize,
+    next_block: usize,
     /// Document line whose end was just rendered and that has old lines below it.
     pending_line: Option<usize>,
 }
@@ -43,12 +38,6 @@ impl<'a> ReviewDecoration<'a> {
         marker_col: Option<u16>,
         theme: &Theme,
     ) -> Self {
-        let mut anchors: Vec<usize> = (review.blocks().iter())
-            .map(|block| block.anchor_line)
-            .chain(review.note_lines(text.len_lines()))
-            .collect();
-        anchors.sort_unstable();
-        anchors.dedup();
         ReviewDecoration {
             review,
             text,
@@ -59,42 +48,15 @@ impl<'a> ReviewDecoration<'a> {
             old_staged: theme.get("diff.minus.review.staged"),
             selection: theme.get("ui.selection.primary"),
             cursor: theme.get("ui.cursor.primary"),
-            ask: theme.get("ui.review.ask"),
-            reply: theme.get("ui.review.reply"),
-            anchors,
-            next_anchor: 0,
+            next_block: 0,
             pending_line: None,
         }
     }
 
-    fn anchor_char(&self, anchor: usize) -> usize {
-        self.anchors
-            .get(anchor)
-            .map_or(usize::MAX, |&line| line_end_char_index(&self.text, line))
-    }
-
-    /// Draws the rows of `note` starting at `row` and returns how many it took.
-    fn draw_note(&self, renderer: &mut TextRenderer, row: usize, note: ReviewNote) -> usize {
-        let style = match note {
-            ReviewNote::Ask(_) => self.ask,
-            ReviewNote::Reply(_) => self.reply,
-        };
-        let rows = note.rows(self.text_fmt.viewport_width as usize);
-        for (offset, text) in rows.iter().enumerate() {
-            if is_visible(renderer, row + offset) {
-                self.fill_rows(renderer, row + offset, 1, style);
-                renderer.set_string_truncated(
-                    renderer.viewport.x,
-                    (row + offset) as u16,
-                    text,
-                    renderer.viewport.width as usize,
-                    |_| style,
-                    true,
-                    false,
-                );
-            }
-        }
-        rows.len()
+    fn anchor_char(&self, block: usize) -> usize {
+        self.review.blocks().get(block).map_or(usize::MAX, |block| {
+            line_end_char_index(&self.text, block.anchor_line)
+        })
     }
 
     /// Draws snapshot line `line` in `old` style starting at `row` and returns the number of rows
@@ -193,10 +155,11 @@ fn is_visible(renderer: &TextRenderer, row: usize) -> bool {
 impl Decoration for ReviewDecoration<'_> {
     fn reset_pos(&mut self, pos: usize) -> usize {
         self.pending_line = None;
-        self.next_anchor = self
-            .anchors
-            .partition_point(|&line| line_end_char_index(&self.text, line) < pos);
-        self.anchor_char(self.next_anchor)
+        self.next_block = self
+            .review
+            .blocks()
+            .partition_point(|block| line_end_char_index(&self.text, block.anchor_line) < pos);
+        self.anchor_char(self.next_block)
     }
 
     fn decorate_grapheme(
@@ -204,9 +167,10 @@ impl Decoration for ReviewDecoration<'_> {
         _renderer: &mut TextRenderer,
         _grapheme: &FormattedGrapheme,
     ) -> usize {
-        self.pending_line = Some(self.anchors[self.next_anchor]);
-        self.next_anchor += 1;
-        self.anchor_char(self.next_anchor)
+        let line = self.review.blocks()[self.next_block].anchor_line;
+        self.pending_line = Some(line);
+        self.next_block += self.review.blocks_at(line).len();
+        self.anchor_char(self.next_block)
     }
 
     fn render_virt_lines(
@@ -244,9 +208,6 @@ impl Decoration for ReviewDecoration<'_> {
             for old_line in block.old.clone() {
                 row += self.draw_old_line(renderer, row, old_line, old);
             }
-        }
-        for note in self.review.notes_below(line, self.text.len_lines()) {
-            row += self.draw_note(renderer, row, note);
         }
         Position::new(row - first_row, 0)
     }

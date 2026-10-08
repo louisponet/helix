@@ -196,7 +196,6 @@
 | `review_send_handoff` | Hand the review back now | normal: `` GS ``, select: `` GS `` |
 | `review_comment_prompt` | Comment on the selection for the review | normal: `` Gm ``, select: `` Gm `` |
 | `review_ask_prompt` | Ask the agent about the selections | normal: `` Ga ``, select: `` Ga `` |
-| `review_dismiss_latest` | Hide the latest question and reply of the review | normal: `` GD ``, select: `` GD `` |
 | `redo` | Redo change | normal: `` U ``, select: `` U `` |
 | `earlier` | Move backward in history | normal: `` <A-u> ``, select: `` <A-u> `` |
 | `later` | Move forward in history | normal: `` <A-U> ``, select: `` <A-U> `` |

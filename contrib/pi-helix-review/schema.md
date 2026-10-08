@@ -100,7 +100,7 @@ updated Helix.
 | `version`  | number | Schema version, `2`. |
 | `files`    | array  | Every file reviewed since the previous export (including files without comments and reviews closed since), in no particular order. Each path appears once. |
 | `comments` | array  | Pending comments in the order they were made. May be empty. |
-| `request`  | object | Optional. What the reviewer asks the agent to do besides the edits and comments: `{ "kind": "commit-staged", "subject"?: string }` (from `:review-commit [subject]`: commit exactly what is staged in the index) or `{ "kind": "message", "text": string }` (from `:review-send <text>`) or `{ "kind": "ask" }` (from `:review-ask <text>`: act on the comments with `reply_requested` and answer them briefly). A batch with a request may have no files or comments. |
+| `request`  | object | Optional. What the reviewer asks the agent to do besides the edits and comments: `{ "kind": "commit-staged", "subject"?: string }` (from `:review-commit [subject]`: commit exactly what is staged in the index) or `{ "kind": "message", "text": string }` (from `:review-send <text>`) or `{ "kind": "ask" }` (from `:review-ask <text>`: act on the batch's comments, one per selection, the primary selection's first). A batch with a request may have no files or comments. |
 
 There is no batch-wide baseline.
 
@@ -140,7 +140,6 @@ detect later staging.
 | `context_after`  | string | Snapshot text from the selection end through the end of the line 3 lines below the selection's last line (including its line ending). May be empty. |
 | `enclosing_text` | string | Optional. For `"current"` comments in a buffer with a syntax tree: the text of the smallest syntax node around the selection whose kind names a function, method, impl, class, struct, enum, trait or module (or, when none does, the smallest one spanning at least three lines), cut at 200 lines. |
 | `comment`        | string | The reviewer's comment text. |
-| `reply_requested` | boolean | Optional, `true` for comments from `:review-ask`, one per selection, the primary selection's first: the reviewer wants the agent to act on it and answer briefly. Omitted otherwise. |
 
 An `"old"` comment cannot have a commit baseline with `blob_oid: null`: that
 snapshot has no old text to select. Consumers must reject that combination.
