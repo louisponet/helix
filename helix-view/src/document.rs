@@ -2103,7 +2103,15 @@ impl Document {
             }
         };
         let (snapshot, ..) = from_reader(&mut data.as_slice(), Some(self.encoding))?;
-        Review::new(snapshot, baseline, &self.text)
+        let mut review = Review::new(snapshot, baseline, &self.text)?;
+        // Against a commit, part of the change may already be in the index.
+        if revision.is_some() {
+            if let Ok((index, _)) = provider_registry.get_index_base(path, trust_full) {
+                let worktree = self.text.to_string().into_bytes();
+                review.set_staged_hunks(helix_vcs::staged_hunk_count(&data, &index, &worktree).0);
+            }
+        }
+        Ok(review)
     }
 
     pub fn version_control_head(&self) -> Option<Arc<Box<str>>> {

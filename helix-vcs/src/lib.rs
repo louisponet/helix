@@ -14,7 +14,10 @@ mod git;
 
 mod diff;
 
-pub use diff::{apply_hunk, compute_hunks, line_hunks, unified_diff, DiffHandle, Hunk};
+pub use diff::{
+    apply_hunk, compute_hunks, find_hunk, line_hunks, staged_hunk_count, unified_diff, DiffHandle,
+    Hunk,
+};
 
 mod status;
 

@@ -143,6 +143,45 @@ pub fn apply_hunk(before: &[u8], after: &[u8], hunk: &Hunk) -> Vec<u8> {
         .collect()
 }
 
+/// The hunk of `hunks` whose worktree (`after`) lines meet `lines`. An empty range, a removal,
+/// meets the hunks at its position, and a removal is also found from the line on either side.
+pub fn find_hunk<'a>(hunks: &'a [Hunk], lines: &std::ops::Range<usize>) -> Option<&'a Hunk> {
+    let after = |hunk: &Hunk| hunk.after.start as usize..hunk.after.end as usize;
+    let exact = |hunk: &&Hunk| {
+        let range = after(hunk);
+        match (range.is_empty(), lines.is_empty()) {
+            (false, false) => range.start < lines.end && lines.start < range.end,
+            (true, true) => range.start == lines.start,
+            _ => false,
+        }
+    };
+    let touching = |hunk: &&Hunk| {
+        let range = after(hunk);
+        (range.is_empty() || lines.is_empty())
+            && range.start <= lines.end
+            && lines.start <= range.end
+    };
+    hunks
+        .iter()
+        .find(exact)
+        .or_else(|| hunks.iter().find(touching))
+}
+
+/// How many hunks of the change from `base` to `worktree` the index content `index` already holds
+/// in full, and how many hunks there are.
+pub fn staged_hunk_count(base: &[u8], index: &[u8], worktree: &[u8]) -> (usize, usize) {
+    let unstaged = line_hunks(index, worktree);
+    let changes = line_hunks(base, worktree);
+    let staged = changes
+        .iter()
+        .filter(|hunk| {
+            let lines = hunk.after.start as usize..hunk.after.end as usize;
+            find_hunk(&unstaged, &lines).is_none()
+        })
+        .count();
+    (staged, changes.len())
+}
+
 /// Formats the changes from `before` to `after` as unified diff hunks with three lines of
 /// context, without file headers.
 pub fn unified_diff(before: &str, after: &str) -> String {

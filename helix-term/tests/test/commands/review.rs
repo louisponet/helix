@@ -1694,15 +1694,16 @@ async fn n_walks_review_hunks_until_something_is_searched() -> anyhow::Result<()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()> {
-    let index = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
-    let worktree = "a\nB\nc\nd\ne\nf\ng\nh\nI\nj\n";
-    let repo = Repo::new(index, index, worktree);
+    // Twenty lines, changed far apart so each change is its own hunk in every diff.
+    let index: String = ('a'..='t').map(|c| format!("{c}\n")).collect();
+    let worktree = index.replace("b\n", "B\n").replace("s\n", "S\n");
+    let repo = Repo::new(&index, &index, &worktree);
     let dir = repo.dir.path();
     let _cwd = Cwd::enter(dir);
     let mut app = repo.app()?;
     let cached = || git_ok(dir, &["diff", "--cached", "--", "file.txt"]);
     let first = "-b\n+B";
-    let second = "-i\n+I";
+    let second = "-s\n+S";
     let status = |app: &Application| app.editor.get_status().unwrap().0.to_string();
     let blob = |content: &str| {
         let path = dir.join("blob.tmp");
@@ -1710,6 +1711,10 @@ async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()>
         let oid = git_ok(dir, &["hash-object", "blob.tmp"]);
         fs::remove_file(path).unwrap();
         oid
+    };
+    let staged_hunks = |app: &Application| {
+        let doc = app.editor.document_by_path(&repo.file).unwrap();
+        doc.review.as_ref().unwrap().staged_hunks()
     };
 
     // Outside any unstaged hunk, and with unsaved changes, nothing is staged.
@@ -1720,21 +1725,21 @@ async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()>
     send_keys(&mut app, "u").await?;
     assert_eq!(cached(), "");
 
-    // Stage the first of two hunks: the index gets exactly that hunk.
-    send_keys(&mut app, ":review-stage<ret>").await?;
+    // Enter stages the first of two hunks: the index gets exactly that hunk.
+    send_keys(&mut app, "<ret>").await?;
     assert_eq!(status(&app), "Staged hunk; 1 of 2 hunks staged in file.txt");
     let staged = cached();
     assert!(
         staged.contains(first) && !staged.contains(second),
         "{staged}"
     );
-    let one = blob("a\nB\nc\nd\ne\nf\ng\nh\ni\nj\n");
     let ls = git_ok(dir, &["ls-files", "-s", "file.txt"]);
-    assert!(ls.contains(&one), "{ls}");
+    assert!(ls.contains(&blob(&index.replace("b\n", "B\n"))), "{ls}");
     assert_eq!(repo.disk(), worktree);
+    assert_eq!(staged_hunks(&app), 1);
 
     // Stage the second: the index matches the worktree.
-    send_keys(&mut app, "7j:review-stage<ret>").await?;
+    send_keys(&mut app, "17j:review-stage<ret>").await?;
     assert_eq!(status(&app), "Staged hunk; 2 of 2 hunks staged in file.txt");
     let staged = cached();
     assert!(
@@ -1753,7 +1758,8 @@ async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()>
     );
     send_keys(&mut app, ":review-unstage<ret>").await?;
     assert_eq!(cached(), "");
-    assert!(git_ok(dir, &["ls-files", "-s", "file.txt"]).contains(&blob(index)));
+    assert!(git_ok(dir, &["ls-files", "-s", "file.txt"]).contains(&blob(&index)));
+    assert_eq!(staged_hunks(&app), 0);
     send_keys(&mut app, ":review-unstage<ret>").await?;
     assert_error(&app, "nothing staged");
 
@@ -1765,20 +1771,33 @@ async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()>
     fs::remove_file(&lock)?;
     assert_eq!(cached(), "");
 
-    // From the :review-diff buffer, the hunk under the cursor is staged.
+    // From the :review-diff buffer, Enter stages the hunk under the cursor and marks it.
+    let diff_text = |app: &Application| doc!(app.editor).text().to_string();
     send_keys(&mut app, ":review-diff<ret>").await?;
-    let line = doc!(app.editor)
-        .text()
-        .to_string()
+    let line = diff_text(&app)
         .lines()
-        .position(|line| line == "+I")
+        .position(|line| line == "+S")
         .unwrap();
-    send_keys(&mut app, &format!("gg{line}j:review-stage<ret>")).await?;
+    send_keys(&mut app, &format!("gg{line}j<ret>")).await?;
     let staged = cached();
     assert!(
         staged.contains(second) && !staged.contains(first),
         "{staged}"
     );
+    let headers = |app: &Application| -> Vec<bool> {
+        diff_text(app)
+            .lines()
+            .filter(|line| line.starts_with("@@ "))
+            .map(|line| line.ends_with(" (staged)"))
+            .collect()
+    };
+    assert_eq!(headers(&app), [false, true]);
+
+    // u in the diff buffer unstages it again instead of undoing.
+    send_keys(&mut app, "u").await?;
+    assert_eq!(status(&app), "Unstaged hunk");
+    assert_eq!(cached(), "");
+    assert_eq!(headers(&app), [false, false]);
     Ok(())
 }
 

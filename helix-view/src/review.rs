@@ -131,6 +131,8 @@ pub struct Review {
     blocks: Vec<OldBlock>,
     focus: HashMap<ViewId, OldFocus>,
     suspended: bool,
+    /// How many hunks the git index already holds, as of the last count.
+    staged: usize,
 }
 
 impl Review {
@@ -157,6 +159,7 @@ impl Review {
             blocks: Vec::new(),
             focus: HashMap::new(),
             suspended: false,
+            staged: 0,
         };
         review.update_blocks();
         Ok(review)
@@ -263,6 +266,16 @@ impl Review {
     /// The number of hunks, each a run of changed lines.
     pub fn hunk_count(&self) -> usize {
         self.hunks.len()
+    }
+
+    /// How many hunks were already staged in the git index when last counted (at review start
+    /// and after `:review-stage` or `:review-unstage`).
+    pub fn staged_hunks(&self) -> usize {
+        self.staged
+    }
+
+    pub fn set_staged_hunks(&mut self, staged: usize) {
+        self.staged = staged;
     }
 
     /// The baseline and document line ranges of the hunk whose document lines contain `line`.

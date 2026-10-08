@@ -181,6 +181,7 @@
 | `kill_to_line_start` | Delete till start of line | insert: `` <C-u> `` |
 | `kill_to_line_end` | Delete till end of line | insert: `` <C-k> `` |
 | `undo` | Undo change | normal: `` u ``, select: `` u `` |
+| `review_stage_hunk` | Stage the review hunk under the cursor (only while reviewing) | normal: `` <ret> ``, select: `` <ret> `` |
 | `redo` | Redo change | normal: `` U ``, select: `` U `` |
 | `earlier` | Move backward in history | normal: `` <A-u> ``, select: `` <A-u> `` |
 | `later` | Move forward in history | normal: `` <A-U> ``, select: `` <A-U> `` |

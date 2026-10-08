@@ -149,6 +149,7 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         "u" => undo,
         "U" => redo,
         "A-u" => earlier,
+        "ret" => review_stage_hunk,
         "A-U" => later,
 
         "y" => yank,

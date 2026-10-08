@@ -82,6 +82,7 @@ Normal mode is the default mode when you launch helix. You can return to it from
 | `O`         | Open new line above selection                                        | `open_above`              |
 | `.`         | Repeat last insert                                                   | N/A                       |
 | `u`         | Undo change                                                          | `undo`                    |
+| `Enter`     | Stage the review hunk under the cursor (only while [reviewing](./review.md)) | `review_stage_hunk` |
 | `U`         | Redo change                                                          | `redo`                    |
 | `Alt-u`     | Move backward in history                                             | `earlier`                 |
 | `Alt-U`     | Move forward in history                                              | `later`                   |

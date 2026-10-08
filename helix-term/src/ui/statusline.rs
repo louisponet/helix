@@ -622,6 +622,10 @@ where
         let suffix = if hunks == 1 { "" } else { "s" };
         text.push_str(&format!(" {hunks} hunk{suffix}"));
     }
+    let staged = review.staged_hunks();
+    if staged > 0 {
+        text.push_str(&format!(" {staged} staged"));
+    }
     let comments = context.editor.review_batch.comments().len();
     if comments > 0 {
         let suffix = if comments == 1 { "" } else { "s" };

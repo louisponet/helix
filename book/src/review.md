@@ -41,7 +41,8 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-export <path>` | Write all pending comments and reviewed files to a new JSON file. |
 | `:review-revert` | Replace the change under the cursor, or the focused old text's change, with the baseline's lines (added lines are deleted; removed lines shown below the cursor line are restored). One undoable edit; the file on disk is not touched. |
 | `:review-stage` | Stage the unstaged hunk (index to worktree) under the cursor in the git index, like `git add -p`: in a reviewed buffer the hunk on the cursor line or of the focused old text, in the `:review-diff` buffer the hunk under the cursor. Refuses buffers with unsaved changes, a locked index (`index.lock`), and files git converts (filters, line endings). |
-| `:review-unstage` | Undo the most recent `:review-stage`, restoring that file's previous index entry; refused if the entry changed since. |
+| `:review-unstage` | Undo the most recent `:review-stage`, restoring that file's previous index entry; refused if the entry changed since. `u` runs it in the `:review-diff` buffer. |
+| `Enter` | In normal mode, runs `:review-stage` while the buffer is reviewed or is the `:review-diff` buffer, and does nothing otherwise. |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept. Under a `:review-baseline`, the buffer is not reviewed again until a different baseline, `:review-baseline clear`, or an explicit `:review` on it. |
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. `clear` closes all reviews. |
 | `:review-handoff <dir>` | Export a batch to `<dir>` on every write of a reviewed buffer. `clear` stops it. |
@@ -179,13 +180,20 @@ like this:
    rejects the change under the cursor (or the focused old text's change) by
    restoring the baseline's lines as one edit; `u` brings the agent's version
    back.
-6. `:review-comment <text>` comments on the current selection, or on the
+6. To commit part of the change, stage it hunk by hunk: `Enter` (or
+   `:review-stage`) stages the unstaged hunk under the cursor in the git index,
+   from a reviewed buffer, focused old text or the `:review-diff` buffer, where
+   staged hunks are marked `(staged)`; `:review-unstage` (`u` in the
+   `:review-diff` buffer) undoes the latest staging. Save first: only what is
+   on disk is staged. While reviewing, `Enter` in normal mode is taken by this;
+   elsewhere it does nothing.
+7. `:review-comment <text>` comments on the current selection, or on the
    selected old text while it is focused. `:review-comments` lists pending
    comments and jumps to one; `:review-uncomment [count]` drops the latest.
-7. For a request that belongs in the code, write a line containing
+8. For a request that belongs in the code, write a line containing
    `AGENT: <request>` (for example `// AGENT: handle the empty case`); the
    agent is told to address it and delete the marker.
-8. Hand the review back: `:w` on a reviewed buffer exports your edits,
+9. Hand the review back: `:w` on a reviewed buffer exports your edits,
    markers and comments, or `:review-send` exports them without writing
    anything when there is nothing to save. The status line then confirms it,
    for example `pi received your review: 1 file with edits, 1 review comment`.
@@ -207,13 +215,15 @@ c = ":review-comments"
 u = ":review-uncomment"
 s = ":review-send"
 r = ":review-revert"
+s = ":review-stage"
+S = ":review-unstage"
 R = ":review-refresh"
 x = ":review-close"
 ```
 
 `:review-comment` takes the comment text, so type it at the `:` prompt. The
-`review` statusline element shows the baseline, the hunk count and the pending
-comment count; add it with, for example,
+`review` statusline element shows the baseline, the hunk count, how many hunks
+are staged and the pending comment count; add it with, for example,
 `right = ["review", "diagnostics", "selections", "position"]` under
 `[editor.statusline]`.
 
