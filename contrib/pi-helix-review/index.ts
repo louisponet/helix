@@ -560,7 +560,7 @@ class Hook {
 					comment: c.comment,
 				}));
 			if (hunks.length || agentComments.length || reviewComments.length) {
-				files.push({ path: file, user_edits: { against, hunks }, agent_comments: agentComments, review_comments: reviewComments });
+				files.push({ path: file, user_edits: { against, ...capHunks(hunks) }, agent_comments: agentComments, review_comments: reviewComments });
 			}
 		}
 		if (files.length > 0) {
@@ -590,6 +590,25 @@ class Hook {
 	private save(): Promise<void> {
 		return writeFile(join(this.dir, "state.json"), `${JSON.stringify(this.state, null, 2)}\n`);
 	}
+}
+
+const MAX_HUNK_LINES = 200;
+
+/** Keeps whole hunks up to MAX_HUNK_LINES lines and replaces the rest with one summary entry. */
+function capHunks(hunks: string[]): { hunks: string[]; truncated: boolean } {
+	const lines = (hunk: string) => hunk.split("\n").length - (hunk.endsWith("\n") ? 1 : 0);
+	const kept: string[] = [];
+	let total = 0;
+	for (const hunk of hunks) {
+		if (total + lines(hunk) > MAX_HUNK_LINES) break;
+		total += lines(hunk);
+		kept.push(hunk);
+	}
+	const rest = hunks.slice(kept.length);
+	if (rest.length === 0) return { hunks: kept, truncated: false };
+	const omitted = rest.reduce((n, hunk) => n + lines(hunk), 0);
+	const more = `${rest.length} more hunk${rest.length === 1 ? "" : "s"}`;
+	return { hunks: [...kept, `... ${more} (${omitted} lines) omitted; read the file`], truncated: true };
 }
 
 /** Summarizes a handoff for the reviewer, e.g. "1 file with edits, 2 AGENT comments". */

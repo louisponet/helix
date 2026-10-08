@@ -117,7 +117,8 @@ The mailbox is `<repo>/.pi/helix-review/` with an `outbox/` directory and
   every other socket command.
 - Each batch in the outbox becomes one `helix-review:handoff` message: your
   edits as unified-diff hunks against the turn snapshot (or the batch's
-  baseline blob when there is none), every `AGENT: <request>` line in the
+  baseline blob when there is none; at most 200 hunk lines per file, the rest
+  summarized with `truncated: true`), every `AGENT: <request>` line in the
   saved file (marked `new` when you added it in this review), and the review
   comments. It starts a turn when pi is idle and steers the running turn
   otherwise. The baseline is then acknowledged and the batch deleted. A batch

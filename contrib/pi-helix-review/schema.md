@@ -165,7 +165,8 @@ quoted as a fenced JSON block in its content, is:
       "path": "/abs/repo/src/lib.rs",
       "user_edits": {
         "against": "turn-snapshot",
-        "hunks": ["@@ -3 +3,2 @@\n-fn b() {}\n+fn b() -> u8 { 1 }\n+// AGENT: rename b\n"]
+        "hunks": ["@@ -3 +3,2 @@\n-fn b() {}\n+fn b() -> u8 { 1 }\n+// AGENT: rename b\n"],
+        "truncated": false
       },
       "agent_comments": [{ "line": 4, "text": "rename b", "new": true }],
       "review_comments": [
@@ -190,7 +191,8 @@ quoted as a fenced JSON block in its content, is:
 | `baseline` | The commit the agent's turn was reviewed against, or `null` if pi has none. |
 | `files[].path` | Absolute path from the batch (its files and comment paths). |
 | `files[].user_edits.against` | `"turn-snapshot"`: the file as the agent left it at the end of its last turn. `"baseline"`: the batch's baseline blob for the file (empty when absent). |
-| `files[].user_edits.hunks` | Unified-diff hunks (`git diff` of the raw bytes) from that content to the saved file. |
+| `files[].user_edits.hunks` | Unified-diff hunks (`git diff` of the raw bytes) from that content to the saved file. Whole hunks are kept up to 200 lines per file; the rest are replaced by one entry such as `"... 3 more hunks (480 lines) omitted; read the file"`. |
+| `files[].user_edits.truncated` | `true` when hunks were omitted that way, else `false`. |
 | `files[].agent_comments` | Every line of the saved file matching `/\bAGENT:\s*(.+)$/`: 1-based `line`, the request `text`, and `new` when the line is not in the compared-against content. |
 | `files[].review_comments` | The batch's comments for the file, with the batch fields except `path` and `baseline`. |
 

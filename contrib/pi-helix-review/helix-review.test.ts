@@ -731,6 +731,7 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	assert.equal(handoff.path, file);
 	assert.equal(handoff.user_edits.against, "turn-snapshot");
 	assert.equal(handoff.user_edits.hunks.length, 1);
+	assert.equal(handoff.user_edits.truncated, false);
 	assert.match(handoff.user_edits.hunks[0], /^@@ .* @@\n.*-fn b\(\) \{\}\n\+fn b\(\) -> u8 \{ 1 \}\n\+\/\/ AGENT: rename b\n$/s);
 	assert.deepEqual(handoff.agent_comments, [
 		{ line: 2, text: "old request", new: false },
@@ -757,22 +758,40 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	renameSync(`${empty}.tmp`, empty);
 	await until(() => lines.length === 11, "the empty receipt echo");
 	assert.equal(lines[10], "echo pi received your review: nothing to do");
+
 	assert.equal(session.messages.length, 1);
 
+	// A large edit embeds whole hunks up to 200 lines and summarizes the rest.
+	const saved = readFileSync(file, "utf8");
+	writeFileSync(file, saved + Array.from({ length: 300 }, (_, i) => `// line ${i}\n`).join(""));
+	const large = join(outbox, "1-3.json");
+	writeFileSync(
+		`${large}.tmp`,
+		JSON.stringify({ format: "helix-review-batch", version: 2, files: [{ path: file, baseline: commitBase(head, blob) }], comments: [] }),
+	);
+	renameSync(`${large}.tmp`, large);
+	await until(() => lines.length === 12, "the large receipt echo");
+	assert.equal(session.messages.length, 2);
+	const truncated = session.messages[1].message.details.files[0].user_edits;
+	assert.equal(truncated.truncated, true);
+	assert.equal(truncated.hunks.length, 1);
+	assert.match(truncated.hunks[0], /^\.\.\. 1 more hunk \(30\d lines\) omitted; read the file$/);
+	writeFileSync(file, saved);
+
 	await session.emit("agent_start");
-	assert.deepEqual(lines.slice(11), [`review-handoff ${outbox}`, `review-baseline ${next}`, started], "an acknowledged baseline moves to HEAD");
+	assert.deepEqual(lines.slice(12), [`review-handoff ${outbox}`, `review-baseline ${next}`, started], "an acknowledged baseline moves to HEAD");
 
 	const restarted = piSession(repo);
 	t.after(() => restarted.emit("session_shutdown"));
 	await restarted.emit("session_start", { reason: "startup" });
-	assert.deepEqual(lines.slice(14), [`review-handoff ${outbox}`, `review-baseline ${next}`], "session_start restores the baseline");
+	assert.deepEqual(lines.slice(15), [`review-handoff ${outbox}`, `review-baseline ${next}`], "session_start restores the baseline");
 
 	// A turn that leaves nothing changed since its (still sticky) baseline says so.
 	writeFileSync(file, "fn a() {}\n// AGENT: old request\nfn b() {}\n");
 	unlinkSync(join(repo, "new.rs"));
 	await restarted.emit("agent_start");
 	await restarted.emit("agent_end", { messages: [] });
-	assert.deepEqual(lines.slice(16), [
+	assert.deepEqual(lines.slice(17), [
 		`review-handoff ${outbox}`,
 		`review-baseline ${next}`,
 		started,
