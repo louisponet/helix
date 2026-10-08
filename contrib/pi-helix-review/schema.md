@@ -198,7 +198,7 @@ quoted as a fenced JSON block in its content, is:
 | `files[].user_edits.truncated` | `true` when hunks were omitted that way, else `false`. |
 | `files[].agent_comments` | Every line of the saved file matching `/\bAGENT:\s*(.+)$/`: 1-based `line`, the request `text`, and `new` when the line is not in the compared-against content. |
 | `files[].review_comments` | The batch's comments for the file, with the batch fields except `path` and `baseline`. |
-| `request` | The batch's `request`, when it has one. The message content then ends with a "User request" section: for `commit-staged`, an instruction to commit exactly what is staged (`git commit` without `-a`, a Conventional Commit message derived from `git diff --cached`, the subject if given), touch nothing else and report the commit hash; for `message`, the text verbatim. |
+| `request` | The batch's `request`, when it has one. The message content then ends with a "User request" section: for `commit-staged`, an instruction to commit exactly what is staged (`git commit` without `-a`, a Conventional Commit message derived from `git diff --cached`, the subject if given), touch nothing else and report the commit hash; for `message`, the text verbatim; for `ask`, an instruction to do what the message asks and keep the final message to a few lines (it is shown inline in Helix), followed by each comment with `reply_requested`: path, lines, and the fenced selected text, enclosing code (when present) and message. |
 
 Files without edits, markers or comments are omitted; a handoff with no files
 and no request is not sent.
@@ -207,3 +207,17 @@ After a handoff with a `commit-staged` request, the hook checks `HEAD` at the
 end of the turn the handoff starts or steers: if the agent committed, the
 review baseline moves to that commit (not yet acknowledged, so it stays until
 the next handoff) and Helix is sent `review-baseline <commit>`.
+
+After a handoff with an `ask` request, the hook remembers the first comment
+with `reply_requested` (the primary selection). At the end of the turn the
+handoff starts or steers, it takes the text parts of the last assistant
+message and, when not empty, writes `.pi/helix-review/replies/<batch>.json`:
+
+```json
+{ "path": "/abs/file.rs", "current_line": 12, "text": "Renamed `x` to `count`." }
+```
+
+`current_line` is the comment's 1-based `current_line`. After the usual
+`review-baseline` refresh, Helix is sent `review-reply <file>`, which shows the
+text above the change closest to that line in the open, reviewed buffer of
+`path` (and is ignored otherwise).

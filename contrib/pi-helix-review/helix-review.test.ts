@@ -888,6 +888,80 @@ test("a commit-staged handoff moves the baseline to the agent's commit, an ordin
 	]);
 });
 
+test("an ask handoff instructs the agent and shows its final message as a reply in Helix", async (t) => {
+	const w = workspace(t);
+	const socket = join(w.root, "helix.sock");
+	withEnv(t, { HELIX_COMMAND_SOCKET: socket });
+	const lines = await fakeHelix(t, socket);
+	const repo = realpathSync(w.repo);
+	const file = join(repo, "a.rs");
+	const blob = w.stage("a.rs", "fn a() {\n    let x = 1;\n}\n");
+	const head = w.commit();
+	const outbox = join(repo, ".pi", "helix-review", "outbox");
+	const state = () => JSON.parse(readFileSync(join(repo, ".pi", "helix-review", "state.json"), "utf8"));
+
+	const session = piSession(repo);
+	t.after(() => session.emit("session_shutdown"));
+	await session.emit("session_start", { reason: "startup" });
+	await session.emit("agent_start");
+
+	const comment = {
+		path: file,
+		side: "current",
+		baseline: commitBase(head, blob),
+		start_line: 2,
+		end_line: 2,
+		current_line: 2,
+		selected_text: "    let x = 1;\n",
+		context_before: "fn a() {\n",
+		context_after: "}\n",
+		enclosing_text: "fn a() {\n    let x = 1;\n}",
+		comment: "rename x to count",
+		reply_requested: true,
+	};
+	const batch = join(outbox, "7-1.json");
+	writeFileSync(
+		`${batch}.tmp`,
+		JSON.stringify({ format: "helix-review-batch", version: 2, files: [], comments: [comment], request: { kind: "ask" } }),
+	);
+	renameSync(`${batch}.tmp`, batch);
+	await until(() => !existsSync(batch), "the batch to be consumed");
+	assert.equal(session.messages.length, 1);
+	const content = session.messages[0].message.content;
+	assert.match(content, /User request:\nThe user selected code in Helix and asked about it\. Do what the message asks\. Keep your final message short/);
+	assert.match(content, new RegExp(`Selection 1: ${file}, line 2\nSelected text:\n\`\`\`\n    let x = 1;\n\`\`\`\nEnclosing code:\n\`\`\`\nfn a\\(\\) \\{\n    let x = 1;\n\\}\n\`\`\`\nMessage:\n\`\`\`\nrename x to count\n\`\`\`$`));
+	assert.equal(session.messages[0].message.details.files[0].review_comments[0].reply_requested, true);
+	assert.deepEqual(state().ask_pending, { batch: "7-1", path: file, current_line: 2 });
+
+	// The turn it starts edits and answers; its end refreshes, then shows the final message.
+	await session.emit("agent_start");
+	writeFileSync(file, "fn a() {\n    let count = 1;\n}\n");
+	lines.length = 0;
+	const answer = [
+		{ role: "user", content: "rename" },
+		{ role: "assistant", content: [{ type: "text", text: "Working on it." }] },
+		{ role: "assistant", content: [{ type: "thinking", thinking: "done" }, { type: "text", text: "Renamed `x` to `count`.\n" }] },
+	];
+	await session.emit("agent_end", { messages: answer });
+	const reply = join(repo, ".pi", "helix-review", "replies", "7-1.json");
+	assert.deepEqual(JSON.parse(readFileSync(reply, "utf8")), { path: file, current_line: 2, text: "Renamed `x` to `count`." });
+	assert.deepEqual(lines, [
+		`review-baseline ${head}`,
+		`review-reply ${reply}`,
+		`echo Agent turn done: replied, 1 file changed since ${head.slice(0, 8)}`,
+	]);
+	assert.equal(state().ask_pending, undefined);
+
+	// An ordinary turn does not reply.
+	await session.emit("agent_start");
+	lines.length = 0;
+	await session.emit("agent_end", { messages: answer });
+	assert.deepEqual(lines, [
+		`review-baseline ${head}`,
+		`echo Agent turn done: 1 file changed since ${head.slice(0, 8)} (:review-files)`,
+	]);
+});
+
 test("an unreachable Helix never fails the hook, and an empty handoff is dropped but acknowledged", async (t) => {
 	const w = workspace(t);
 	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });
