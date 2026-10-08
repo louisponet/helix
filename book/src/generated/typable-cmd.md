@@ -97,9 +97,9 @@
 | `:review-uncomment` | Drop the most recently added pending review comment, or the given number of latest ones. |
 | `:review-export` | Write pending review comments and reviewed files as JSON to a new file. Reviewed buffers must be written first. |
 | `:review-revert` | Replace the changed lines under the cursor, or the focused old text's change, with the review baseline's lines. |
-| `:review-stage` | Stage the unstaged hunk under the cursor (or the focused old text's, or the :review-diff hunk's) in the git index, like git add -p. Refuses unsaved buffers. |
-| `:review-unstage` | Unstage the staged hunk under the cursor (or the focused old text's, or the :review-diff hunk's): the index gets the baseline's lines back for it. |
-| `:review-toggle-stage` | Stage the hunk under the cursor, or unstage it if it is already staged (Enter while reviewing). |
+| `:review-stage` | Stage the unstaged hunks the selections touch (or the focused old text's, or the :review-diff hunk under the cursor) in the git index, like git add -p. Refuses unsaved buffers. |
+| `:review-unstage` | Unstage the staged hunks the selections touch (or the focused old text's, or the :review-diff hunk under the cursor): the index gets the baseline's lines back for them. |
+| `:review-toggle-stage` | Stage the hunks the selections touch, or unstage them all if all are already staged (Enter while reviewing). |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept for :review-export. |
 | `:review-commit-all` | Stage every file changed since the review baseline (modified, deleted and untracked, like git add -A limited to them), then hand back like :review-commit with an optional subject and a leading @label to address a pi session. |
 | `:review-next` | Go to the next changed block, continuing with the first block of the next file changed since the review baseline (in :review-files order, wrapping around). |

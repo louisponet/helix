@@ -45,9 +45,9 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-uncomment [count]` | Drop the latest pending comment, or the `count` latest ones, and show how many remain. |
 | `:review-export <path>` | Write all pending comments and reviewed files to a new JSON file. |
 | `:review-revert` | Replace the change under the cursor, or the focused old text's change, with the baseline's lines (added lines are deleted; removed lines shown below the cursor line are restored). One undoable edit; the file on disk is not touched. |
-| `:review-stage` | Stage the unstaged hunk (index to worktree) under the cursor in the git index, like `git add -p`: in a reviewed buffer the hunk on the cursor line or of the focused old text, in the `:review-diff` buffer the hunk under the cursor. Refuses buffers with unsaved changes, a locked index (`index.lock`), and files git converts (filters, line endings). |
-| `:review-unstage` | Unstage the staged hunk under the cursor (same places as `:review-stage`): the index gets the review baseline's lines back for it. |
-| `:review-toggle-stage` | Stage the hunk under the cursor, or unstage it if it is already staged, so hunks can be toggled in any order. |
+| `:review-stage` | Stage the unstaged hunk (index to worktree) under the cursor in the git index, like `git add -p`: in a reviewed buffer every hunk any selection touches (a selection spanning several hunks stages them all) or the hunk of the focused old text, in the `:review-diff` buffer the hunk under the cursor. Refuses buffers with unsaved changes, a locked index (`index.lock`), and files git converts (filters, line endings). |
+| `:review-unstage` | Unstage the staged hunks the selections touch (same places as `:review-stage`): the index gets the review baseline's lines back for it. |
+| `:review-toggle-stage` | Stage the hunks the selections touch, or unstage them all if every one is already staged, so hunks can be toggled in any order; hunks committed since the baseline are skipped and counted. All changes go into one index write. |
 | `Enter` | In normal mode, runs `:review-toggle-stage` while the buffer is reviewed or is the `:review-diff` buffer, and does nothing otherwise. |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept. Under a `:review-baseline`, the buffer is not reviewed again until a different baseline, `:review-baseline clear`, or an explicit `:review` on it. |
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. `clear` closes all reviews. |
@@ -195,7 +195,10 @@ like this:
    back.
 6. To commit part of the change, stage it hunk by hunk: `Enter` (or
    `:review-toggle-stage`) stages the hunk under the cursor in the git index, or
-   unstages it if it is already staged, in any order, from a reviewed buffer,
+   unstages it if it is already staged, in any order; with a selection over
+   several hunks (or several selections) it stages every unstaged one, or
+   unstages them all when all are staged (`Staged 3 hunks; 5 of 7 staged in
+   file.rs`), from a reviewed buffer,
    focused old text or the `:review-diff` buffer, where staged hunks are marked
    `(staged)`. In the buffer a staged hunk's lines turn blue and its old lines
    grey (`diff.plus.review.staged`, `diff.minus.review.staged`) until the next

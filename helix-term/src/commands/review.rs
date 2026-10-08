@@ -1706,7 +1706,7 @@ enum Staging {
 
 /// Stages or unstages the hunk under the cursor, see `:review-stage` and `:review-unstage`.
 fn change_staging(editor: &mut Editor, staging: Staging) -> anyhow::Result<()> {
-    let (path, target) = stage_target(editor)?;
+    let (path, targets) = stage_target(editor)?;
     if let Some(doc) = editor.document_by_path(&path) {
         // The index is staged from the file on disk, which must be what the buffer shows.
         ensure!(
@@ -1731,39 +1731,64 @@ fn change_staging(editor: &mut Editor, staging: Staging) -> anyhow::Result<()> {
         .diff_providers
         .get_commit_base(&path, "HEAD", trust_full)
         .ok();
-    if let Some(head) = &head {
-        // A hunk HEAD already holds was committed after the baseline: there is nothing to toggle.
-        let committed = helix_vcs::find_hunk(&helix_vcs::line_hunks(&base, &worktree), &target)
-            .is_some_and(|hunk| {
-                let lines = hunk.after.start as usize..hunk.after.end as usize;
-                helix_vcs::find_hunk(&helix_vcs::line_hunks(&head.data, &worktree), &lines)
-                    .is_none()
-            });
-        ensure!(!committed, "already committed in {}", &head.commit_id[..8]);
-    }
+    // The unstaged hunks (index to worktree) the selections meet, and the staged ones (baseline to
+    // index) they meet outside every unstaged hunk, which map onto the index unchanged but for the
+    // line count differences of the unstaged hunks before them.
     let unstaged = helix_vcs::line_hunks(&index, &worktree);
-
-    let (content, verb) = match helix_vcs::find_hunk(&unstaged, &target) {
-        Some(hunk) if staging != Staging::Unstage => {
-            (helix_vcs::apply_hunk(&index, &worktree, hunk), "Staged")
+    let to_stage = hunks_meeting(&unstaged, &targets);
+    let index_targets: Vec<_> = targets
+        .iter()
+        .map(|target| worktree_to_index_lines(&unstaged, target))
+        .collect();
+    let staged = helix_vcs::line_hunks(&base, &index);
+    // A staged hunk HEAD already holds was committed after the baseline: there is nothing to toggle.
+    let in_head = |hunk: &helix_vcs::Hunk| {
+        head.as_ref().is_some_and(|head| {
+            let lines = hunk.after.start as usize..hunk.after.end as usize;
+            helix_vcs::find_hunk(&helix_vcs::line_hunks(&head.data, &index), &lines).is_none()
+        })
+    };
+    let (committed, to_unstage): (Vec<_>, Vec<_>) = hunks_meeting(&staged, &index_targets)
+        .into_iter()
+        .partition(|hunk| in_head(hunk));
+    if to_stage.is_empty() && to_unstage.is_empty() {
+        if let (Some(head), false) = (&head, committed.is_empty()) {
+            bail!("already committed in {}", &head.commit_id[..8]);
         }
-        Some(_) => bail!("nothing staged here"),
-        None if staging == Staging::Stage => bail!("nothing to stage here"),
-        None => {
-            // The target is outside every unstaged hunk, so it maps onto the index unchanged
-            // but for the line count differences of the unstaged hunks before it.
-            let target = worktree_to_index_lines(&unstaged, &target);
-            let staged = helix_vcs::line_hunks(&base, &index);
-            let hunk = helix_vcs::find_hunk(&staged, &target).context(match staging {
+    }
+
+    let stage = match staging {
+        Staging::Stage => true,
+        Staging::Unstage => false,
+        // Unstage only when every hunk met is already staged.
+        Staging::Toggle => !to_stage.is_empty(),
+    };
+    let (content, verb, hunks) = if stage {
+        ensure!(!to_stage.is_empty(), "nothing to stage here");
+        // Applied from the last, so the earlier hunks' index lines stay valid.
+        let content = to_stage.iter().rev().fold(index.clone(), |content, hunk| {
+            helix_vcs::apply_hunk(&content, &worktree, hunk)
+        });
+        (content, "Staged", to_stage.len())
+    } else {
+        ensure!(
+            !to_unstage.is_empty(),
+            match staging {
                 Staging::Unstage => "nothing staged here",
                 _ => "nothing to stage here",
-            })?;
-            let revert = helix_vcs::Hunk {
-                before: hunk.after.clone(),
-                after: hunk.before.clone(),
-            };
-            (helix_vcs::apply_hunk(&index, &base, &revert), "Unstaged")
-        }
+            }
+        );
+        let content = to_unstage
+            .iter()
+            .rev()
+            .fold(index.clone(), |content, hunk| {
+                let revert = helix_vcs::Hunk {
+                    before: hunk.after.clone(),
+                    after: hunk.before.clone(),
+                };
+                helix_vcs::apply_hunk(&content, &base, &revert)
+            });
+        (content, "Unstaged", to_unstage.len())
     };
     editor
         .diff_providers
@@ -1782,8 +1807,41 @@ fn change_staging(editor: &mut Editor, staging: Staging) -> anyhow::Result<()> {
         .unwrap_or(&path)
         .display()
         .to_string();
-    editor.set_status(format!("{verb} hunk; {count} of {total} staged in {name}"));
+    let skipped = match committed.len() {
+        0 => String::new(),
+        n => format!(", {n} already committed"),
+    };
+    editor.set_status(format!(
+        "{verb} {}{skipped}; {count} of {total} staged in {name}",
+        plural(hunks, "hunk")
+    ));
     Ok(())
+}
+
+/// The hunks of `hunks` (in order) that any of the `targets` line ranges meet. A single line meets
+/// the one hunk [`helix_vcs::find_hunk`] finds for it; a wider range meets every hunk it touches.
+fn hunks_meeting<'a>(
+    hunks: &'a [helix_vcs::Hunk],
+    targets: &[ops::Range<usize>],
+) -> Vec<&'a helix_vcs::Hunk> {
+    let mut met = vec![false; hunks.len()];
+    for target in targets {
+        if target.len() <= 1 {
+            if let Some(hunk) = helix_vcs::find_hunk(hunks, target) {
+                met[hunks.iter().position(|h| std::ptr::eq(h, hunk)).unwrap()] = true;
+            }
+        } else {
+            for (idx, hunk) in hunks.iter().enumerate() {
+                met[idx] |= helix_vcs::find_hunk(std::slice::from_ref(hunk), target).is_some();
+            }
+        }
+    }
+    hunks
+        .iter()
+        .zip(met)
+        .filter(|(_, met)| *met)
+        .map(|(hunk, _)| hunk)
+        .collect()
 }
 
 /// The content the hunks of `path` are counted and unstaged against: its open review's baseline,
@@ -1981,9 +2039,10 @@ fn on_unstaged_change(editor: &Editor) -> bool {
     helix_vcs::find_hunk(&hunks, &(line..line + 1)).is_some()
 }
 
-/// The file and worktree line range `:review-stage` stages a hunk of: the hunk under the cursor of
-/// the `:review-diff` buffer, the focused old text's block, or the cursor line of a reviewed buffer.
-fn stage_target(editor: &Editor) -> anyhow::Result<(PathBuf, ops::Range<usize>)> {
+/// The file and worktree line ranges `:review-stage` stages the hunks of: the hunk under the cursor
+/// of the `:review-diff` buffer, the focused old text's block, or the lines of every selection in
+/// a reviewed buffer.
+fn stage_target(editor: &Editor) -> anyhow::Result<(PathBuf, Vec<ops::Range<usize>>)> {
     let (view, doc) = current_ref!(editor);
     let text = doc.text().slice(..);
     let cursor = doc.selection(view.id).primary().cursor_line(text);
@@ -1994,7 +2053,7 @@ fn stage_target(editor: &Editor) -> anyhow::Result<(PathBuf, ops::Range<usize>)>
             .collect();
         let (path, line) = diff_location(&lines, cursor).context("nothing to stage here")?;
         let path = helix_loader::find_workspace().0.join(path);
-        return Ok((path, line - 1..line));
+        return Ok((path, std::iter::once(line - 1..line).collect()));
     }
     let review = doc
         .review
@@ -2003,8 +2062,15 @@ fn stage_target(editor: &Editor) -> anyhow::Result<(PathBuf, ops::Range<usize>)>
     ensure!(!review.is_suspended(), Review::LIMIT_MESSAGE);
     let path = doc.path().context("buffer has no path")?.to_path_buf();
     let lines = match review.focused_block_index(view.id) {
-        Some(idx) => review.blocks()[idx].current.clone(),
-        None => cursor..cursor + 1,
+        Some(idx) => vec![review.blocks()[idx].current.clone()],
+        None => doc
+            .selection(view.id)
+            .iter()
+            .map(|range| {
+                let (start, end) = range.line_range(text);
+                start..end + 1
+            })
+            .collect(),
     };
     Ok((path, lines))
 }

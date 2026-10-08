@@ -188,7 +188,7 @@
 | `review_old_text` | Focus the old review text nearest the cursor | normal: `` Go ``, select: `` Go `` |
 | `review_comments_picker` | Pick a pending review comment | normal: `` Gc ``, select: `` Gc `` |
 | `review_uncomment_latest` | Drop the latest pending review comment | normal: `` Gu ``, select: `` Gu `` |
-| `review_toggle_stage` | Stage or unstage the review hunk under the cursor | normal: `` Gs ``, select: `` Gs `` |
+| `review_toggle_stage` | Stage or unstage the review hunks the selections touch | normal: `` Gs ``, select: `` Gs `` |
 | `review_revert_change` | Revert the change under the cursor to the review baseline | normal: `` Gr ``, select: `` Gr `` |
 | `review_close_buffer` | Close the review of the buffer | normal: `` Gx ``, select: `` Gx `` |
 | `review_refresh_buffer` | Refresh the review of the buffer | normal: `` Gb ``, select: `` Gb `` |

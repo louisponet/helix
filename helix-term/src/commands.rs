@@ -492,7 +492,7 @@ impl MappableCommand {
         review_old_text, "Focus the old review text nearest the cursor",
         review_comments_picker, "Pick a pending review comment",
         review_uncomment_latest, "Drop the latest pending review comment",
-        review_toggle_stage, "Stage or unstage the review hunk under the cursor",
+        review_toggle_stage, "Stage or unstage the review hunks the selections touch",
         review_revert_change, "Revert the change under the cursor to the review baseline",
         review_close_buffer, "Close the review of the buffer",
         review_refresh_buffer, "Refresh the review of the buffer",

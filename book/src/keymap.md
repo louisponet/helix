@@ -373,7 +373,7 @@ used to go to a line; use `<n>gg` for that.
 | `a` | Ask the agent about the selections (opens `:review-ask `)    | `review_ask_prompt`      |
 | `c` | Pick a pending review comment                                | `review_comments_picker` |
 | `u` | Drop the latest pending review comment                       | `review_uncomment_latest`|
-| `s` | Stage or unstage the review hunk under the cursor            | `review_toggle_stage`    |
+| `s` | Stage or unstage the review hunks the selections touch       | `review_toggle_stage`    |
 | `r` | Revert the change under the cursor to the review baseline    | `review_revert_change`   |
 | `x` | Close the review of the buffer                               | `review_close_buffer`    |
 | `b` | Refresh the review of the buffer                             | `review_refresh_buffer`  |

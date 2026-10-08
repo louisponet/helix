@@ -4103,7 +4103,7 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "review-stage",
         aliases: &[],
-        doc: "Stage the unstaged hunk under the cursor (or the focused old text's, or the :review-diff hunk's) in the git index, like git add -p. Refuses unsaved buffers.",
+        doc: "Stage the unstaged hunks the selections touch (or the focused old text's, or the :review-diff hunk under the cursor) in the git index, like git add -p. Refuses unsaved buffers.",
         fun: review::review_stage,
         completer: CommandCompleter::none(),
         signature: Signature {
@@ -4114,7 +4114,7 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "review-unstage",
         aliases: &[],
-        doc: "Unstage the staged hunk under the cursor (or the focused old text's, or the :review-diff hunk's): the index gets the baseline's lines back for it.",
+        doc: "Unstage the staged hunks the selections touch (or the focused old text's, or the :review-diff hunk under the cursor): the index gets the baseline's lines back for them.",
         fun: review::review_unstage,
         completer: CommandCompleter::none(),
         signature: Signature {
@@ -4125,7 +4125,7 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "review-toggle-stage",
         aliases: &[],
-        doc: "Stage the hunk under the cursor, or unstage it if it is already staged (Enter while reviewing).",
+        doc: "Stage the hunks the selections touch, or unstage them all if all are already staged (Enter while reviewing).",
         fun: review::review_toggle_stage,
         completer: CommandCompleter::none(),
         signature: Signature {

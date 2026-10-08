@@ -1731,7 +1731,7 @@ async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()>
 
     // Enter stages the first of two hunks: the index gets exactly that hunk.
     send_keys(&mut app, "<ret>").await?;
-    assert_eq!(status(&app), "Staged hunk; 1 of 2 staged in file.txt");
+    assert_eq!(status(&app), "Staged 1 hunk; 1 of 2 staged in file.txt");
     let staged = cached();
     assert!(
         staged.contains(first) && !staged.contains(second),
@@ -1788,7 +1788,7 @@ async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()>
 
     // Stage the second as well: the index matches the worktree.
     send_keys(&mut app, "ggj17j:review-toggle-stage<ret>").await?;
-    assert_eq!(status(&app), "Staged hunk; 2 of 2 staged in file.txt");
+    assert_eq!(status(&app), "Staged 1 hunk; 2 of 2 staged in file.txt");
     let staged = cached();
     assert!(
         staged.contains(first) && staged.contains(second),
@@ -1798,7 +1798,7 @@ async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()>
 
     // Toggling the second again unstages only it; the first stays staged.
     send_keys(&mut app, "<ret>").await?;
-    assert_eq!(status(&app), "Unstaged hunk; 1 of 2 staged in file.txt");
+    assert_eq!(status(&app), "Unstaged 1 hunk; 1 of 2 staged in file.txt");
     let staged = cached();
     assert!(
         staged.contains(first) && !staged.contains(second),
@@ -1807,7 +1807,7 @@ async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()>
 
     // Toggling the first twice in total returns the index to its original content.
     send_keys(&mut app, "ggj<ret>").await?;
-    assert_eq!(status(&app), "Unstaged hunk; 0 of 2 staged in file.txt");
+    assert_eq!(status(&app), "Unstaged 1 hunk; 0 of 2 staged in file.txt");
     assert_eq!(cached(), "");
     assert!(git_ok(dir, &["ls-files", "-s", "file.txt"]).contains(&blob(&index)));
     assert_eq!(staged_hunks(&app), 0);
@@ -1842,7 +1842,7 @@ async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()>
     };
     assert_eq!(headers(&app), [false, true]);
     send_keys(&mut app, "<ret>").await?;
-    assert_eq!(status(&app), "Unstaged hunk; 0 of 2 staged in file.txt");
+    assert_eq!(status(&app), "Unstaged 1 hunk; 0 of 2 staged in file.txt");
     assert_eq!(cached(), "");
     assert_eq!(headers(&app), [false, false]);
     Ok(())
@@ -1946,7 +1946,7 @@ async fn one_enter_stages_without_or_right_after_a_review() -> anyhow::Result<()
     assert!(doc!(app.editor).review.is_none());
     assert_eq!(app.editor.review_baseline, None);
     send_keys(&mut app, "j<ret>").await?;
-    assert_eq!(status(&app), "Staged hunk; 1 of 1 staged in file.txt");
+    assert_eq!(status(&app), "Staged 1 hunk; 1 of 1 staged in file.txt");
     assert!(cached().contains("-b\n+B"), "{}", cached());
     assert!(doc!(app.editor).review.is_some());
     send_keys(&mut app, "<ret>").await?;
@@ -1955,7 +1955,7 @@ async fn one_enter_stages_without_or_right_after_a_review() -> anyhow::Result<()
     // Right after the hook's review-baseline, one Enter stages too.
     let mut app = repo.app()?;
     send_keys(&mut app, ":review-baseline HEAD<ret>j<ret>").await?;
-    assert_eq!(status(&app), "Staged hunk; 1 of 1 staged in file.txt");
+    assert_eq!(status(&app), "Staged 1 hunk; 1 of 1 staged in file.txt");
     assert!(cached().contains("-b\n+B"), "{}", cached());
 
     // A file the agent changed after the last refresh is refused visibly, not silently.
@@ -2206,6 +2206,47 @@ async fn commit_all_stages_every_changed_file_and_asks_for_a_commit() -> anyhow:
     git_ok(dir, &["commit", "-m", "all"]);
     send_keys(&mut app, ":review-baseline HEAD<ret>GA").await?;
     assert_error(&app, "no changes since");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn enter_stages_and_unstages_every_hunk_the_selections_touch() -> anyhow::Result<()> {
+    let lines = (1..=20).map(|n| format!("{n}\n")).collect::<String>();
+    let changed = (1..=20)
+        .map(|n| match n {
+            3 | 9 | 15 => format!("changed {n}\n"),
+            n => format!("{n}\n"),
+        })
+        .collect::<String>();
+    let repo = Repo::new(&lines, &lines, &changed);
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let cached = || git_ok(dir, &["diff", "--cached", "--stat"]);
+    let status = |app: &Application| app.editor.get_status().unwrap().0.to_string();
+    let mut app = repo.app()?;
+    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+
+    // One selection from line 3 to line 15 spans all three hunks.
+    send_keys(&mut app, "3ggv14jx<ret>").await?;
+    assert_eq!(status(&app), "Staged 3 hunks; 3 of 3 staged in file.txt");
+    assert!(
+        cached().contains("3 insertions(+), 3 deletions(-)"),
+        "{}",
+        cached()
+    );
+    send_keys(&mut app, "<ret>").await?;
+    assert_eq!(status(&app), "Unstaged 3 hunks; 0 of 3 staged in file.txt");
+    assert_eq!(cached(), "");
+
+    // With the middle hunk already staged, the set stages only the other two.
+    send_keys(&mut app, "<esc>9gg<ret>").await?;
+    assert_eq!(status(&app), "Staged 1 hunk; 1 of 3 staged in file.txt");
+    send_keys(&mut app, "3ggv14jx<ret>").await?;
+    assert_eq!(status(&app), "Staged 2 hunks; 3 of 3 staged in file.txt");
+
+    // A selection touching no hunk keeps the old error.
+    send_keys(&mut app, "<esc>gg<ret>").await?;
+    assert_error(&app, "nothing to stage here");
     Ok(())
 }
 
