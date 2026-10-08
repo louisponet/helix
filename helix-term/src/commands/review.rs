@@ -507,10 +507,15 @@ pub(super) fn review_baseline(
         .map(Document::id)
         .collect();
     let (mut reviewed, mut unchanged, mut unsaved, mut failed) = (0, 0, 0, 0);
+    let mut conflicts = Vec::new();
     for doc_id in doc_ids {
         let doc = doc!(cx.editor, &doc_id);
         if doc.is_modified() {
-            unsaved += 1;
+            if doc.is_modified_on_disk().unwrap_or(false) {
+                conflicts.push(doc.display_name().into_owned());
+            } else {
+                unsaved += 1;
+            }
             continue;
         }
         let current = doc
@@ -549,7 +554,7 @@ pub(super) fn review_baseline(
     let scrolloff = cx.editor.config().scrolloff;
     let (view, doc) = current!(cx.editor);
     view.ensure_cursor_in_view(doc, scrolloff);
-    if reviewed == 0 && unsaved == 0 && failed == 0 && unchanged > 0 {
+    if reviewed == 0 && unsaved == 0 && failed == 0 && conflicts.is_empty() && unchanged > 0 {
         cx.editor.set_status(format!(
             "{} up to date against {}",
             plural(unchanged, "buffer"),
@@ -570,6 +575,14 @@ pub(super) fn review_baseline(
     }
     if failed > 0 {
         status.push_str(&format!("; {failed} unreviewable skipped"));
+    }
+    if !conflicts.is_empty() {
+        let more = if conflicts.len() > 3 { ", ..." } else { "" };
+        conflicts.truncate(3);
+        status.push_str(&format!(
+            "; {}{more} also changed on disk: :reload discards your edits, :w! overwrites the agent's",
+            conflicts.join(", ")
+        ));
     }
     cx.editor.set_status(status);
     Ok(())

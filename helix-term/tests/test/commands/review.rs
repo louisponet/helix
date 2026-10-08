@@ -1384,6 +1384,39 @@ async fn uncomment_drops_the_latest_pending_comments() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn baseline_names_unsaved_buffers_whose_file_also_changed_on_disk() -> anyhow::Result<()> {
+    let repo = Repo::new("a\n", "a\n", "a\n");
+    let dir = repo.dir.path();
+    fs::write(dir.join("other.txt"), "o\n")?;
+    git_ok(dir, &["add", "other.txt"]);
+    git_ok(dir, &["commit", "-m", "other"]);
+    let commit = git_ok(dir, &["rev-parse", "HEAD"]);
+    let _cwd = Cwd::enter(dir);
+    let mut app = repo.app()?;
+
+    // Both buffers have unsaved edits; only file.txt is also changed on disk by the agent.
+    send_keys(
+        &mut app,
+        ":review-baseline HEAD<ret>ix<esc>:o other.txt<ret>iy<esc>",
+    )
+    .await?;
+    repo.write_external("agent\n");
+    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+
+    assert_eq!(
+        app.editor.get_status().unwrap().0.as_ref(),
+        format!(
+            "Reviewing 0 buffers against {}; 1 unsaved skipped; file.txt also changed on disk: :reload discards your edits, :w! overwrites the agent's",
+            &commit[..8]
+        )
+    );
+    let file = app.editor.document_by_path(&repo.file).unwrap();
+    assert_eq!(file.text(), "xa\n");
+    assert_eq!(repo.disk(), "agent\n");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn repeating_the_baseline_only_reviews_buffers_changed_on_disk() -> anyhow::Result<()> {
     let repo = Repo::new("a\nb\n", "a\nb\n", "a\nB\n");
     let dir = repo.dir.path();

@@ -216,7 +216,10 @@ so only processes of the same user can connect; do not point
 `:review-baseline <revision>` resolves the revision once and pins the commit
 for the editor. Every unmodified buffer in the workspace is reloaded from disk
 and reviewed against it; buffers with unsaved changes are skipped and picked up
-on their next write, and buffers opened or reloaded later are reviewed
+on their next write. If such a buffer's file also changed on disk, the status
+names it (for example `; review.rs also changed on disk: :reload discards your
+edits, :w! overwrites the agent's`): you and the agent edited the same file, so
+decide which version wins before writing. Buffers opened or reloaded later are reviewed
 automatically, showing the same status as `:review` (or `no changes` when the
 buffer matches the baseline). Sending the same commit again refreshes all unmodified reviewed
 buffers, keeping any baseline chosen per buffer with `:review`; buffers already
