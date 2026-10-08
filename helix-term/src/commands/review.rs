@@ -1180,11 +1180,11 @@ fn update_staged_count(
             .unwrap_or_else(|| index.to_vec()),
     };
     let (staged, total) = helix_vcs::staged_hunk_count(&base, index, worktree);
-    if let Some(review) = editor
-        .document_by_path_mut(path)
-        .and_then(|doc| doc.review.as_mut())
-    {
-        review.set_staged_hunks(staged);
+    if let Some(doc) = editor.document_by_path_mut(path) {
+        let text = doc.text().clone();
+        if let Some(review) = doc.review.as_mut() {
+            review.set_index(index, &text);
+        }
     }
     (staged, total)
 }

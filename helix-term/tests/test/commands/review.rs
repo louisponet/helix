@@ -1737,6 +1737,27 @@ async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()>
     assert!(ls.contains(&blob(&index.replace("b\n", "B\n"))), "{ls}");
     assert_eq!(repo.disk(), worktree);
     assert_eq!(staged_hunks(&app), 1);
+    let doc = app.editor.document_by_path(&repo.file).unwrap();
+    let flags: Vec<_> = doc
+        .review
+        .as_ref()
+        .unwrap()
+        .changed_lines_staged()
+        .collect();
+    assert_eq!(flags, [(1..2, true), (18..19, false)]);
+    // Staged rows use the .staged scopes: their background differs from the unstaged hunk's.
+    let surface = render_surface(&app);
+    let (view, doc) = current_ref!(app.editor);
+    let inner = view.inner_area(doc);
+    let row_bg = |text: &str| {
+        let y = render(&app)
+            .iter()
+            .position(|(_, row)| row == text)
+            .unwrap_or_else(|| panic!("{text} is not visible")) as u16;
+        surface[(inner.x, inner.y + y)].bg
+    };
+    assert_ne!(row_bg("B"), row_bg("S"));
+    assert_ne!(row_bg("b"), row_bg("s"));
 
     // Stage the second: the index matches the worktree.
     send_keys(&mut app, "17j:review-stage<ret>").await?;

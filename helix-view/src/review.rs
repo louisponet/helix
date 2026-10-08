@@ -131,8 +131,9 @@ pub struct Review {
     blocks: Vec<OldBlock>,
     focus: HashMap<ViewId, OldFocus>,
     suspended: bool,
-    /// How many hunks the git index already holds, as of the last count.
-    staged: usize,
+    /// Per hunk, whether the git index already holds it. Computed when the index is read (see
+    /// [`Self::set_index`]); edits clear it rather than diffing against the index again.
+    staged: Vec<bool>,
 }
 
 impl Review {
@@ -159,7 +160,7 @@ impl Review {
             blocks: Vec::new(),
             focus: HashMap::new(),
             suspended: false,
-            staged: 0,
+            staged: Vec::new(),
         };
         review.update_blocks();
         Ok(review)
@@ -175,12 +176,14 @@ impl Review {
         }
         let Some(hunks) = Self::compute_hunks(&self.snapshot, doc) else {
             self.suspended = true;
+            self.staged.clear();
             self.hunks.clear();
             self.blocks.clear();
             self.focus.clear();
             return;
         };
         self.hunks = hunks;
+        self.staged.clear();
         self.update_blocks();
         // Focus is kept in snapshot coordinates and stays valid while its old lines are
         // still removed from the document.
@@ -268,14 +271,52 @@ impl Review {
         self.hunks.len()
     }
 
-    /// How many hunks were already staged in the git index when last counted (at review start
-    /// and after `:review-stage` or `:review-unstage`).
+    /// How many hunks the git index already holds, as of the last [`Self::set_index`].
     pub fn staged_hunks(&self) -> usize {
-        self.staged
+        self.staged.iter().filter(|&&staged| staged).count()
     }
 
-    pub fn set_staged_hunks(&mut self, staged: usize) {
-        self.staged = staged;
+    fn is_staged(&self, hunk: usize) -> bool {
+        self.staged.get(hunk).copied().unwrap_or(false)
+    }
+
+    /// Marks the hunks that the git index content `index` already holds in full, for the document
+    /// text `doc` (both in their worktree form). Stays valid until the next edit.
+    pub fn set_index(&mut self, index: &[u8], doc: &Rope) {
+        let unstaged = helix_vcs::line_hunks(index, doc.to_string().as_bytes());
+        self.staged = self
+            .hunks
+            .iter()
+            .map(|hunk| {
+                let lines = hunk.after.start as usize..hunk.after.end as usize;
+                helix_vcs::find_hunk(&unstaged, &lines).is_none()
+            })
+            .collect();
+    }
+
+    /// Whether the git index already holds the hunk `block` comes from.
+    pub fn is_block_staged(&self, block: &OldBlock) -> bool {
+        self.hunks
+            .iter()
+            .position(|hunk| {
+                let current = hunk.after.start as usize..hunk.after.end as usize;
+                hunk.before.start as usize == block.old.start && current == block.current
+            })
+            .is_some_and(|hunk| self.is_staged(hunk))
+    }
+
+    /// Like [`Self::changed_lines`], with whether the git index already holds each range.
+    pub fn changed_lines_staged(&self) -> impl Iterator<Item = (ops::Range<usize>, bool)> + '_ {
+        self.hunks
+            .iter()
+            .enumerate()
+            .map(|(idx, hunk)| {
+                (
+                    hunk.after.start as usize..hunk.after.end as usize,
+                    self.is_staged(idx),
+                )
+            })
+            .filter(|(lines, _)| !lines.is_empty())
     }
 
     /// The baseline and document line ranges of the hunk whose document lines contain `line`.

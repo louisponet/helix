@@ -2107,8 +2107,7 @@ impl Document {
         // Against a commit, part of the change may already be in the index.
         if revision.is_some() {
             if let Ok((index, _)) = provider_registry.get_index_base(path, trust_full) {
-                let worktree = self.text.to_string().into_bytes();
-                review.set_staged_hunks(helix_vcs::staged_hunk_count(&data, &index, &worktree).0);
+                review.set_index(&index, &self.text);
             }
         }
         Ok(review)

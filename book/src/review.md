@@ -183,7 +183,9 @@ like this:
 6. To commit part of the change, stage it hunk by hunk: `Enter` (or
    `:review-stage`) stages the unstaged hunk under the cursor in the git index,
    from a reviewed buffer, focused old text or the `:review-diff` buffer, where
-   staged hunks are marked `(staged)`; `:review-unstage` (`u` in the
+   staged hunks are marked `(staged)`. In the buffer a staged hunk's lines turn
+   blue and its old lines grey (`diff.plus.review.staged`,
+   `diff.minus.review.staged`) until the next edit; `:review-unstage` (`u` in the
    `:review-diff` buffer) undoes the latest staging. Save first: only what is
    on disk is staged. While reviewing, `Enter` in normal mode is taken by this;
    elsewhere it does nothing.

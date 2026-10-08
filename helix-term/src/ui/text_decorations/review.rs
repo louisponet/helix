@@ -20,6 +20,8 @@ pub struct ReviewDecoration<'a> {
     /// Gutter column for the removed-line marker.
     marker_col: Option<u16>,
     old: Style,
+    /// The old style for blocks whose hunk the git index already holds.
+    old_staged: Style,
     selection: Style,
     cursor: Style,
     next_block: usize,
@@ -43,6 +45,7 @@ impl<'a> ReviewDecoration<'a> {
             focus,
             marker_col,
             old: theme.get("diff.minus.review"),
+            old_staged: theme.get("diff.minus.review.staged"),
             selection: theme.get("ui.selection.primary"),
             cursor: theme.get("ui.cursor.primary"),
             next_block: 0,
@@ -56,21 +59,28 @@ impl<'a> ReviewDecoration<'a> {
         })
     }
 
-    /// Draws snapshot line `line` starting at `row` and returns the number of rows it took.
-    fn draw_old_line(&self, renderer: &mut TextRenderer, row: usize, line: usize) -> usize {
+    /// Draws snapshot line `line` in `old` style starting at `row` and returns the number of rows
+    /// it took.
+    fn draw_old_line(
+        &self,
+        renderer: &mut TextRenderer,
+        row: usize,
+        line: usize,
+        old: Style,
+    ) -> usize {
         let height = self.review.old_line_height(line, &self.text_fmt);
         let visible_rows =
             renderer.offset.row..renderer.offset.row + renderer.viewport.height as usize;
         if row + height <= visible_rows.start || row >= visible_rows.end {
             return height;
         }
-        self.fill_rows(renderer, row, height);
+        self.fill_rows(renderer, row, height, old);
         let snapshot = self.review.snapshot().slice(..);
         let line_start = snapshot.line_to_char(line);
         let has_line_ending =
             line_end_char_index(&snapshot, line) < snapshot.line_to_char(line + 1);
         if let Some(col) = self.marker_col.filter(|_| is_visible(renderer, row)) {
-            renderer.set_string(col, row as u16, "-", self.old);
+            renderer.set_string(col, row as u16, "-", old);
         }
 
         let annotations = TextAnnotations::default();
@@ -81,9 +91,10 @@ impl<'a> ReviewDecoration<'a> {
             0,
         );
         for grapheme in formatter {
-            let style = self.grapheme_style(&grapheme, line_start + grapheme.char_idx, snapshot);
+            let style =
+                self.grapheme_style(&grapheme, line_start + grapheme.char_idx, snapshot, old);
             // The end of the line stands for its line ending, which is only drawn when focused.
-            if grapheme.source.is_eof() && !(has_line_ending && style != self.old) {
+            if grapheme.source.is_eof() && !(has_line_ending && style != old) {
                 continue;
             }
             if !renderer.column_in_bounds(grapheme.visual_pos.col, grapheme.width()) {
@@ -100,9 +111,9 @@ impl<'a> ReviewDecoration<'a> {
         height
     }
 
-    /// Paints the visible part of `height` virtual rows starting at `row` with the old style,
-    /// so its background covers the whole row rather than only the drawn graphemes.
-    fn fill_rows(&self, renderer: &mut TextRenderer, row: usize, height: usize) {
+    /// Paints the visible part of `height` virtual rows starting at `row` with `old`, so its
+    /// background covers the whole row rather than only the drawn graphemes.
+    fn fill_rows(&self, renderer: &mut TextRenderer, row: usize, height: usize, old: Style) {
         let visible = renderer.offset.row..renderer.offset.row + renderer.viewport.height as usize;
         let top = row.max(visible.start);
         let bottom = (row + height).min(visible.end);
@@ -113,7 +124,7 @@ impl<'a> ReviewDecoration<'a> {
                 renderer.viewport.width,
                 (bottom - top) as u16,
             );
-            renderer.set_style(area, self.old);
+            renderer.set_style(area, old);
         }
     }
 
@@ -122,16 +133,17 @@ impl<'a> ReviewDecoration<'a> {
         grapheme: &FormattedGrapheme,
         char_idx: usize,
         snapshot: RopeSlice,
+        old: Style,
     ) -> Style {
         let Some(focus) = self.focus.filter(|_| !grapheme.is_virtual()) else {
-            return self.old;
+            return old;
         };
         if focus.range.cursor(snapshot) == char_idx {
-            self.old.patch(self.cursor)
+            old.patch(self.cursor)
         } else if focus.range.from() <= char_idx && char_idx < focus.range.to() {
-            self.old.patch(self.selection)
+            old.patch(self.selection)
         } else {
-            self.old
+            old
         }
     }
 }
@@ -173,15 +185,20 @@ impl Decoration for ReviewDecoration<'_> {
         let first_row = pos.visual_line as usize + virt_off.row;
         let mut row = first_row;
         for block in self.review.blocks_at(line) {
+            let old = if self.review.is_block_staged(block) {
+                self.old_staged
+            } else {
+                self.old
+            };
             if let Some(label) = block.label() {
                 if is_visible(renderer, row) {
-                    self.fill_rows(renderer, row, 1);
+                    self.fill_rows(renderer, row, 1, old);
                     renderer.set_string_truncated(
                         renderer.viewport.x,
                         row as u16,
                         &label,
                         renderer.viewport.width as usize,
-                        |_| self.old.add_modifier(Modifier::ITALIC),
+                        |_| old.add_modifier(Modifier::ITALIC),
                         true,
                         false,
                     );
@@ -189,7 +206,7 @@ impl Decoration for ReviewDecoration<'_> {
                 row += 1;
             }
             for old_line in block.old.clone() {
-                row += self.draw_old_line(renderer, row, old_line);
+                row += self.draw_old_line(renderer, row, old_line, old);
             }
         }
         Position::new(row - first_row, 0)

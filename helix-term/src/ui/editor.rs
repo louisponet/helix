@@ -100,17 +100,20 @@ impl EditorView {
 
         // A background on diff.plus.review shades whole changed rows and leaves the text
         // colours alone; without one the changed text itself is coloured (see below).
+        // Hunks already in the git index use the .staged scope, falling back to the plain one.
         let review_style = theme.get("diff.plus.review");
+        let staged_style = theme.get("diff.plus.review.staged");
         if let Some(review) = doc.review.as_ref().filter(|_| review_style.bg.is_some()) {
-            let changed: Vec<_> = review.changed_lines().collect();
+            let changed: Vec<_> = review.changed_lines_staged().collect();
             decorations.add_decoration(move |renderer: &mut TextRenderer, pos: LinePos| {
-                let next = changed.partition_point(|lines| lines.end <= pos.doc_line);
-                if changed
+                let next = changed.partition_point(|(lines, _)| lines.end <= pos.doc_line);
+                if let Some((_, staged)) = changed
                     .get(next)
-                    .is_some_and(|lines| lines.start <= pos.doc_line)
+                    .filter(|(lines, _)| lines.start <= pos.doc_line)
                 {
+                    let style = if *staged { staged_style } else { review_style };
                     let area = Rect::new(inner.x, pos.visual_line, inner.width, 1);
-                    renderer.set_style(area, review_style);
+                    renderer.set_style(area, style);
                 }
             });
         }
@@ -167,15 +170,23 @@ impl EditorView {
         Self::doc_diagnostics_highlights_into(doc, theme, &mut overlays);
 
         if let Some(review) = doc.review.as_ref().filter(|_| review_style.bg.is_none()) {
-            if let Some(highlight) = theme.find_highlight("diff.plus.review") {
-                let text = doc.text().slice(..);
-                overlays.push(OverlayHighlights::Homogeneous {
-                    highlight,
-                    ranges: review
-                        .changed_lines()
-                        .map(|lines| text.line_to_char(lines.start)..text.line_to_char(lines.end))
-                        .collect(),
-                });
+            let text = doc.text().slice(..);
+            for (scope, staged) in [
+                ("diff.plus.review", false),
+                ("diff.plus.review.staged", true),
+            ] {
+                if let Some(highlight) = theme.find_highlight(scope) {
+                    overlays.push(OverlayHighlights::Homogeneous {
+                        highlight,
+                        ranges: review
+                            .changed_lines_staged()
+                            .filter(|(_, is_staged)| *is_staged == staged)
+                            .map(|(lines, _)| {
+                                text.line_to_char(lines.start)..text.line_to_char(lines.end)
+                            })
+                            .collect(),
+                    });
+                }
             }
         }
 

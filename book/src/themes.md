@@ -281,9 +281,11 @@ See also [#2380]
   - `plus` - additions
     - `gutter` - gutter indicator
     - `review` - lines changed since the selected baseline during [`:review`](./review.md)
+      - `staged` - those lines when their hunk is already staged in the git index
   - `minus` - deletions
     - `gutter` - gutter indicator
     - `review` - old baseline lines shown inline during [`:review`](./review.md)
+      - `staged` - those old lines when their hunk is already staged in the git index
   - `delta` - modifications
     - `moved` - renamed or moved files/changes
     - `conflict` - merge conflicts
