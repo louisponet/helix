@@ -382,11 +382,19 @@ fn render_position<'a, F>(context: &mut RenderContext<'a>, write: F)
 where
     F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
 {
-    let position = get_position(context);
-    write(
-        context,
-        format!(" {}:{} ", position.row + 1, position.col + 1).into(),
-    );
+    let old_focus = context.doc.review.as_ref().and_then(|review| {
+        let focus = review.focus(context.view.id)?;
+        let snapshot = review.snapshot().slice(..);
+        Some(coords_at_pos(snapshot, focus.range.cursor(snapshot)))
+    });
+    let text = match old_focus {
+        Some(position) => format!(" old {}:{} ", position.row + 1, position.col + 1),
+        None => {
+            let position = get_position(context);
+            format!(" {}:{} ", position.row + 1, position.col + 1)
+        }
+    };
+    write(context, text.into());
 }
 
 fn render_total_line_numbers<'a, F>(context: &mut RenderContext<'a>, write: F)

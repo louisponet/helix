@@ -197,6 +197,16 @@ impl Drop for Cwd {
     }
 }
 
+/// The statusline of the focused view.
+fn statusline(app: &Application) -> String {
+    let surface = render_surface(app);
+    let view = current_ref!(app.editor).0;
+    let y = view.area.bottom() - 1;
+    (view.area.left()..view.area.right())
+        .map(|x| surface[(x, y)].symbol.as_str())
+        .collect()
+}
+
 fn old_focus(app: &Application) -> Option<Range> {
     let (view, doc) = current_ref!(app.editor);
     doc.review.as_ref()?.focus(view.id).map(|focus| focus.range)
@@ -492,6 +502,11 @@ async fn old_focus_keymaps_and_exit_keep_the_correct_cursor_visible() -> anyhow:
                     assert!(render(app)
                         .iter()
                         .any(|(marker, text)| marker == "-" && text == "line 150"));
+                    assert!(
+                        statusline(app).contains(" old 151:1 "),
+                        "{}",
+                        statusline(app)
+                    );
                 }),
             ),
             (
@@ -500,6 +515,11 @@ async fn old_focus_keymaps_and_exit_keep_the_correct_cursor_visible() -> anyhow:
                 Some(&|app| {
                     assert_eq!(old_focus(app), None);
                     assert_eq!(cursor_line(app), 150);
+                    let status = statusline(app);
+                    assert!(
+                        status.contains(" 151:1 ") && !status.contains(" old "),
+                        "{status}"
+                    );
                     assert!(shows(app, "line 149"));
                     assert!(shows(app, "line 250"));
                 }),
