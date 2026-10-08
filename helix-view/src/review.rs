@@ -131,8 +131,9 @@ pub struct Review {
     blocks: Vec<OldBlock>,
     focus: HashMap<ViewId, OldFocus>,
     suspended: bool,
-    /// Per hunk, whether the git index already holds it. Computed when the index is read (see
-    /// [`Self::set_index`]); edits clear it rather than diffing against the index again.
+    /// The git index content last given to [`Self::set_index`], in its worktree form.
+    index: Option<Vec<u8>>,
+    /// Per hunk, whether `index` already holds it; recomputed on every edit.
     staged: Vec<bool>,
 }
 
@@ -160,6 +161,7 @@ impl Review {
             blocks: Vec::new(),
             focus: HashMap::new(),
             suspended: false,
+            index: None,
             staged: Vec::new(),
         };
         review.update_blocks();
@@ -183,7 +185,7 @@ impl Review {
             return;
         };
         self.hunks = hunks;
-        self.staged.clear();
+        self.update_staged(doc);
         self.update_blocks();
         // Focus is kept in snapshot coordinates and stays valid while its old lines are
         // still removed from the document.
@@ -271,7 +273,7 @@ impl Review {
         self.hunks.len()
     }
 
-    /// How many hunks the git index already holds, as of the last [`Self::set_index`].
+    /// How many hunks the git index already holds, as given to [`Self::set_index`].
     pub fn staged_hunks(&self) -> usize {
         self.staged.iter().filter(|&&staged| staged).count()
     }
@@ -280,9 +282,18 @@ impl Review {
         self.staged.get(hunk).copied().unwrap_or(false)
     }
 
-    /// Marks the hunks that the git index content `index` already holds in full, for the document
-    /// text `doc` (both in their worktree form). Stays valid until the next edit.
+    /// Records the git index content `index` (in its worktree form) and marks the hunks it already
+    /// holds in full for the document text `doc`. Edits keep the marks up to date against it.
     pub fn set_index(&mut self, index: &[u8], doc: &Rope) {
+        self.index = Some(index.to_vec());
+        self.update_staged(doc);
+    }
+
+    fn update_staged(&mut self, doc: &Rope) {
+        let Some(index) = &self.index else {
+            self.staged.clear();
+            return;
+        };
         let unstaged = helix_vcs::line_hunks(index, doc.to_string().as_bytes());
         self.staged = self
             .hunks

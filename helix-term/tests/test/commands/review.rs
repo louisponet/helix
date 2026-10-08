@@ -1759,6 +1759,25 @@ async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()>
     assert_ne!(row_bg("B"), row_bg("S"));
     assert_ne!(row_bg("b"), row_bg("s"));
 
+    // Edits keep staged hunks staged unless they touch them; undo restores the marks.
+    let flags = |app: &Application| -> Vec<bool> {
+        let doc = app.editor.document_by_path(&repo.file).unwrap();
+        let review = doc.review.as_ref().unwrap();
+        review
+            .changed_lines_staged()
+            .map(|(_, staged)| staged)
+            .collect()
+    };
+    send_keys(&mut app, "ggjjjix<esc>").await?;
+    assert_eq!(flags(&app), [true, false, false]);
+    assert_eq!(staged_hunks(&app), 1);
+    send_keys(&mut app, "uggjiy<esc>").await?;
+    assert_eq!(flags(&app), [false, false]);
+    send_keys(&mut app, "u").await?;
+    assert_eq!(flags(&app), [true, false]);
+    assert!(!doc!(app.editor).is_modified());
+    send_keys(&mut app, "ggj").await?;
+
     // :review-unstage only unstages staged hunks, and :review-stage only unstaged ones.
     send_keys(&mut app, "17j:review-unstage<ret>").await?;
     assert_error(&app, "nothing staged here");
