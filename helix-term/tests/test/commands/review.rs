@@ -2763,6 +2763,62 @@ async fn enter_off_a_hunk_jumps_to_the_next_unstaged_one() -> anyhow::Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn g_b_picks_the_baseline_from_the_branch_history() -> anyhow::Result<()> {
+    let repo = Repo::new("a\nb\nc\n", "a\nb\nc\n", "a\nb\nc\n");
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let first = git_ok(dir, &["rev-parse", "HEAD"]);
+    git_ok(dir, &["branch", "-M", "main"]);
+    git_ok(dir, &["checkout", "-q", "-b", "topic"]);
+    let commit = |content: &str, subject: &str| {
+        repo.write(content);
+        repo.stage();
+        git_ok(dir, &["commit", "-m", subject]);
+        git_ok(dir, &["rev-parse", "HEAD"])
+    };
+    let second = commit("A\nb\nc\n", "second");
+    let third = commit("A\nB\nc\n", "third");
+    let mut config = test_config();
+    config.editor.statusline.right = vec![StatusLineElement::Review];
+    let mut app = AppBuilder::new()
+        .with_file(&repo.file, None)
+        .with_config(config)
+        .build()?;
+    let baseline = |app: &Application| app.editor.review_baseline.clone().unwrap_or_default();
+    send_keys(&mut app, &format!(":review-baseline {second}<ret>")).await?;
+
+    // The marker column names the current baseline, the merge base with main, and HEAD.
+    send_keys(&mut app, "Gb").await?;
+    send_keys(&mut app, "%mark HEAD<ret>").await?;
+    assert_eq!(baseline(&app), third);
+    send_keys(&mut app, "Gb").await?;
+    send_keys(&mut app, "%mark ●<ret>").await?;
+    assert_eq!(baseline(&app), third);
+    send_keys(&mut app, "Gb").await?;
+    send_keys(&mut app, "%mark base<ret>").await?;
+    assert_eq!(baseline(&app), first);
+    assert_eq!(
+        app.editor.get_status().unwrap().0.to_string(),
+        format!("Baseline {} head (2 behind HEAD)", &first[..8])
+    );
+    let status = statusline(&app);
+    assert!(
+        status.contains(&format!(" review {} ", &first[..8])),
+        "{status}"
+    );
+
+    // G B still refreshes the buffer's review.
+    send_keys(&mut app, "GB").await?;
+    assert!(app
+        .editor
+        .get_status()
+        .unwrap()
+        .0
+        .starts_with("Review refreshed"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_g_menu_runs_review_commands_next_to_user_keys() -> anyhow::Result<()> {
     let repo = Repo::new("one\ntwo\n", "one\ntwo\n", "one\nTWO\n");
     let _cwd = Cwd::enter(repo.dir.path());

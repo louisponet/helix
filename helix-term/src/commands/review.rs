@@ -343,6 +343,120 @@ pub(super) fn review_commits(
     Ok(())
 }
 
+/// How long ago `time` (seconds since the epoch) was, as in `3 days ago`.
+fn relative_age(time: i64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |now| now.as_secs() as i64);
+    let secs = (now - time).max(0);
+    let (count, unit) = match secs {
+        0..60 => return "just now".to_owned(),
+        60..3_600 => (secs / 60, "minute"),
+        3_600..86_400 => (secs / 3_600, "hour"),
+        86_400..2_592_000 => (secs / 86_400, "day"),
+        2_592_000..31_536_000 => (secs / 2_592_000, "month"),
+        _ => (secs / 31_536_000, "year"),
+    };
+    format!("{} ago", plural(count as usize, unit))
+}
+
+/// A row of the `:review-baseline-pick` picker.
+struct BaselineEntry {
+    commit: helix_vcs::CommitEntry,
+    /// `●` for the current baseline, `base` for the merge base with the base branch, `HEAD`.
+    marker: String,
+    /// How many commits it is behind `HEAD`.
+    behind: usize,
+}
+
+pub(super) fn review_baseline_pick(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    let workspace = helix_loader::find_workspace().0;
+    let trust_full = cx
+        .editor
+        .workspace_trust
+        .query(&workspace, TrustQuery::Git)
+        .is_trusted();
+    let log = cx
+        .editor
+        .diff_providers
+        .first_parent_log(&workspace, 300, trust_full)?;
+    let current = cx.editor.review_baseline.clone();
+    let base = super::review_pr::base_merge_base(cx.editor);
+    let entries: Vec<_> = log
+        .into_iter()
+        .enumerate()
+        .map(|(behind, commit)| {
+            let mut marks = Vec::new();
+            if current.as_deref() == Some(commit.id.as_str()) {
+                marks.push("●");
+            }
+            if base.as_deref() == Some(commit.id.as_str()) {
+                marks.push("base");
+            }
+            if behind == 0 {
+                marks.push("HEAD");
+            }
+            BaselineEntry {
+                marker: marks.join(" "),
+                commit,
+                behind,
+            }
+        })
+        .collect();
+    let selected = entries
+        .iter()
+        .position(|entry| current.as_deref() == Some(entry.commit.id.as_str()))
+        .unwrap_or(0);
+    cx.jobs.callback(async move {
+        let callback: job::Callback =
+            Callback::EditorCompositor(Box::new(move |_editor, compositor| {
+                let columns = [
+                    ui::PickerColumn::new("mark", |entry: &BaselineEntry, _| {
+                        entry.marker.as_str().into()
+                    }),
+                    ui::PickerColumn::new("commit", |entry: &BaselineEntry, _| {
+                        entry.commit.id[..8].into()
+                    }),
+                    ui::PickerColumn::new("age", |entry: &BaselineEntry, _| {
+                        relative_age(entry.commit.time).into()
+                    }),
+                    ui::PickerColumn::new("author", |entry: &BaselineEntry, _| {
+                        entry.commit.author.as_str().into()
+                    }),
+                    ui::PickerColumn::new("subject", |entry: &BaselineEntry, _| {
+                        entry.commit.summary.as_str().into()
+                    }),
+                ];
+                let picker = ui::Picker::new(columns, 4, entries, (), |cx, entry, _action| {
+                    let line = format!("review-baseline {}", entry.commit.id);
+                    cx.editor.clear_status();
+                    let result = typed::execute_command_line(cx, &line, PromptEvent::Validate);
+                    match result {
+                        Ok(()) if !cx.editor.is_err() => cx.editor.set_status(format!(
+                            "Baseline {} {} ({} behind HEAD)",
+                            &entry.commit.id[..8],
+                            entry.commit.summary,
+                            entry.behind
+                        )),
+                        Ok(()) => (),
+                        Err(err) => cx.editor.set_error(format!("{err:#}")),
+                    }
+                })
+                .with_initial_cursor(selected as u32);
+                compositor.push(Box::new(overlaid(picker)));
+            }));
+        Ok(callback)
+    });
+    Ok(())
+}
+
 pub(super) fn review_close(
     cx: &mut compositor::Context,
     _args: Args,

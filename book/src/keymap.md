@@ -376,7 +376,8 @@ used to go to a line; use `<n>gg` for that.
 | `s` | Stage or unstage the review hunks the selections touch       | `review_toggle_stage`    |
 | `r` | Revert the change under the cursor to the review baseline    | `review_revert_change`   |
 | `x` | Close the review of the buffer                               | `review_close_buffer`    |
-| `b` | Refresh the review of the buffer                             | `review_refresh_buffer`  |
+| `b` | Pick the review baseline from the history of HEAD            | `review_baseline_picker` |
+| `B` | Refresh the review of the buffer                             | `review_refresh_buffer`  |
 | `m` | Hand the review back asking to commit the staged hunks (submit the review while reviewing a pull request) | `review_commit_staged`   |
 | `M` | Stage every changed file and hand back asking to commit      | `review_commit_all`      |
 | `S` | Hand the review back now                                     | `review_send_handoff`    |

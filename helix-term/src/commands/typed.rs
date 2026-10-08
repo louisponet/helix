@@ -4202,6 +4202,17 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         },
     },
     TypableCommand {
+        name: "review-baseline-pick",
+        aliases: &[],
+        doc: "Pick the review baseline from the first-parent history of HEAD (up to 300 commits), with the current baseline, the merge base with the base branch and HEAD marked.",
+        fun: review::review_baseline_pick,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
         name: "review-older",
         aliases: &[],
         doc: "Move the review baseline one commit older (its first parent), pinning HEAD first when none is set, and refresh every review.",

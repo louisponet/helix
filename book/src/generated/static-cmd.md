@@ -193,7 +193,8 @@
 | `review_toggle_stage` | Stage or unstage the review hunks the selections touch | normal: `` Gs ``, select: `` Gs `` |
 | `review_revert_change` | Revert the change under the cursor to the review baseline | normal: `` Gr ``, select: `` Gr `` |
 | `review_close_buffer` | Close the review of the buffer | normal: `` Gx ``, select: `` Gx `` |
-| `review_refresh_buffer` | Refresh the review of the buffer | normal: `` Gb ``, select: `` Gb `` |
+| `review_refresh_buffer` | Refresh the review of the buffer | normal: `` GB ``, select: `` GB `` |
+| `review_baseline_picker` | Pick the review baseline from the history of HEAD | normal: `` Gb ``, select: `` Gb `` |
 | `review_commit_staged` | Hand the review back asking to commit the staged hunks | normal: `` Gm ``, select: `` Gm `` |
 | `review_send_handoff` | Hand the review back now | normal: `` GS ``, select: `` GS `` |
 | `review_commit_all` | Stage every changed file and hand the review back asking to commit | normal: `` GM ``, select: `` GM `` |

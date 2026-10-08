@@ -56,6 +56,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-commit-all [subject]` | Stage every file changed since the baseline (modified, deleted and untracked, like `git add -A` limited to them), then hand back like `:review-commit`. Refuses unsaved reviewed buffers, and says `no changes since <commit>` when there is nothing. `G M` in the default keymap. |
 | `:review-next` | Go to the next changed block; after the last one, open the next file changed since the baseline (`:review-files` order, wrapping around) at its first block. Shows `<file>: hunk 2 of 5`. `G n` in the default keymap, which takes a count. |
 | `:review-prev` | Like `:review-next` backwards, landing on the previous file's last block. `G N` in the default keymap. |
+| `:review-baseline-pick` | Pick the baseline from the first-parent history of `HEAD` (up to 300 commits: commit, age, author, subject), with `●` on the current baseline, `base` on the merge base with the base branch (the pull request's while reviewing one, else `origin/HEAD`, `develop`, `main` or `master`) and `HEAD` marked; the current baseline is preselected. Choosing a commit works like `:review-baseline <commit>`. `G b` in the default keymap; `G B` refreshes the buffer's review. |
 | `:review-older` | Move the baseline to its first parent (pinning `HEAD` first when none is set) and refresh every review; the status shows `Baseline <commit> <subject> (N behind HEAD)`. `G -` in the default keymap. |
 | `:review-newer` | Move the baseline to the next commit towards `HEAD` on its ancestry path and refresh every review. `G +` in the default keymap. |
 | `:review-handoff <dir>` | Export a batch to `<dir>` on every write of a reviewed buffer. Without it, the default is `<workspace>/.pi/helix-review/outbox` when that directory exists (the pi extension creates it) and every reviewed file and pending comment is in the workspace. `clear` returns to that default. |
@@ -240,7 +241,9 @@ The baseline stays on the same commit until a handoff is received, so a
 following agent turn is still reviewed against the commit you started from.
 The first turn after a handoff moves the baseline to the then current `HEAD`.
 
-`:review-older` and `:review-newer` (`G -`, `G +`) step the baseline through
+`G b` (`:review-baseline-pick`) picks any commit of the branch history as the
+baseline, with the current baseline, the merge base with the base branch and
+`HEAD` marked. `:review-older` and `:review-newer` (`G -`, `G +`) step the baseline through
 history, for example to see what the last few commits changed. While stepped,
 the statusline's baseline gets a trailing `*`, and the pi hook re-sending the
 baseline you stepped away from only refreshes the reviews against the stepped
@@ -299,7 +302,7 @@ baseline only refreshes the reviews. `G -` / `G +` still step through history
 (`G +` from the merge base walks the pull request's commits). Running
 `:review-baseline` yourself leaves the pull request review, and so does
 `:review-pr close`, which keeps the checkout. After the branch was rebased onto
-a newer base, `:review-refresh` (`G b`) moves the baseline to the new merge
+a newer base, `:review-refresh` (`G B`) moves the baseline to the new merge
 base (`Baseline moved to <commit> after a rebase`). `:review-pr` also works over the
 command socket, so other tools can open a pull request in Helix.
 
@@ -309,7 +312,7 @@ are shown as threads above the line they are on, greyed
 A comment on the base side is shown above the change that removed its line,
 tagged `(old side)`; one on a line the pull request has since changed is
 shown at its original line, tagged `(outdated)`. They reload with
-`:review-refresh` (`G b`). `G C` lists them next to your pending comments.
+`:review-refresh` (`G B`). `G C` lists them next to your pending comments.
 
 While reviewing a pull request, `G c` (`:review-comment`) collects comments
 for the pull request instead of for pi: they are kept out of the batches

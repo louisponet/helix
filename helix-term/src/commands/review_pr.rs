@@ -206,6 +206,36 @@ pub(super) fn follow_merge_base(editor: &mut Editor) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The merge base of `HEAD` with the branch it is based on: the pull request's base while
+/// reviewing one, else `origin/HEAD`, else the first of the usual base branch names that exists.
+pub(super) fn base_merge_base(editor: &Editor) -> Option<String> {
+    let workspace = helix_loader::find_workspace().0;
+    let trust_full = editor
+        .workspace_trust
+        .query(&workspace, helix_loader::workspace_trust::TrustQuery::Git)
+        .is_trusted();
+    let pr = editor
+        .review_pr
+        .iter()
+        .flat_map(|pr| [format!("origin/{}", pr.base_ref), pr.base_ref.clone()]);
+    let usual = [
+        "origin/HEAD",
+        "origin/develop",
+        "origin/main",
+        "origin/master",
+        "develop",
+        "main",
+        "master",
+    ]
+    .map(str::to_owned);
+    pr.chain(usual).find_map(|base| {
+        editor
+            .diff_providers
+            .merge_base_with_head(&workspace, &base, trust_full)
+            .ok()
+    })
+}
+
 /// Lines of context around a change that GitHub still accepts review comments on.
 const DIFF_CONTEXT: usize = 3;
 

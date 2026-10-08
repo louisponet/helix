@@ -19,7 +19,7 @@ use gix::status::{
 };
 use gix::{Commit, ObjectId, Repository, ThreadSafeRepository};
 
-use crate::{CommitBase, CommitInfo, FileChange};
+use crate::{CommitBase, CommitEntry, CommitInfo, FileChange};
 
 #[cfg(test)]
 mod test;
@@ -444,6 +444,26 @@ pub fn step_commit(
         },
         behind,
     ))
+}
+
+/// Up to `limit` commits of the first-parent history of `HEAD`, newest first.
+pub fn first_parent_log(cwd: &Path, limit: usize, trust_full: bool) -> Result<Vec<CommitEntry>> {
+    let repo = open_repo(cwd, trust_full)?.to_thread_local();
+    let walk = repo
+        .rev_walk([repo.head_id()?.detach()])
+        .first_parent_only()
+        .all()?;
+    walk.take(limit)
+        .map(|info| {
+            let commit = info?.object()?;
+            Ok(CommitEntry {
+                id: commit.id.to_hex().to_string(),
+                summary: commit.message()?.summary().to_string(),
+                author: commit.author()?.name.to_string(),
+                time: commit.time()?.seconds,
+            })
+        })
+        .collect()
 }
 
 /// Whether `commit` is `HEAD` or one of its ancestors in the repository at `cwd`.

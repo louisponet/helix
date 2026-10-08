@@ -499,6 +499,7 @@ impl MappableCommand {
         review_revert_change, "Revert the change under the cursor to the review baseline",
         review_close_buffer, "Close the review of the buffer",
         review_refresh_buffer, "Refresh the review of the buffer",
+        review_baseline_picker, "Pick the review baseline from the history of HEAD",
         review_commit_staged, "Hand the review back asking to commit the staged hunks",
         review_send_handoff, "Hand the review back now",
         review_commit_all, "Stage every changed file and hand the review back asking to commit",
@@ -4879,6 +4880,10 @@ fn review_revert_change(cx: &mut Context) {
 
 fn review_close_buffer(cx: &mut Context) {
     review::run_typed(cx, review::review_close)
+}
+
+fn review_baseline_picker(cx: &mut Context) {
+    review::run_typed(cx, review::review_baseline_pick)
 }
 
 fn review_refresh_buffer(cx: &mut Context) {

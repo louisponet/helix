@@ -34,6 +34,15 @@ pub struct CommitInfo {
     pub summary: String,
 }
 
+/// A commit of the first-parent history of `HEAD`, for the baseline picker.
+pub struct CommitEntry {
+    pub id: String,
+    pub summary: String,
+    pub author: String,
+    /// The commit time in seconds since the Unix epoch.
+    pub time: i64,
+}
+
 /// Contains all active diff providers. Diff providers are compiled in via features. Currently
 /// only `git` is supported.
 #[derive(Clone)]
@@ -130,6 +139,25 @@ impl DiffProviderRegistry {
         for provider in &self.providers {
             match provider.get_commit_history(file, trust_full) {
                 Ok(commits) => return Ok(commits),
+                Err(err) => {
+                    first_err.get_or_insert(err);
+                }
+            }
+        }
+        Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
+    }
+
+    /// Up to `limit` commits of the first-parent history of `HEAD`, newest first.
+    pub fn first_parent_log(
+        &self,
+        cwd: &Path,
+        limit: usize,
+        trust_full: bool,
+    ) -> Result<Vec<CommitEntry>> {
+        let mut first_err = None;
+        for provider in &self.providers {
+            match provider.first_parent_log(cwd, limit, trust_full) {
+                Ok(log) => return Ok(log),
                 Err(err) => {
                     first_err.get_or_insert(err);
                 }
@@ -357,6 +385,19 @@ impl DiffProvider {
         match self {
             #[cfg(feature = "git")]
             Self::Git => git::get_commit_history(file, trust_full),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn first_parent_log(
+        &self,
+        cwd: &Path,
+        limit: usize,
+        trust_full: bool,
+    ) -> Result<Vec<CommitEntry>> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::first_parent_log(cwd, limit, trust_full),
             Self::None => bail!("No diff support compiled in"),
         }
     }
