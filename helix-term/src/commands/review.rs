@@ -525,7 +525,7 @@ pub(super) fn review_ask(
         return Ok(());
     }
     ensure!(
-        cx.editor.review_handoff.is_some(),
+        cx.editor.review_handoff_dir().is_some(),
         "no review handoff directory, use :review-handoff <dir> first"
     );
     ensure!(doc!(cx.editor).path().is_some(), "buffer has no path");
@@ -1025,8 +1025,7 @@ fn hand_off(
     command: &str,
 ) -> anyhow::Result<PathBuf> {
     let dir = editor
-        .review_handoff
-        .clone()
+        .review_handoff_dir()
         .context("no review handoff directory, use :review-handoff <dir> first")?;
     let unsaved: Vec<_> = editor
         .documents()
@@ -1050,7 +1049,7 @@ pub(crate) fn document_written(editor: &mut Editor, doc_id: DocumentId) {
     if let Err(err) = editor.start_baseline_review(doc_id) {
         log::info!("not reviewing document {doc_id}: {err:#}");
     }
-    let Some(dir) = editor.review_handoff.clone() else {
+    let Some(dir) = editor.review_handoff_dir() else {
         return;
     };
     if doc!(editor, &doc_id).review.is_none() {

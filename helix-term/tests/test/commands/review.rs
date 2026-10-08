@@ -392,6 +392,8 @@ async fn review_suspends_visibly_on_large_edits_and_recovers_after_refresh() -> 
         "\n".repeat(Review::MAX_LINES),
     ] {
         let repo = Repo::new(INDEX, INDEX, DISK);
+        // Outside the repository, a pi mailbox in the host workspace would take the write's batch.
+        let _cwd = Cwd::enter(repo.dir.path());
         let mut app = repo.app()?;
         let batch = repo.dir.path().join("batch.json");
         let export = format!(":review-export {}<ret>", batch.display());
@@ -2716,6 +2718,28 @@ async fn review_send_exports_the_handoff_batch_without_writing() -> anyhow::Resu
     assert_error(&app, "unsaved changes: file.txt");
     assert_eq!(exported().len(), 1);
     assert_eq!(modified(), before);
+
+    send_keys(&mut app, ":q!<ret>").await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn handoff_defaults_to_the_pi_mailbox_in_the_workspace() -> anyhow::Result<()> {
+    let repo = Repo::new("old\n", "old\n", "old\n");
+    let _cwd = Cwd::enter(repo.dir.path());
+    let outbox = repo.dir.path().join(".pi/helix-review/outbox");
+    fs::create_dir_all(&outbox)?;
+    let mut app = repo.app()?;
+
+    send_keys(&mut app, ":review-baseline HEAD<ret>:review-send<ret>").await?;
+    assert_status_not_error(&app.editor);
+    let batches: Vec<_> = fs::read_dir(&outbox)?.collect::<Result<_, _>>()?;
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(batches[0].path())?)?;
+    assert_eq!(
+        json["files"][0]["path"],
+        serde_json::json!(helix_stdx::path::canonicalize(&repo.file))
+    );
 
     send_keys(&mut app, ":q!<ret>").await?;
     Ok(())

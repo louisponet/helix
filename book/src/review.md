@@ -53,7 +53,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `Enter` | In normal mode, runs `:review-toggle-stage` while the buffer is reviewed or is the `:review-diff` buffer, and does nothing otherwise. |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept. Under a `:review-baseline`, the buffer is not reviewed again until a different baseline, `:review-baseline clear`, or an explicit `:review` on it. |
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. `clear` closes all reviews. |
-| `:review-handoff <dir>` | Export a batch to `<dir>` on every write of a reviewed buffer. `clear` stops it. |
+| `:review-handoff <dir>` | Export a batch to `<dir>` on every write of a reviewed buffer. Without it, the default is `<workspace>/.pi/helix-review/outbox` when that directory exists (the pi extension creates it). `clear` returns to that default. |
 | `:review-send [text]` | Export the handoff batch now without writing any file, for example to acknowledge a review without edits; optional text goes to the agent as an instruction (the batch's `request`). |
 | `:review-commit [subject]` | Hand back like `:review-send`, asking the agent to commit exactly what is staged in the git index (optionally with that subject). Refuses when nothing is staged. |
 | `:review-diff` | Show one unified diff of every file changed since the review baseline (with none set, `HEAD` is pinned as it, like `:review-baseline HEAD`) in a read-only scratch buffer; running it again, or `:review-baseline` (as the pi hook does after each edit), refreshes that buffer in place. File headers are workspace-relative paths (`--- <path>`), so `gf` opens a file. |
@@ -321,5 +321,5 @@ changes stay pending for a later write.
 
 `:review-send` exports the same batch immediately without writing any file, so
 a review without edits can be handed back without touching the disk. It fails
-when no handoff directory is set, and names the reviewed buffers that have
+when no handoff directory is set and there is no default outbox, and names the reviewed buffers that have
 unsaved changes instead of exporting.

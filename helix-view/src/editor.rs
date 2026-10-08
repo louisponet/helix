@@ -1422,6 +1422,17 @@ pub enum CloseError {
 }
 
 impl Editor {
+    /// The directory review batches are exported to: the `:review-handoff` one, else the pi
+    /// extension's `<workspace>/.pi/helix-review/outbox` mailbox when it exists.
+    pub fn review_handoff_dir(&self) -> Option<PathBuf> {
+        self.review_handoff.clone().or_else(|| {
+            let outbox = helix_loader::find_workspace()
+                .0
+                .join(".pi/helix-review/outbox");
+            outbox.is_dir().then_some(outbox)
+        })
+    }
+
     pub fn new(
         mut area: Rect,
         theme_loader: Arc<theme::Loader>,
