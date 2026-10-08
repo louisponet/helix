@@ -1471,6 +1471,10 @@ async fn comments_export_as_one_batch() -> anyhow::Result<()> {
                 Some(":review<ret>:review-old<ret>x:review-comment why gone?<ret><esc>x:review-comment keep this<ret>"),
                 Some(&|app| {
                     assert_eq!(pending(app), 2);
+                    assert_eq!(
+                        app.editor.get_status().unwrap().0.as_ref(),
+                        "2 pending review comments, :review-export <path> writes them"
+                    );
                     repo.write(staged);
                     repo.stage();
                 }),

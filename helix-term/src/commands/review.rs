@@ -266,7 +266,8 @@ pub(super) fn review_comment(
     };
     let pending = cx.editor.review_batch.add_comment(comment);
     cx.editor.set_status(format!(
-        "{pending} pending review comment(s), :review-export <path> writes them"
+        "{}, :review-export <path> writes them",
+        plural(pending, "pending review comment")
     ));
     Ok(())
 }
