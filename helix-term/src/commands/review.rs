@@ -852,7 +852,13 @@ pub(super) fn review_files(
                         align_view(doc, view, Align::Center);
                     },
                 )
-                .with_preview(|_editor, change| Some((change.path().into(), None)));
+                .with_preview(|editor, change| {
+                    let path = change.path();
+                    let line = editor
+                        .document_by_path(path)
+                        .and_then(|doc| doc.review.as_ref()?.first_change_line());
+                    Some((path.into(), line.map(|line| (line, line))))
+                });
                 compositor.push(Box::new(overlaid(picker)));
             }));
         Ok(callback)
