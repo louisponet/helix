@@ -127,8 +127,12 @@ The mailbox is `<repo>/.pi/helix-review/` with an `outbox/` directory and
   comment` or `pi received your review: nothing to do`. Invalid batches stay
   in the outbox untouched.
 - While the mailbox exists, the system prompt explains the handoff and the
-  `AGENT:` convention: integrate your edits, never revert them, address each
-  `AGENT:` comment and delete its marker once handled.
+  `AGENT:` convention: a handoff can arrive mid-turn as a steering message;
+  integrate your edits and never revert them, keeping parts of the agent's
+  change you undid undone (with tests and docs adjusted); treat old
+  (`new: false`) `AGENT:` lines as possibly documentation; address each
+  `AGENT:` request and delete its marker once handled; and report per file
+  what was integrated or declined.
 
 The JSON in the handoff message is described in [`schema.md`](schema.md).
 

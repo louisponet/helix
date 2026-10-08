@@ -399,7 +399,7 @@ interface HookState {
 }
 
 const GUIDELINES = `## Helix review handoff
-The user reviews your changes in Helix against the commit at the start of your turn and hands them back by saving. A handoff arrives as a "helix-review:handoff" message with a JSON block: per file, user_edits are the user's edits as unified-diff hunks (integrate them, never revert them), agent_comments are lines containing "AGENT: <request>" that the user left for you (new: true when added in this review), and review_comments are inline review comments. Address each AGENT: comment and delete its marker line or comment once handled.`;
+The user reviews your changes in Helix against the commit at the start of your turn and hands them back by saving. A handoff arrives as a "helix-review:handoff" message with a JSON block, possibly in the middle of a turn as a steering message: per file, user_edits are the user's edits as unified-diff hunks (integrate them, never revert them; when they undo part of your change, keep it undone and adjust tests and docs to match), agent_comments are lines containing "AGENT: <request>" (new: true when added in this review; new: false ones may be documentation or examples rather than requests), and review_comments are inline review comments. Address each AGENT: request and delete its marker line once handled. After handling a handoff, say per file what you integrated or declined.`;
 
 class Hook {
 	private pi: ExtensionAPI;
