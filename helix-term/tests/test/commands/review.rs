@@ -1649,6 +1649,41 @@ async fn review_diff_shows_every_change_in_one_scratch_buffer() -> anyhow::Resul
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn n_walks_review_hunks_until_something_is_searched() -> anyhow::Result<()> {
+    let index = "a\nb\nc\nd\ne\nf\ng\n";
+    let repo = Repo::new(index, index, "a\nB\nc\nd\ne\nF\ng\n");
+    let mut app = repo.app()?;
+    let cursor_line = |app: &Application| {
+        let (view, doc) = current_ref!(app.editor);
+        let text = doc.text().slice(..);
+        doc.selection(view.id).primary().cursor_line(text)
+    };
+    // The differ runs in the background; waits until it reports both hunks.
+    let wait_for_hunks = |app: &Application| {
+        let doc = doc!(app.editor);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while doc.diff_handle().map_or(0, |diff| diff.load().len()) != 2 {
+            assert!(std::time::Instant::now() < deadline, "expected 2 hunks");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    };
+
+    send_keys(&mut app, ":review<ret>:clear-register /<ret>").await?;
+    wait_for_hunks(&app);
+    send_keys(&mut app, "n").await?;
+    assert_eq!(cursor_line(&app), 1);
+    send_keys(&mut app, "n").await?;
+    assert_eq!(cursor_line(&app), 5);
+    send_keys(&mut app, "N").await?;
+    assert_eq!(cursor_line(&app), 1);
+
+    // Once something is searched, n repeats the search.
+    send_keys(&mut app, "gg/c<ret>ggn").await?;
+    assert_eq!(cursor_line(&app), 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn repeating_the_baseline_only_reviews_buffers_changed_on_disk() -> anyhow::Result<()> {
     let repo = Repo::new("a\nb\n", "a\nb\n", "a\nB\n");
     let dir = repo.dir.path();

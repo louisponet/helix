@@ -15,10 +15,11 @@ on top; themes without one fall back to the `diff.plus` and `diff.minus`
 foreground colours. The buffer itself is the ordinary
 document: editing, undo, saving, syntax highlighting and language servers work
 as usual and never see the old lines. While the review is active, the diff
-gutter and the change motions (`]g`, `[g`, `]G`, `[G`) compare against the
-review baseline instead of the git index, so they follow the review even after
-its changes are committed. Closing the review, `:review-baseline clear` or
-hitting the [size limits](#size-limits) restores the ordinary diff.
+gutter and the change motions (`]g`, `[g`, `]G`, `[G`, and `n` / `N` while the
+search register is empty) compare against the review baseline instead of the
+git index, so they follow the review even after its changes are committed.
+Closing the review, `:review-baseline clear` or hitting the
+[size limits](#size-limits) restores the ordinary diff.
 
 Old lines are shown directly above the lines that replaced them. Lines removed
 from the very start of the file cannot be shown above the first line, so they
@@ -160,8 +161,13 @@ like this:
    `:review-diff-open`). It shows the review summary, for example
    `Reviewing against the git commit 1a2b3c4d: 2 blocks of old text,
    :review-old to inspect them`.
-3. `]g` / `[g` move between changed hunks of the current text; the diff gutter
-   and these motions follow the baseline while the review is active.
+3. `]g` / `[g` move to the next or previous hunk of the current text that
+   differs from the baseline, selecting its changed lines; `]G` / `[G` jump to
+   the last or first one. The diff gutter marks the same hunks, and both follow
+   the review baseline (not the git index) while the review is active, so they
+   still work after the agent has committed. Until you search for something,
+   `n` / `N` move between hunks too; after a `/` search they repeat it as
+   usual, and `:clear-register /` brings the hunk behaviour back.
 4. `:review-old` focuses the nearest old lines. Inside them, `]g` / `[g` move to
    the next or previous block of old lines, and `Esc` returns to the current
    text next to the block you were reading.

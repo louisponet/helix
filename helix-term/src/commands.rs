@@ -2400,6 +2400,15 @@ fn search_next_or_prev_impl(cx: &mut Context, movement: Movement, direction: Dir
     let register = cx
         .register
         .unwrap_or(cx.editor.registers.last_search_register);
+    // Under review with nothing searched yet, n/N walk the change hunks like ]g/[g.
+    let reviewing = doc!(cx.editor)
+        .review
+        .as_ref()
+        .is_some_and(|review| !review.is_suspended());
+    if reviewing && cx.editor.registers.first(register, cx.editor).is_none() {
+        goto_next_change_impl(cx, direction);
+        return;
+    }
     let config = cx.editor.config();
     let scrolloff = config.scrolloff;
     if let Some(query) = cx.editor.registers.first(register, cx.editor) {
