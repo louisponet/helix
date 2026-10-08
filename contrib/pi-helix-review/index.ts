@@ -38,7 +38,6 @@ interface ReviewComment {
 	contextAfter: string;
 	enclosingText?: string;
 	comment: string;
-	replyRequested: boolean;
 }
 
 interface GitEntry {
@@ -134,7 +133,6 @@ class ReviewBatch {
 				contextAfter: text(entry.context_after, `${at}.context_after`),
 				...(entry.enclosing_text === undefined ? {} : { enclosingText: text(entry.enclosing_text, `${at}.enclosing_text`) }),
 				comment: text(entry.comment, `${at}.comment`),
-				replyRequested: entry.reply_requested === true,
 			};
 			if (comment.endLine < comment.startLine) throw new BatchError(`${at}.end_line is before start_line`);
 			if (comment.side === "old" && comment.baseline.kind === "git-commit" && comment.baseline.blobOid === null) {
@@ -277,11 +275,10 @@ function parseRequest(value: unknown): ReviewRequest {
 function requestSection(request: ReviewRequest, comments: ReviewComment[]): string[] {
 	if (request.kind === "message") return ["User request:", ...quote("Instruction", request.text)];
 	if (request.kind === "ask") {
-		const asked = comments.filter((comment) => comment.replyRequested);
 		return [
 			"User request:",
-			"The user selected code in Helix and asked about it. Do what the message asks. Keep your final message short: answer the question or summarize what you changed in at most a few lines; it is shown inline in Helix next to the code.",
-			...asked.flatMap((comment, i) => {
+			"The user selected code in Helix and asked about it. Do what the message asks.",
+			...comments.flatMap((comment, i) => {
 				const lines = comment.startLine === comment.endLine ? `line ${comment.startLine}` : `lines ${comment.startLine}-${comment.endLine}`;
 				const old = comment.side === "old" ? " (old text, removed since the baseline)" : "";
 				return [
@@ -447,8 +444,6 @@ interface HookState {
 	snapshots: Record<string, string>;
 	/** Set by a commit-staged handoff until the end of the turn it starts or steers. */
 	commit_requested?: boolean;
-	/** Set by an ask handoff until the end of the turn it starts or steers: where to show the reply. */
-	ask_pending?: { batch: string; path: string; current_line: number };
 }
 
 const GUIDELINES = `## Helix review handoff
@@ -593,27 +588,8 @@ class Hook {
 		return head;
 	}
 
-	/**
-	 * At the end of a turn that answers an ask handoff, writes the agent's final `text` to a reply
-	 * file and shows it in Helix next to the asked code. Returns whether a reply was sent.
-	 */
-	async reply(text: string | undefined): Promise<boolean> {
-		const pending = this.state.ask_pending;
-		if (!pending) return false;
-		this.state.ask_pending = undefined;
-		await this.save();
-		if (!text?.trim()) return false;
-		const dir = join(this.dir, "replies");
-		await mkdir(dir, { recursive: true });
-		const file = join(dir, `${pending.batch}.json`);
-		const reply = { path: pending.path, current_line: pending.current_line, text: text.trim() };
-		await writeFile(file, `${JSON.stringify(reply, null, 2)}\n`);
-		await this.send([`review-reply ${file}`]);
-		return true;
-	}
-
 	/** Tells the reviewer in Helix that the turn ended and how many files differ from the baseline. */
-	async announceEnd(committed?: string, replied = false): Promise<void> {
+	async announceEnd(committed?: string): Promise<void> {
 		if (!this.state.baseline) return;
 		const count = Object.keys(this.state.snapshots).length;
 		if (committed) {
@@ -621,10 +597,6 @@ class Hook {
 			return this.echo(`Agent turn done: committed ${committed.slice(0, 8)}, ${files} still changed`);
 		}
 		const since = this.state.baseline.commit_oid.slice(0, 8);
-		if (replied) {
-			const files = count === 1 ? "1 file" : `${count} files`;
-			return this.echo(`Agent turn done: replied, ${files} changed since ${since}`);
-		}
 		if (count === 0) return this.echo(`Agent turn done: no file changes since ${since}`);
 		const files = count === 1 ? "1 file" : `${count} files`;
 		await this.echo(`Agent turn done: ${files} changed since ${since} (:review-files)`);
@@ -709,7 +681,6 @@ class Hook {
 					context_after: c.contextAfter,
 					...(c.enclosingText === undefined ? {} : { enclosing_text: c.enclosingText }),
 					comment: c.comment,
-					...(c.replyRequested ? { reply_requested: true } : {}),
 				}));
 			if (hunks.length || agentComments.length || reviewComments.length) {
 				files.push({ path: file, user_edits: { against, ...capHunks(hunks) }, agent_comments: agentComments, review_comments: reviewComments });
@@ -738,10 +709,6 @@ class Hook {
 		}
 		if (this.state.baseline) this.state.baseline.acknowledged = true;
 		if (request?.kind === "commit-staged") this.state.commit_requested = true;
-		const asked = batch.comments.find((comment) => comment.replyRequested);
-		if (request?.kind === "ask" && asked) {
-			this.state.ask_pending = { batch: basename(path, ".json"), path: asked.path, current_line: asked.currentLine };
-		}
 		await this.save();
 		await unlink(path);
 		await this.echo(`pi received your review: ${receipt(files, request)}`);
@@ -750,21 +717,6 @@ class Hook {
 	private save(): Promise<void> {
 		return writeFile(join(this.dir, "state.json"), `${JSON.stringify(this.state, null, 2)}\n`);
 	}
-}
-
-/** The text of the last assistant message in `messages`, if any. */
-function finalText(messages: readonly unknown[]): string | undefined {
-	for (const message of [...messages].reverse()) {
-		const { role, content } = (message ?? {}) as { role?: unknown; content?: unknown };
-		if (role !== "assistant") continue;
-		if (typeof content === "string") return content;
-		if (!Array.isArray(content)) return undefined;
-		return content
-			.filter((part): part is { type: "text"; text: string } => part?.type === "text" && typeof part.text === "string")
-			.map((part) => part.text)
-			.join("\n");
-	}
-	return undefined;
 }
 
 const MAX_HUNK_LINES = 200;
@@ -868,12 +820,11 @@ export default function helixReview(pi: ExtensionAPI): void {
 	pi.on("tool_result", (event) => {
 		if (event.toolName === "edit" || event.toolName === "write" || event.toolName === "bash") hook?.refreshSoon();
 	});
-	pi.on("agent_end", async (event) => {
+	pi.on("agent_end", async () => {
 		const committed = await hook?.followRequestedCommit();
 		await hook?.refresh();
-		const replied = (await hook?.reply(finalText(event.messages))) ?? false;
 		await hook?.snapshot();
-		await hook?.announceEnd(committed, replied);
+		await hook?.announceEnd(committed);
 	});
 
 	pi.registerCommand("helix-review", {

@@ -106,12 +106,10 @@ The mailbox is `<repo>/.pi/helix-review/` with an `outbox/` directory and
   (or steers) moves the baseline to the agent's new `HEAD` right away, sticky
   again, so the committed hunks drop out of the review, and echoes `Agent turn
   done: committed <oid>, N files still changed`. Commits the agent makes on
-  its own keep the sticky baseline. After a `:review-ask` handoff, the end of
-  the turn it starts (or steers) takes the agent's final message, writes it
-  to `.pi/helix-review/replies/<batch>.json` and, after the usual refresh,
-  sends `review-reply <file>` so Helix shows it inline next to the asked
-  code; the echo then reads `Agent turn done: replied, N files changed since
-  <oid>`. pi sends `review-handoff <outbox>` and `review-baseline <commit>`,
+  its own keep the sticky baseline. A `:review-ask` handoff ends with an
+  instruction to do what the question asks, listing each selection with its
+  lines, selected text, enclosing code and message; you read the answer in
+  pi, and the turn ends with the ordinary echo. pi sends `review-handoff <outbox>` and `review-baseline <commit>`,
   so Helix reviews every open file in the workspace against that commit and
   writes a batch into the outbox whenever you save a reviewed file. It then
   sends `echo Agent turn started` to Helix's status line.
