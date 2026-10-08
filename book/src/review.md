@@ -36,7 +36,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-comments` | Pick a pending comment by file, lines or text and jump to its line in the current text. |
 | `:review-uncomment [count]` | Drop the latest pending comment, or the `count` latest ones, and show how many remain. |
 | `:review-export <path>` | Write all pending comments and reviewed files to a new JSON file. |
-| `:review-revert` | Replace the change under the cursor, or the focused old text's change, with the baseline's lines (added lines are deleted). One undoable edit; the file on disk is not touched. |
+| `:review-revert` | Replace the change under the cursor, or the focused old text's change, with the baseline's lines (added lines are deleted; removed lines shown below the cursor line are restored). One undoable edit; the file on disk is not touched. |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept. Under a `:review-baseline`, the buffer is not reviewed again until a different baseline, `:review-baseline clear`, or an explicit `:review` on it. |
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. `clear` closes all reviews. |
 | `:review-handoff <dir>` | Export a batch to `<dir>` on every write of a reviewed buffer. `clear` stops it. |

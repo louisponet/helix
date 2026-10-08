@@ -1538,6 +1538,14 @@ async fn revert_restores_baseline_lines_as_one_undoable_edit() -> anyhow::Result
                     assert_eq!(repo.disk(), disk);
                 }),
             ),
+            (
+                // In normal mode, a removal is reverted from the line its old lines follow.
+                Some("ugg2j:review-revert<ret>"),
+                Some(&|app| {
+                    let text = "a\nB\nc\nd\ne\n".to_owned();
+                    assert_eq!(state(app), (text, 3, reverted("1 line")));
+                }),
+            ),
         ],
         false,
     )

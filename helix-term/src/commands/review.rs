@@ -253,7 +253,17 @@ pub(super) fn review_revert(
             let block = &review.blocks()[idx];
             (block.old.clone(), block.current.clone())
         }
-        None => review.hunk_at_line(line).context("no changed lines here")?,
+        // A removal has no current lines, so it is found by the line its old lines are shown at.
+        None => review
+            .hunk_at_line(line)
+            .or_else(|| {
+                let block = review
+                    .blocks_at(line)
+                    .iter()
+                    .find(|block| block.current.is_empty())?;
+                Some((block.old.clone(), block.current.clone()))
+            })
+            .context("no changed lines here")?,
     };
     review.clear_focus(view.id);
     let snapshot = review.snapshot().slice(..);
