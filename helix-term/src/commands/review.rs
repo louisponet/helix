@@ -27,6 +27,7 @@ const OLD_FOCUS_TYPABLE: &[&str] = &[
     "review-unstage",
     "review-toggle-stage",
     "review-comment",
+    "review-ask",
     "review-comments",
     "review-uncomment",
     "review-export",
@@ -41,6 +42,7 @@ const OLD_FOCUS_TYPABLE: &[&str] = &[
 const OLD_FOCUS_STATIC: &[&str] = &[
     "review_old_text",
     "review_comment_prompt",
+    "review_ask_prompt",
     "review_comments_picker",
     "review_uncomment_latest",
     "review_toggle_stage",
@@ -345,46 +347,146 @@ pub(super) fn review_comment(
         return Ok(());
     }
     ensure_review(cx)?;
+    let comment = selection_comments(cx.editor, &args[0], false)?.remove(0);
+    let pending = cx.editor.review_batch.add_comment(comment);
+    cx.editor.set_status(format!(
+        "{}, :review-export <path> writes them",
+        plural(pending, "pending review comment")
+    ));
+    Ok(())
+}
 
-    let (view, doc) = current_ref!(cx.editor);
+/// Comments with `text` on the focused old text, or on the primary selection (every selection
+/// range if `all_ranges`) of the current buffer.
+fn selection_comments(
+    editor: &Editor,
+    text: &str,
+    all_ranges: bool,
+) -> anyhow::Result<Vec<ReviewComment>> {
+    let (view, doc) = current_ref!(editor);
     let review = doc
         .review
         .as_ref()
         .context("not reviewing this buffer, use :review first")?;
     ensure!(!review.is_suspended(), Review::LIMIT_MESSAGE);
     let path = doc.path().context("buffer has no path")?.to_path_buf();
-    let text = args[0].to_string();
-    let comment = match review
+    if let Some((focus, idx)) = review
         .focus(view.id)
         .zip(review.focused_block_index(view.id))
     {
-        Some((focus, idx)) => ReviewComment::new(
+        return Ok(vec![ReviewComment::new(
             path,
             ReviewSide::Old,
             review.baseline(),
             review.snapshot().slice(..),
             focus.range,
             review.blocks()[idx].current.start,
-            text,
-        ),
-        None => {
-            let doc_text = doc.text().slice(..);
-            let range = doc.selection(view.id).primary();
-            ReviewComment::new(
-                path,
+            text.to_owned(),
+        )]);
+    }
+    let doc_text = doc.text().slice(..);
+    let selection = doc.selection(view.id);
+    // The primary selection comes first.
+    let mut ranges = vec![selection.primary()];
+    if all_ranges {
+        ranges.extend(
+            (selection.iter().enumerate())
+                .filter(|&(idx, _)| idx != selection.primary_index())
+                .map(|(_, range)| *range),
+        );
+    }
+    Ok(ranges
+        .into_iter()
+        .map(|range| ReviewComment {
+            enclosing_text: enclosing_text(doc, range),
+            ..ReviewComment::new(
+                path.clone(),
                 ReviewSide::Current,
                 review.baseline(),
                 doc_text,
                 range,
                 doc_text.char_to_line(range.from()),
-                text,
+                text.to_owned(),
             )
-        }
+        })
+        .collect())
+}
+
+/// The text of the smallest syntax node around `range` that is a function, type or similar item
+/// (or, failing that, spans at least three lines), cut at 200 lines. `None` without a syntax tree.
+fn enclosing_text(doc: &Document, range: Range) -> Option<String> {
+    const ITEM_KINDS: &[&str] = &[
+        "function", "method", "impl", "class", "struct", "enum", "trait", "module",
+    ];
+    const MAX_LINES: usize = 200;
+    let text = doc.text().slice(..);
+    let syntax = doc.syntax()?;
+    let (from, to) = (
+        text.char_to_byte(range.from()) as u32,
+        text.char_to_byte(range.to()) as u32,
+    );
+    let first = syntax.named_descendant_for_byte_range(from, to)?;
+    let ancestors: Vec<_> = std::iter::successors(Some(first), |node| node.parent()).collect();
+    let line_span =
+        |start: u32, end: u32| text.byte_to_line(end as usize) - text.byte_to_line(start as usize);
+    let node = ancestors
+        .iter()
+        .find(|node| ITEM_KINDS.iter().any(|kind| node.kind().contains(kind)))
+        .or_else(|| {
+            ancestors
+                .iter()
+                .find(|node| line_span(node.start_byte(), node.end_byte()) >= 2)
+        })?;
+    let start = node.start_byte() as usize;
+    let first_line = text.byte_to_line(start);
+    let end = if line_span(node.start_byte(), node.end_byte()) >= MAX_LINES {
+        text.line_to_byte(first_line + MAX_LINES)
+    } else {
+        node.end_byte() as usize
     };
-    let pending = cx.editor.review_batch.add_comment(comment);
+    Some(text.byte_slice(start..end).to_string())
+}
+
+pub(super) fn review_ask(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    ensure!(
+        cx.editor.review_handoff.is_some(),
+        "no review handoff directory, use :review-handoff <dir> first"
+    );
+    ensure!(doc!(cx.editor).path().is_some(), "buffer has no path");
+    ensure_review(cx)?;
+    let comments = selection_comments(cx.editor, &args[0], true)?;
+    let count = comments.len();
+    for comment in comments {
+        cx.editor.review_batch.add_comment(ReviewComment {
+            reply_requested: true,
+            ..comment
+        });
+    }
+    cx.editor.review_batch.set_request(ReviewRequest::Ask);
+    if doc!(cx.editor).is_modified() {
+        // Writing a reviewed buffer exports the handoff, carrying the comments and the request.
+        typed::write_impl(
+            cx,
+            None,
+            typed::WriteOptions {
+                force: false,
+                auto_format: true,
+                code_actions: true,
+            },
+        )?;
+    } else {
+        hand_off(cx.editor, None, ":review-ask")?;
+    }
     cx.editor.set_status(format!(
-        "{}, :review-export <path> writes them",
-        plural(pending, "pending review comment")
+        "Asked the agent about {}",
+        plural(count, "selection")
     ));
     Ok(())
 }

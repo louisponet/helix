@@ -2003,6 +2003,56 @@ async fn the_g_menu_runs_review_commands_next_to_user_keys() -> anyhow::Result<(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn review_ask_writes_the_buffer_and_hands_off_every_selection_once() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let repo = dir.path();
+    git_ok(repo, &["init"]);
+    let file = repo.join("lib.rs");
+    let source = "fn alpha() {\n    let a = 1;\n    let b = 2;\n}\n\nfn beta() {}\n";
+    fs::write(&file, source)?;
+    git_ok(repo, &["add", "lib.rs"]);
+    git_ok(repo, &["commit", "-m", "head"]);
+    let _cwd = Cwd::enter(repo);
+    let outbox = tempfile::tempdir()?;
+    let mut app = AppBuilder::new().with_file(&file, None).build()?;
+
+    // An edit leaves the buffer modified; lines 2 and 3 are selected separately.
+    let keys = format!(
+        ":review-handoff {}<ret>geo// end<esc>2ggxC:review-ask rename<ret>",
+        outbox.path().display()
+    );
+    send_keys(&mut app, &keys).await?;
+    assert_status_not_error(&app.editor);
+    assert!(!doc!(app.editor).is_modified());
+    assert!(fs::read_to_string(&file)?.ends_with("// end\n"));
+
+    let batches: Vec<_> = fs::read_dir(outbox.path())?
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(&batches[0])?)?;
+    assert_eq!(json["request"], serde_json::json!({ "kind": "ask" }));
+    let mut comments = json["comments"].as_array().unwrap().clone();
+    assert_eq!(comments.len(), 2, "{comments:?}");
+    // The primary selection (the copy on line 3) comes first.
+    assert_eq!(comments[0]["start_line"], 3);
+    comments.sort_by_key(|comment| comment["start_line"].as_u64());
+    for (comment, selected) in comments.iter().zip(["let a = 1;", "let b = 2;"]) {
+        assert_eq!(comment["comment"], "rename");
+        assert_eq!(comment["reply_requested"], true);
+        assert!(comment["selected_text"]
+            .as_str()
+            .unwrap()
+            .contains(selected));
+        let enclosing = comment["enclosing_text"].as_str().unwrap();
+        assert!(enclosing.starts_with("fn alpha() {"), "{enclosing}");
+        assert!(!enclosing.contains("beta"), "{enclosing}");
+    }
+    assert!(app.editor.review_batch.comments().is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn repeating_the_baseline_only_reviews_buffers_changed_on_disk() -> anyhow::Result<()> {
     let repo = Repo::new("a\nb\n", "a\nb\n", "a\nB\n");
     let dir = repo.dir.path();

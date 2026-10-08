@@ -370,6 +370,7 @@ used to go to a line; use `<n>gg` for that.
 | `g` | Open the file of the review diff hunk under the cursor       | `review_diff_open_hunk`  |
 | `o` | Focus the old review text nearest the cursor                 | `review_old_text`        |
 | `m` | Comment on the selection (opens `:review-comment `)          | `review_comment_prompt`  |
+| `a` | Ask the agent about the selections (opens `:review-ask `)    | `review_ask_prompt`      |
 | `c` | Pick a pending review comment                                | `review_comments_picker` |
 | `u` | Drop the latest pending review comment                       | `review_uncomment_latest`|
 | `s` | Stage or unstage the review hunk under the cursor            | `review_toggle_stage`    |

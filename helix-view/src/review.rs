@@ -563,7 +563,13 @@ pub struct ReviewComment {
     pub selected_text: String,
     pub context_before: String,
     pub context_after: String,
+    /// The smallest function, type or similar item around the selection, if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enclosing_text: Option<String>,
     pub comment: String,
+    /// Whether the reviewer asked for an answer (`:review-ask`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub reply_requested: bool,
 }
 
 impl ReviewComment {
@@ -593,7 +599,9 @@ impl ReviewComment {
             selected_text: text.slice(from..to).to_string(),
             context_before: text.slice(context_start..from).to_string(),
             context_after: text.slice(to..context_end).to_string(),
+            enclosing_text: None,
             comment,
+            reply_requested: false,
         }
     }
 }
@@ -609,6 +617,8 @@ pub enum ReviewRequest {
     },
     /// A free-text instruction.
     Message { text: String },
+    /// Do what the comments marked `reply_requested` ask and answer them briefly.
+    Ask,
 }
 
 /// Pending review comments and reviewed files, exported together as one batch.

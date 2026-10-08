@@ -499,6 +499,7 @@ impl MappableCommand {
         review_commit_staged, "Hand the review back asking to commit the staged hunks",
         review_send_handoff, "Hand the review back now",
         review_comment_prompt, "Comment on the selection for the review",
+        review_ask_prompt, "Ask the agent about the selections",
         redo, "Redo change",
         earlier, "Move backward in history",
         later, "Move forward in history",
@@ -4856,6 +4857,10 @@ fn review_send_handoff(cx: &mut Context) {
 
 fn review_comment_prompt(cx: &mut Context) {
     typed::command_mode_with_line(cx, "review-comment ")
+}
+
+fn review_ask_prompt(cx: &mut Context) {
+    typed::command_mode_with_line(cx, "review-ask ")
 }
 
 fn redo(cx: &mut Context) {

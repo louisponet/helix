@@ -92,6 +92,7 @@
 | `:review-old` | Focus the old text nearest the cursor. It can be selected, yanked and commented on but not edited; Esc returns. |
 | `:review-refresh` | Reload an unmodified reviewed buffer from disk and refresh its index baseline or retain its selected commit. |
 | `:review-comment` | Add a pending review comment on the primary selection, or on the selected old text. Use %% for a literal %. |
+| `:review-ask` | Ask the agent about every selection (or the selected old text): writes the buffer if modified and hands off the review with the question. Use %% for a literal %. |
 | `:review-comments` | Pick a pending review comment and jump to its line. |
 | `:review-uncomment` | Drop the most recently added pending review comment, or the given number of latest ones. |
 | `:review-export` | Write pending review comments and reviewed files as JSON to a new file. Reviewed buffers must be written first. |

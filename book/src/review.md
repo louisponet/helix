@@ -40,6 +40,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-old` | Focus the old text nearest the cursor. |
 | `:review-refresh` | Reload the buffer from disk; reread the index in index mode, or retain the selected commit in commit mode. Refuses unsaved changes. |
 | `:review-comment <text>` | Add a pending comment on the primary selection, or on the selected old text while it is focused. Use `%%` for a literal `%`. |
+| `:review-ask <text>` | Ask the agent about every selection, or the selected old text while it is focused: one comment per selection with the text, then hands the review off at once (writing the buffer first if it is modified). Needs `:review-handoff`. Use `%%` for a literal `%`. |
 | `:review-comments` | Pick a pending comment by file, lines or text and jump to its line in the current text. |
 | `:review-uncomment [count]` | Drop the latest pending comment, or the `count` latest ones, and show how many remain. |
 | `:review-export <path>` | Write all pending comments and reviewed files to a new JSON file. |
@@ -198,6 +199,10 @@ like this:
 7. `:review-comment <text>` comments on the current selection, or on the
    selected old text while it is focused. `:review-comments` lists pending
    comments and jumps to one; `:review-uncomment [count]` drops the latest.
+   To get an answer right away, select the code (several selections are
+   fine) and use `:review-ask <text>` (`G a`): it hands the selections and the
+   question to the agent at once, writing the buffer first if needed. You
+   watch the agent's edits arrive, and its short answer is shown inline.
 8. For a request that belongs in the code, write a line containing
    `AGENT: <request>` (for example `// AGENT: handle the empty case`); the
    agent is told to address it and delete the marker.
