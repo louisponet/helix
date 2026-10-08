@@ -446,6 +446,25 @@ pub fn step_commit(
     ))
 }
 
+/// Whether `commit` is `HEAD` or one of its ancestors in the repository at `cwd`.
+pub fn is_in_head_history(cwd: &Path, commit: &str, trust_full: bool) -> Result<bool> {
+    let repo = open_repo(cwd, trust_full)?.to_thread_local();
+    let commit = ObjectId::from_hex(commit.as_bytes())?;
+    let head = repo.head_id()?.detach();
+    Ok(commit == head
+        || repo
+            .merge_base(commit, head)
+            .is_ok_and(|base| base.detach() == commit))
+}
+
+/// The merge base of `revision` and `HEAD` in the repository at `cwd`.
+pub fn merge_base_with_head(cwd: &Path, revision: &str, trust_full: bool) -> Result<String> {
+    let repo = open_repo(cwd, trust_full)?.to_thread_local();
+    let other = repo.rev_parse_single(revision)?.detach();
+    let head = repo.head_id()?.detach();
+    Ok(repo.merge_base(other, head)?.to_hex().to_string())
+}
+
 /// Whether the git index of the repository at `cwd` differs from `HEAD` for any path.
 pub fn has_staged_changes(cwd: &Path, trust_full: bool) -> Result<bool> {
     let repo = open_repo(cwd, trust_full)?.to_thread_local();

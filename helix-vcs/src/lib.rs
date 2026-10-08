@@ -138,6 +138,39 @@ impl DiffProviderRegistry {
         Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
     }
 
+    /// Whether `commit` is `HEAD` or one of its ancestors in the repository at `cwd`.
+    pub fn is_in_head_history(&self, cwd: &Path, commit: &str, trust_full: bool) -> Result<bool> {
+        let mut first_err = None;
+        for provider in &self.providers {
+            match provider.is_in_head_history(cwd, commit, trust_full) {
+                Ok(found) => return Ok(found),
+                Err(err) => {
+                    first_err.get_or_insert(err);
+                }
+            }
+        }
+        Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
+    }
+
+    /// The merge base of `revision` and `HEAD` in the repository at `cwd`.
+    pub fn merge_base_with_head(
+        &self,
+        cwd: &Path,
+        revision: &str,
+        trust_full: bool,
+    ) -> Result<String> {
+        let mut first_err = None;
+        for provider in &self.providers {
+            match provider.merge_base_with_head(cwd, revision, trust_full) {
+                Ok(base) => return Ok(base),
+                Err(err) => {
+                    first_err.get_or_insert(err);
+                }
+            }
+        }
+        Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
+    }
+
     /// Stages the worktree state of `paths` in the repository at `cwd` like `git add -A` limited
     /// to them, returning how many paths changed in the index.
     pub fn stage_paths(&self, cwd: &Path, paths: &[PathBuf], trust_full: bool) -> Result<usize> {
@@ -324,6 +357,22 @@ impl DiffProvider {
         match self {
             #[cfg(feature = "git")]
             Self::Git => git::get_commit_history(file, trust_full),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn is_in_head_history(&self, cwd: &Path, commit: &str, trust_full: bool) -> Result<bool> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::is_in_head_history(cwd, commit, trust_full),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn merge_base_with_head(&self, cwd: &Path, revision: &str, trust_full: bool) -> Result<String> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::merge_base_with_head(cwd, revision, trust_full),
             Self::None => bail!("No diff support compiled in"),
         }
     }

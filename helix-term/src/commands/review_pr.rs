@@ -174,6 +174,38 @@ pub(super) fn review_pr(
     Ok(())
 }
 
+/// Re-pins the pull request's baseline when its merge base with `HEAD` moved, as after the
+/// branch was rebased onto a newer base.
+pub(super) fn follow_merge_base(editor: &mut Editor) -> anyhow::Result<()> {
+    let Some(pr) = &editor.review_pr else {
+        return Ok(());
+    };
+    let workspace = helix_loader::find_workspace().0;
+    let trust_full = editor
+        .workspace_trust
+        .query(&workspace, helix_loader::workspace_trust::TrustQuery::Git)
+        .is_trusted();
+    let base = [format!("origin/{}", pr.base_ref), pr.base_ref.clone()]
+        .into_iter()
+        .find_map(|base| {
+            editor
+                .diff_providers
+                .merge_base_with_head(&workspace, &base, trust_full)
+                .ok()
+        })
+        .context("the pull request's base branch is not in this repository")?;
+    if base == pr.merge_base {
+        return Ok(());
+    }
+    pin_review_baseline(editor, &base)?;
+    if let Some(pr) = editor.review_pr.as_mut() {
+        pr.merge_base = base.clone();
+    }
+    editor.review_stepped_from = None;
+    editor.set_status(format!("Baseline moved to {} after a rebase", &base[..8]));
+    Ok(())
+}
+
 /// Lines of context around a change that GitHub still accepts review comments on.
 const DIFF_CONTEXT: usize = 3;
 

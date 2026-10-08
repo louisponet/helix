@@ -2676,6 +2676,46 @@ api\ repos/o/r/pulls/7/comments*) echo '{threads}';;"#
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn review_pr_follows_a_rebase_and_refuses_commits_outside_the_branch() -> anyhow::Result<()> {
+    let fixture = PrFixture::new("a\nb\n", "a\nB\n", r#"api\ *) echo '[]';;"#);
+    let dir = fixture.repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let mut app = fixture.open().await?;
+    assert_eq!(
+        app.editor.review_baseline.as_deref(),
+        Some(fixture.merge_base.as_str())
+    );
+
+    // The pull request branch is rebased onto the moved-on base branch.
+    git_ok(dir, &["rebase", "-q", "main"]);
+    let main = git_ok(dir, &["rev-parse", "main"]);
+    send_keys(&mut app, ":reload<ret>:review-refresh<ret>").await?;
+    assert_eq!(app.editor.review_baseline.as_deref(), Some(main.as_str()));
+    assert_eq!(app.editor.review_pr.as_ref().unwrap().merge_base, main);
+    assert_eq!(
+        app.editor.get_status().unwrap().0.to_string(),
+        format!("Baseline moved to {} after a rebase", &main[..8])
+    );
+
+    // The pre-rebase head is no longer in the branch's history, from the socket or the user.
+    app.editor.socket_command = true;
+    send_keys(&mut app, &format!(":review-baseline {}<ret>", fixture.head)).await?;
+    app.editor.socket_command = false;
+    assert_error(
+        &app,
+        &format!(
+            "commit {} is not in this branch's history",
+            &fixture.head[..8]
+        ),
+    );
+    send_keys(&mut app, &format!(":review-baseline {}<ret>", fixture.head)).await?;
+    assert_error(&app, "is not in this branch's history");
+    assert_eq!(app.editor.review_baseline.as_deref(), Some(main.as_str()));
+    assert!(app.editor.review_pr.is_some());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_g_menu_runs_review_commands_next_to_user_keys() -> anyhow::Result<()> {
     let repo = Repo::new("one\ntwo\n", "one\ntwo\n", "one\nTWO\n");
     let _cwd = Cwd::enter(repo.dir.path());

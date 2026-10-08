@@ -435,6 +435,7 @@ pub(super) fn review_refresh(
     cx.editor
         .set_status(format!("Review refreshed from disk and the {baseline}"));
     if let Some(pr) = cx.editor.review_pr.clone() {
+        super::review_pr::follow_merge_base(cx.editor)?;
         cx.jobs.add(super::review_pr::load_threads(pr));
     }
     Ok(())
@@ -959,6 +960,22 @@ pub(super) fn review_baseline(
         return Ok(());
     }
 
+    if &args[0] != "clear" {
+        // A stale commit (one a rebase rewrote, say) is never adopted as the baseline.
+        let workspace = helix_loader::find_workspace().0;
+        let trust_full = cx
+            .editor
+            .workspace_trust
+            .query(&workspace, TrustQuery::Git)
+            .is_trusted();
+        let providers = &cx.editor.diff_providers;
+        let commit = providers.resolve_commit(&workspace, &args[0], trust_full)?;
+        ensure!(
+            providers.is_in_head_history(&workspace, &commit, trust_full)?,
+            "commit {} is not in this branch's history",
+            &commit[..8]
+        );
+    }
     if cx.editor.review_pr.is_some() && &args[0] != "clear" {
         if cx.editor.socket_command {
             // The hook re-sending its baseline only refreshes the pull request's (or a stepped one).
