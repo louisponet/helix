@@ -185,6 +185,7 @@ pub(super) fn review_old(
     if event != PromptEvent::Validate {
         return Ok(());
     }
+    ensure_review(cx)?;
 
     let review = doc!(cx.editor)
         .review
@@ -223,6 +224,7 @@ pub(super) fn review_refresh(
     if event != PromptEvent::Validate {
         return Ok(());
     }
+    ensure_review(cx)?;
     let doc = doc!(cx.editor);
     let review = doc
         .review
@@ -248,6 +250,7 @@ pub(super) fn review_revert(
     if event != PromptEvent::Validate {
         return Ok(());
     }
+    ensure_review(cx)?;
 
     let (view, doc) = current!(cx.editor);
     let line = doc
@@ -312,6 +315,7 @@ pub(super) fn review_comment(
     if event != PromptEvent::Validate {
         return Ok(());
     }
+    ensure_review(cx)?;
 
     let (view, doc) = current_ref!(cx.editor);
     let review = doc
@@ -363,6 +367,9 @@ pub(super) fn review_comments(
 ) -> anyhow::Result<()> {
     if event != PromptEvent::Validate {
         return Ok(());
+    }
+    if let Err(err) = ensure_review(cx) {
+        log::info!("not enabling review: {err:#}");
     }
 
     let comments = cx.editor.review_batch.comments().to_vec();
@@ -443,6 +450,9 @@ pub(super) fn review_uncomment(
 ) -> anyhow::Result<()> {
     if event != PromptEvent::Validate {
         return Ok(());
+    }
+    if let Err(err) = ensure_review(cx) {
+        log::info!("not enabling review: {err:#}");
     }
 
     let count = match args.first() {
@@ -572,6 +582,27 @@ pub(super) fn review_baseline(
         return Ok(());
     }
     pin_review_baseline(cx, &args[0])
+}
+
+/// Enables review mode for a review command: pins `HEAD` as the editor-wide baseline when none is
+/// set, then starts reviewing the current buffer against it if it is a workspace file without a
+/// review that the reviewer did not close under that baseline.
+fn ensure_review(cx: &mut compositor::Context) -> anyhow::Result<()> {
+    let doc = doc!(cx.editor);
+    // A buffer under review, whatever its baseline, or the diff buffer needs nothing more.
+    if doc.review.is_some() || cx.editor.review_diff == Some(doc.id()) {
+        return Ok(());
+    }
+    let commit = review_baseline_or_head(cx)?;
+    let workspace = helix_loader::find_workspace().0;
+    let doc = doc!(cx.editor);
+    let start = doc.review.is_none()
+        && doc.path().is_some_and(|path| path.starts_with(&workspace))
+        && doc.review_opt_out.as_ref() != Some(&commit);
+    if start {
+        start_review(cx, Some(&commit))?;
+    }
+    Ok(())
 }
 
 /// The editor-wide review baseline, pinning `HEAD` like `:review-baseline HEAD` when none is set.
@@ -734,6 +765,9 @@ pub(super) fn review_send(
     if event != PromptEvent::Validate {
         return Ok(());
     }
+    if let Err(err) = ensure_review(cx) {
+        log::info!("not enabling review: {err:#}");
+    }
     let request = args.first().map(|text| ReviewRequest::Message {
         text: text.to_owned(),
     });
@@ -750,6 +784,9 @@ pub(super) fn review_commit(
 ) -> anyhow::Result<()> {
     if event != PromptEvent::Validate {
         return Ok(());
+    }
+    if let Err(err) = ensure_review(cx) {
+        log::info!("not enabling review: {err:#}");
     }
     let workspace = helix_loader::find_workspace().0;
     let trust_full = cx
@@ -1142,6 +1179,7 @@ pub(super) fn review_stage(
     if event != PromptEvent::Validate {
         return Ok(());
     }
+    ensure_review(cx)?;
     change_staging(cx.editor, Staging::Stage)
 }
 
@@ -1153,6 +1191,7 @@ pub(super) fn review_unstage(
     if event != PromptEvent::Validate {
         return Ok(());
     }
+    ensure_review(cx)?;
     change_staging(cx.editor, Staging::Unstage)
 }
 
@@ -1164,6 +1203,7 @@ pub(super) fn review_toggle_stage(
     if event != PromptEvent::Validate {
         return Ok(());
     }
+    ensure_review(cx)?;
     change_staging(cx.editor, Staging::Toggle)
 }
 
@@ -1345,11 +1385,53 @@ fn refresh_review_diff(editor: &mut Editor) {
 pub(crate) fn review_stage_hunk(cx: &mut Context) {
     let doc = doc!(cx.editor);
     if doc.review.is_none() && cx.editor.review_diff != Some(doc.id()) {
-        return;
+        // Outside a review, Enter only takes over on an unstaged change of a workspace file,
+        // and then enables the review first so the same press stages.
+        if !on_unstaged_change(cx.editor) {
+            return;
+        }
+        let mut cx = compositor::Context {
+            editor: cx.editor,
+            jobs: cx.jobs,
+            scroll: None,
+        };
+        if let Err(err) = ensure_review(&mut cx) {
+            cx.editor.set_error(format!("{err:#}"));
+            return;
+        }
     }
     if let Err(err) = change_staging(cx.editor, Staging::Toggle) {
         cx.editor.set_error(format!("{err:#}"));
     }
+}
+
+/// Whether the cursor line of the current buffer, a workspace file whose review was not closed,
+/// is part of a change that is not staged in the git index.
+fn on_unstaged_change(editor: &Editor) -> bool {
+    let (view, doc) = current_ref!(editor);
+    let workspace = helix_loader::find_workspace().0;
+    let Some(path) = doc.path().filter(|path| path.starts_with(&workspace)) else {
+        return false;
+    };
+    if doc.review_opt_out.is_some() && doc.review_opt_out == editor.review_baseline {
+        return false;
+    }
+    let trust_full = editor
+        .workspace_trust
+        .query(&workspace, TrustQuery::Git)
+        .is_trusted();
+    let (Ok((index, _)), Ok(worktree)) = (
+        editor.diff_providers.get_index_base(path, trust_full),
+        std::fs::read(path),
+    ) else {
+        return false;
+    };
+    let line = doc
+        .selection(view.id)
+        .primary()
+        .cursor_line(doc.text().slice(..));
+    let hunks = helix_vcs::line_hunks(&index, &worktree);
+    helix_vcs::find_hunk(&hunks, &(line..line + 1)).is_some()
 }
 
 /// The file and worktree line range `:review-stage` stages a hunk of: the hunk under the cursor of

@@ -1322,6 +1322,7 @@ async fn comment_picker_jumps_to_pending_comments() -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn uncomment_drops_the_latest_pending_comments() -> anyhow::Result<()> {
     let repo = Repo::new(INDEX, INDEX, DISK);
+    let _cwd = Cwd::enter(repo.dir.path());
     let comments = |app: &Application| -> Vec<String> {
         app.editor
             .review_batch
@@ -1347,15 +1348,16 @@ async fn uncomment_drops_the_latest_pending_comments() -> anyhow::Result<()> {
             .build()?,
         vec![
             (
+                // Review commands enable review against HEAD on their own.
                 Some(":review-uncomment<ret>"),
                 Some(&|app| {
                     assert_error(app, "no pending review comments");
-                    assert_eq!(review_element(app), None);
+                    assert_eq!(review_element(app), Some(format!("{} 2 hunks", &head[..8])));
                 }),
             ),
             (
                 Some(concat!(
-                    ":review<ret>:review-comment one<ret>:review-comment two<ret>",
+                    ":review index<ret>:review-comment one<ret>:review-comment two<ret>",
                     ":review-old<ret>:review-comment three<ret>:review-comment four<ret>",
                     ":review-uncomment<ret>",
                 )),
@@ -1902,6 +1904,64 @@ async fn handoff_requests_ask_the_agent_to_commit_or_follow_a_message() -> anyho
         take_batch()["request"],
         serde_json::json!({ "kind": "commit-staged" })
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_commands_enable_review_against_head_on_their_own() -> anyhow::Result<()> {
+    let repo = Repo::new("a\ngone\nb\n", "a\ngone\nb\n", "a\nb\n");
+    let head = git_ok(repo.dir.path(), &["rev-parse", "HEAD"]);
+    let _cwd = Cwd::enter(repo.dir.path());
+    let mut app = repo.app()?;
+    assert!(doc!(app.editor).review.is_none());
+
+    // Without a baseline or a review, :review-old pins HEAD, reviews the buffer and focuses.
+    send_keys(&mut app, ":review-old<ret>").await?;
+    assert_eq!(app.editor.review_baseline.as_deref(), Some(head.as_str()));
+    let review = doc!(app.editor).review.as_ref().unwrap();
+    assert_eq!(review.baseline().revision(), Some(head.as_str()));
+    let focus = old_focus(&app).expect("old text is focused");
+    let text = review.snapshot().slice(..);
+    assert_eq!(focus.fragment(text), "g");
+
+    // A closed review stays closed for commands that only need the baseline.
+    send_keys(&mut app, "<esc>:review-close<ret>:review-comments<ret>").await?;
+    assert!(doc!(app.editor).review.is_none());
+    assert_error(&app, "no pending review comments");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_enter_stages_without_or_right_after_a_review() -> anyhow::Result<()> {
+    let repo = Repo::new("a\nb\nc\n", "a\nb\nc\n", "a\nB\nc\n");
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let cached = || git_ok(dir, &["diff", "--cached", "--", "file.txt"]);
+    let status = |app: &Application| app.editor.get_status().unwrap().0.to_string();
+
+    // No review and no baseline: Enter on an unchanged line does nothing, on the change it
+    // enables review against HEAD and stages in the same press.
+    let mut app = repo.app()?;
+    send_keys(&mut app, "<ret>").await?;
+    assert!(doc!(app.editor).review.is_none());
+    assert_eq!(app.editor.review_baseline, None);
+    send_keys(&mut app, "j<ret>").await?;
+    assert_eq!(status(&app), "Staged hunk; 1 of 1 staged in file.txt");
+    assert!(cached().contains("-b\n+B"), "{}", cached());
+    assert!(doc!(app.editor).review.is_some());
+    send_keys(&mut app, "<ret>").await?;
+    assert_eq!(cached(), "");
+
+    // Right after the hook's review-baseline, one Enter stages too.
+    let mut app = repo.app()?;
+    send_keys(&mut app, ":review-baseline HEAD<ret>j<ret>").await?;
+    assert_eq!(status(&app), "Staged hunk; 1 of 1 staged in file.txt");
+    assert!(cached().contains("-b\n+B"), "{}", cached());
+
+    // A file the agent changed after the last refresh is refused visibly, not silently.
+    repo.write_external("a\nB\nC\n");
+    send_keys(&mut app, "<ret>").await?;
+    assert_error(&app, "changed on disk");
     Ok(())
 }
 

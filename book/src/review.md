@@ -4,6 +4,10 @@
 index, so only unstaged changes are shown, unless an editor-wide
 `:review-baseline` is set: then it uses that commit. `:review index` always
 uses the index, and `:review <revision>` uses a commit snapshot; `:review-commits` opens a picker of recent commit baselines.
+Other review commands do not need `:review` first: in a workspace file without
+a review they pin `HEAD` as the editor-wide baseline when none is set (like
+`:review-baseline HEAD`) and start the buffer's review against it, unless you
+closed it with `:review-close`.
 For buffers within the [size limits](#size-limits), a clean buffer is first
 reloaded from disk, after the requested baseline is successfully loaded.
 Unsaved edits are kept; if the file also changed on disk, review refuses to start.
