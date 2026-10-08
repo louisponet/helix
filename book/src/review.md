@@ -202,7 +202,9 @@ like this:
    unstages them all when all are staged (`Staged 3 hunks; 5 of 7 staged in
    file.rs`); the cursor then moves on to the next unstaged hunk, in this file
    or the next changed one (`; next: b.rs hunk 1 of 2`), and stays when none
-   is left, from a reviewed buffer,
+   is left. On a line with nothing to stage, `Enter` (and `G s`) jumps to the
+   next unstaged hunk instead (`next: b.rs hunk 2 of 5`, or `nothing unstaged
+   since <commit>`), from a reviewed buffer,
    focused old text or the `:review-diff` buffer, where staged hunks are marked
    `(staged)`. In the buffer a staged hunk's lines turn blue and its old lines
    grey (`diff.plus.review.staged`, `diff.minus.review.staged`) until the next

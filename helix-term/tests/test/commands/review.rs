@@ -2244,9 +2244,9 @@ async fn enter_stages_and_unstages_every_hunk_the_selections_touch() -> anyhow::
     send_keys(&mut app, "3ggv14jx<ret>").await?;
     assert_eq!(status(&app), "Staged 2 hunks; 3 of 3 staged in file.txt");
 
-    // A selection touching no hunk keeps the old error.
+    // Off every hunk, with all of them staged, Enter has nowhere to jump to.
     send_keys(&mut app, "<esc>gg<ret>").await?;
-    assert_error(&app, "nothing to stage here");
+    assert_error(&app, "nothing unstaged since");
     Ok(())
 }
 
@@ -2717,6 +2717,48 @@ async fn review_pr_follows_a_rebase_and_refuses_commits_outside_the_branch() -> 
     assert_error(&app, "is not in this branch's history");
     assert_eq!(app.editor.review_baseline.as_deref(), Some(main.as_str()));
     assert!(app.editor.review_pr.is_some());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn enter_off_a_hunk_jumps_to_the_next_unstaged_one() -> anyhow::Result<()> {
+    let lines = (1..=20).map(|n| format!("{n}\n")).collect::<String>();
+    let changed = (1..=20)
+        .map(|n| match n {
+            9 | 15 => format!("changed {n}\n"),
+            n => format!("{n}\n"),
+        })
+        .collect::<String>();
+    let repo = Repo::new(&lines, &lines, &changed);
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let mut app = repo.app()?;
+    let status = |app: &Application| app.editor.get_status().unwrap().0.to_string();
+    let line = |app: &Application| {
+        let (view, doc) = current_ref!(app.editor);
+        doc.selection(view.id)
+            .primary()
+            .cursor_line(doc.text().slice(..))
+    };
+    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+    let head = git_ok(dir, &["rev-parse", "HEAD"]);
+
+    // On an unchanged line, Enter jumps to the next unstaged hunk without staging.
+    send_keys(&mut app, "3gg<ret>").await?;
+    assert_eq!(line(&app), 8);
+    assert_eq!(status(&app), "next: file.txt hunk 1 of 2");
+    assert_eq!(git_ok(dir, &["diff", "--cached"]), "");
+    // On the hunk, Enter stages it and moves on; G s likewise.
+    send_keys(&mut app, "<ret>").await?;
+    assert_eq!(line(&app), 14);
+    send_keys(&mut app, "Gs").await?;
+    assert_eq!(git_ok(dir, &["diff", "--name-only"]), "");
+    // With everything staged, an unchanged line has nowhere to go.
+    send_keys(&mut app, "gg<ret>").await?;
+    assert_error(&app, &format!("nothing unstaged since {}", &head[..8]));
+    // The typable command keeps its own error.
+    send_keys(&mut app, ":review-stage<ret>").await?;
+    assert_error(&app, "nothing to stage here");
     Ok(())
 }
 

@@ -1975,6 +1975,8 @@ fn announce_hunk(editor: &mut Editor) {
     }
 }
 
+const NOTHING_TO_STAGE: &str = "nothing to stage here";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Staging {
     Stage,
@@ -2042,7 +2044,7 @@ fn change_staging(editor: &mut Editor, staging: Staging) -> anyhow::Result<()> {
         Staging::Toggle => !to_stage.is_empty(),
     };
     let (content, verb, hunks) = if stage {
-        ensure!(!to_stage.is_empty(), "nothing to stage here");
+        ensure!(!to_stage.is_empty(), NOTHING_TO_STAGE);
         // Applied from the last, so the earlier hunks' index lines stay valid.
         let content = to_stage.iter().rev().fold(index.clone(), |content, hunk| {
             helix_vcs::apply_hunk(&content, &worktree, hunk)
@@ -2053,7 +2055,7 @@ fn change_staging(editor: &mut Editor, staging: Staging) -> anyhow::Result<()> {
             !to_unstage.is_empty(),
             match staging {
                 Staging::Unstage => "nothing staged here",
-                _ => "nothing to stage here",
+                _ => NOTHING_TO_STAGE,
             }
         );
         let content = to_unstage
@@ -2288,9 +2290,49 @@ pub(crate) fn review_stage_hunk(cx: &mut Context) {
         jobs: cx.jobs,
         scroll: None,
     };
-    if let Err(err) = stage_and_move_on(&mut cx, Staging::Toggle) {
+    if let Err(err) = toggle_or_jump(&mut cx) {
         cx.editor.set_error(format!("{err:#}"));
     }
+}
+
+/// The `G s` key: toggles the staging like `:review-toggle-stage`, or jumps on like Enter.
+pub(crate) fn review_toggle_stage_key(cx: &mut Context) {
+    let mut cx = compositor::Context {
+        editor: cx.editor,
+        jobs: cx.jobs,
+        scroll: None,
+    };
+    let result = ensure_review(&mut cx).and_then(|()| toggle_or_jump(&mut cx));
+    if let Err(err) = result {
+        cx.editor.set_error(format!("{err:#}"));
+    }
+}
+
+/// Toggles the staging of the hunks under the selections; when there is none to stage in a
+/// reviewed buffer, jumps to the next unstaged hunk instead, across files.
+fn toggle_or_jump(cx: &mut compositor::Context) -> anyhow::Result<()> {
+    let err = match stage_and_move_on(cx, Staging::Toggle) {
+        Err(err) if err.to_string() == NOTHING_TO_STAGE => err,
+        result => return result,
+    };
+    let doc = doc!(cx.editor);
+    if doc.review.is_none() || cx.editor.review_diff == Some(doc.id()) {
+        return Err(err);
+    }
+    let (view, doc) = current_ref!(cx.editor);
+    let cursor = doc
+        .selection(view.id)
+        .primary()
+        .cursor_line(doc.text().slice(..));
+    if !next_unstaged_hunk(cx, cursor)? {
+        let commit = cx.editor.review_baseline.clone().unwrap_or_default();
+        bail!("nothing unstaged since {}", &commit[..8.min(commit.len())]);
+    }
+    if let Some((status, _)) = cx.editor.get_status() {
+        let status = format!("next: {}", status.replacen(": ", " ", 1));
+        cx.editor.set_status(status);
+    }
+    Ok(())
 }
 
 /// Whether the cursor line of the current buffer, a workspace file whose review was not closed,

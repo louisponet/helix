@@ -4870,7 +4870,7 @@ fn review_uncomment_latest(cx: &mut Context) {
 }
 
 fn review_toggle_stage(cx: &mut Context) {
-    review::run_typed(cx, review::review_toggle_stage)
+    review::review_toggle_stage_key(cx)
 }
 
 fn review_revert_change(cx: &mut Context) {
