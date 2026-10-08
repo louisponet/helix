@@ -301,6 +301,24 @@ pub fn resolve_commit(cwd: &Path, revision: &str, trust_full: bool) -> Result<St
     Ok(commit.id.to_hex().to_string())
 }
 
+/// Whether the git index of the repository at `cwd` differs from `HEAD` for any path.
+pub fn has_staged_changes(cwd: &Path, trust_full: bool) -> Result<bool> {
+    let repo = open_repo(cwd, trust_full)?.to_thread_local();
+    let tree = repo.head_commit()?.tree_id()?;
+    let status = repo
+        .status(gix::progress::Discard)?
+        .untracked_files(UntrackedFiles::None)
+        .head_tree(tree)
+        .tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled)
+        .into_iter(Vec::new())?;
+    for item in status {
+        if let gix::status::Item::TreeIndex(_) = item? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub fn get_changed_files_since(
     cwd: &Path,
     commit: &str,

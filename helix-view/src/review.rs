@@ -598,11 +598,25 @@ impl ReviewComment {
     }
 }
 
+/// What the reviewer asks the agent to do with a handoff, beyond the edits and comments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ReviewRequest {
+    /// Commit what is staged in the git index, with an optional subject.
+    CommitStaged {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subject: Option<String>,
+    },
+    /// A free-text instruction.
+    Message { text: String },
+}
+
 /// Pending review comments and reviewed files, exported together as one batch.
 #[derive(Debug, Default)]
 pub struct ReviewBatch {
     files: BTreeMap<PathBuf, ReviewBaseline>,
     comments: Vec<ReviewComment>,
+    request: Option<ReviewRequest>,
 }
 
 impl ReviewBatch {
@@ -636,7 +650,12 @@ impl ReviewBatch {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.files.is_empty() && self.comments.is_empty()
+        self.files.is_empty() && self.comments.is_empty() && self.request.is_none()
+    }
+
+    /// Sets the request the next export carries, replacing any earlier one.
+    pub fn set_request(&mut self, request: ReviewRequest) {
+        self.request = Some(request);
     }
 
     /// Writes the files accepted by `include` and their comments as JSON to the new file `path`
@@ -653,6 +672,8 @@ impl ReviewBatch {
             version: u32,
             files: Vec<File<'a>>,
             comments: Vec<&'a ReviewComment>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            request: Option<&'a ReviewRequest>,
         }
 
         let batch = Batch {
@@ -669,6 +690,7 @@ impl ReviewBatch {
                 .iter()
                 .filter(|comment| include(&comment.path))
                 .collect(),
+            request: self.request.as_ref(),
         };
         let mut json = serde_json::to_vec_pretty(&batch)?;
         json.push(b'\n');
@@ -686,6 +708,7 @@ impl ReviewBatch {
         }
         self.files.retain(|path, _| !include(path));
         self.comments.retain(|comment| !include(&comment.path));
+        self.request = None;
         Ok(())
     }
 }

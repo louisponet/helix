@@ -93,6 +93,20 @@ impl DiffProviderRegistry {
         Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
     }
 
+    /// Whether the git index of the repository at `cwd` differs from `HEAD` for any path.
+    pub fn has_staged_changes(&self, cwd: &Path, trust_full: bool) -> Result<bool> {
+        let mut first_err = None;
+        for provider in &self.providers {
+            match provider.has_staged_changes(cwd, trust_full) {
+                Ok(staged) => return Ok(staged),
+                Err(err) => {
+                    first_err.get_or_insert(err);
+                }
+            }
+        }
+        Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
+    }
+
     pub fn get_commit_base(
         &self,
         file: &Path,
@@ -250,6 +264,14 @@ impl DiffProvider {
             #[cfg(feature = "git")]
             Self::Git => git::update_index_entry(file, content, expected, trust_full)
                 .map(|id| id.to_hex().to_string()),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn has_staged_changes(&self, cwd: &Path, trust_full: bool) -> Result<bool> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::has_staged_changes(cwd, trust_full),
             Self::None => bail!("No diff support compiled in"),
         }
     }

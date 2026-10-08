@@ -1847,6 +1847,65 @@ async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn handoff_requests_ask_the_agent_to_commit_or_follow_a_message() -> anyhow::Result<()> {
+    let repo = Repo::new("a\nb\n", "a\nb\n", "a\nb\n");
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let outbox = tempfile::tempdir()?;
+    let mut app = repo.app()?;
+    // Reads the only batch in the outbox and removes it.
+    let take_batch = || -> serde_json::Value {
+        let batches: Vec<_> = fs::read_dir(outbox.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(batches.len(), 1, "{batches:?}");
+        let json = serde_json::from_str(&fs::read_to_string(&batches[0]).unwrap()).unwrap();
+        fs::remove_file(&batches[0]).unwrap();
+        json
+    };
+
+    let handoff = format!(":review-handoff {}<ret>", outbox.path().display());
+    send_keys(
+        &mut app,
+        &format!("{handoff}:review<ret>:review-commit<ret>"),
+    )
+    .await?;
+    assert_error(&app, "nothing is staged");
+    assert_eq!(fs::read_dir(outbox.path())?.count(), 0);
+
+    // :review-send with text carries it as a message, and only once.
+    send_keys(&mut app, ":review-send please rename b<ret>").await?;
+    assert_eq!(
+        take_batch()["request"],
+        serde_json::json!({ "kind": "message", "text": "please rename b" })
+    );
+    send_keys(&mut app, ":review-send<ret>").await?;
+    assert!(take_batch().get("request").is_none());
+
+    // With a staged change, :review-commit asks for a commit of it with the subject.
+    repo.write("a\nB\n");
+    repo.stage();
+    send_keys(
+        &mut app,
+        ":reload<ret>:review-commit fix: capitalize b<ret>",
+    )
+    .await?;
+    let (status, _) = app.editor.get_status().unwrap();
+    assert_eq!(status.as_ref(), "Handed off: commit staged hunks");
+    assert_eq!(
+        take_batch()["request"],
+        serde_json::json!({ "kind": "commit-staged", "subject": "fix: capitalize b" })
+    );
+    send_keys(&mut app, ":review-commit<ret>").await?;
+    assert_eq!(
+        take_batch()["request"],
+        serde_json::json!({ "kind": "commit-staged" })
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn repeating_the_baseline_only_reviews_buffers_changed_on_disk() -> anyhow::Result<()> {
     let repo = Repo::new("a\nb\n", "a\nb\n", "a\nB\n");
     let dir = repo.dir.path();

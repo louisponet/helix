@@ -47,7 +47,8 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept. Under a `:review-baseline`, the buffer is not reviewed again until a different baseline, `:review-baseline clear`, or an explicit `:review` on it. |
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. `clear` closes all reviews. |
 | `:review-handoff <dir>` | Export a batch to `<dir>` on every write of a reviewed buffer. `clear` stops it. |
-| `:review-send` | Export the handoff batch now without writing any file, for example to acknowledge a review without edits. |
+| `:review-send [text]` | Export the handoff batch now without writing any file, for example to acknowledge a review without edits; optional text goes to the agent as an instruction (the batch's `request`). |
+| `:review-commit [subject]` | Hand back like `:review-send`, asking the agent to commit exactly what is staged in the git index (optionally with that subject). Refuses when nothing is staged. |
 | `:review-diff` | Show one unified diff of every file changed since the review baseline (with none set, `HEAD` is pinned as it, like `:review-baseline HEAD`) in a read-only scratch buffer; running it again, or `:review-baseline` (as the pi hook does after each edit), refreshes that buffer in place. File headers are workspace-relative paths (`--- <path>`), so `gf` opens a file. |
 | `:review-diff-open` | In the `:review-diff` buffer, open the file of the hunk under the cursor at the current line it shows (the next current line on a removed line). |
 | `:review-files` | Pick a file added (`A`), modified (`M`) or deleted (`D`) since the review baseline, and open it at its first change. The `+/-` and `hunks` columns show added and removed lines and staged/total hunks (`?` over the size limits), and the status line the totals. With no baseline set, it first pins `HEAD` like `:review-baseline HEAD`. |
@@ -198,8 +199,11 @@ like this:
    agent is told to address it and delete the marker.
 9. Hand the review back: `:w` on a reviewed buffer exports your edits,
    markers and comments, or `:review-send` exports them without writing
-   anything when there is nothing to save. The status line then confirms it,
-   for example `pi received your review: 1 file with edits, 1 review comment`.
+   anything when there is nothing to save; `:review-send <text>` adds an
+   instruction for the agent. `:review-commit [subject]` hands back and asks
+   the agent to commit exactly what you staged (and nothing else). The status
+   line then confirms it, for example `pi received your review: 1 file with
+   edits, 1 review comment`.
 
 The baseline stays on the same commit until a handoff is received, so a
 following agent turn is still reviewed against the commit you started from.
@@ -216,7 +220,8 @@ g = ":review-diff-open"
 o = ":review-old"
 c = ":review-comments"
 u = ":review-uncomment"
-s = ":review-send"
+S = ":review-send"
+C = ":review-commit"
 r = ":review-revert"
 s = ":review-toggle-stage"
 R = ":review-refresh"

@@ -9,7 +9,7 @@ use helix_core::doc_formatter::TextFormat;
 use helix_core::graphemes::prev_grapheme_boundary;
 use helix_core::line_ending::line_end_char_index;
 use helix_core::text_annotations::TextAnnotations;
-use helix_view::review::{OldFocus, Review, ReviewComment, ReviewSide};
+use helix_view::review::{OldFocus, Review, ReviewComment, ReviewRequest, ReviewSide};
 
 use helix_loader::workspace_trust::TrustQuery;
 use helix_vcs::FileChange;
@@ -31,6 +31,7 @@ const OLD_FOCUS_TYPABLE: &[&str] = &[
     "review-uncomment",
     "review-export",
     "review-send",
+    "review-commit",
     "review-close",
     "review-old",
 ];
@@ -727,33 +728,75 @@ pub(super) fn review_handoff(
 
 pub(super) fn review_send(
     cx: &mut compositor::Context,
-    _args: Args,
+    args: Args,
     event: PromptEvent,
 ) -> anyhow::Result<()> {
     if event != PromptEvent::Validate {
         return Ok(());
     }
+    let request = args.first().map(|text| ReviewRequest::Message {
+        text: text.to_owned(),
+    });
+    let path = hand_off(cx.editor, request, ":review-send")?;
+    cx.editor
+        .set_status(format!("Exported review batch {}", path.display()));
+    Ok(())
+}
 
-    let dir = cx
+pub(super) fn review_commit(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    let workspace = helix_loader::find_workspace().0;
+    let trust_full = cx
         .editor
+        .workspace_trust
+        .query(&workspace, TrustQuery::Git)
+        .is_trusted();
+    ensure!(
+        cx.editor
+            .diff_providers
+            .has_staged_changes(&workspace, trust_full)?,
+        "nothing is staged"
+    );
+    let subject = args.first().map(str::to_owned);
+    hand_off(
+        cx.editor,
+        Some(ReviewRequest::CommitStaged { subject }),
+        ":review-commit",
+    )?;
+    cx.editor.set_status("Handed off: commit staged hunks");
+    Ok(())
+}
+
+/// Exports the handoff batch with `request`, refusing while a reviewed buffer is unsaved.
+fn hand_off(
+    editor: &mut Editor,
+    request: Option<ReviewRequest>,
+    command: &str,
+) -> anyhow::Result<PathBuf> {
+    let dir = editor
         .review_handoff
         .clone()
         .context("no review handoff directory, use :review-handoff <dir> first")?;
-    let unsaved: Vec<_> = cx
-        .editor
+    let unsaved: Vec<_> = editor
         .documents()
         .filter(|doc| doc.review.is_some() && doc.is_modified())
         .map(|doc| doc.display_name().into_owned())
         .collect();
     ensure!(
         unsaved.is_empty(),
-        "reviewed buffers have unsaved changes: {}; write or undo them before :review-send",
+        "reviewed buffers have unsaved changes: {}; write or undo them before {command}",
         unsaved.join(", ")
     );
-    let path = export_handoff(cx.editor, &dir)?;
-    cx.editor
-        .set_status(format!("Exported review batch {}", path.display()));
-    Ok(())
+    if let Some(request) = request {
+        editor.review_batch.set_request(request);
+    }
+    export_handoff(editor, &dir)
 }
 
 /// Starts reviewing the written document against the review baseline and exports a review batch

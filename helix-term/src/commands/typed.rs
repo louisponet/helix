@@ -4155,11 +4155,24 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "review-send",
         aliases: &[],
-        doc: "Export a review batch to the handoff directory now, as a write would, without writing any file. Refuses while a reviewed buffer has unsaved changes.",
+        doc: "Export a review batch to the handoff directory now, as a write would, without writing any file, with optional text as an instruction to the agent. Refuses while a reviewed buffer has unsaved changes.",
         fun: review::review_send,
         completer: CommandCompleter::none(),
         signature: Signature {
-            positionals: (0, Some(0)),
+            positionals: (0, Some(1)),
+            raw_after: Some(0),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-commit",
+        aliases: &[],
+        doc: "Hand the review back like :review-send, asking the agent to commit exactly what is staged in the git index, with an optional commit subject. Refuses when nothing is staged.",
+        fun: review::review_commit,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(1)),
+            raw_after: Some(0),
             ..Signature::DEFAULT
         },
     },
