@@ -52,6 +52,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept. Under a `:review-baseline`, the buffer is not reviewed again until a different baseline, `:review-baseline clear`, or an explicit `:review` on it. |
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. `clear` closes all reviews. |
 | `:review-pr <number\|url>` | Review a GitHub pull request: check it out with `gh pr checkout` and review every buffer against its merge base with the base branch. Refuses uncommitted changes and unsaved reviewed buffers. `close` leaves the pull request review and keeps the checkout. See [Reviewing pull requests](#reviewing-pull-requests). |
+| `:review-submit [approve\|request-changes\|comment] [summary]` | Post the pending pull request comments as one review (see [Reviewing pull requests](#reviewing-pull-requests)). `G m` opens it while reviewing a pull request. |
 | `:review-commit-all [subject]` | Stage every file changed since the baseline (modified, deleted and untracked, like `git add -A` limited to them), then hand back like `:review-commit`. Refuses unsaved reviewed buffers, and says `no changes since <commit>` when there is nothing. `G M` in the default keymap. |
 | `:review-next` | Go to the next changed block; after the last one, open the next file changed since the baseline (`:review-files` order, wrapping around) at its first block. Shows `<file>: hunk 2 of 5`. `G n` in the default keymap, which takes a count. |
 | `:review-prev` | Like `:review-next` backwards, landing on the previous file's last block. `G N` in the default keymap. |
@@ -310,6 +311,17 @@ While reviewing a pull request, `G c` (`:review-comment`) collects comments
 for the pull request instead of for pi: they are kept out of the batches
 handed to pi (saving, `:review-send`, `:review-commit`), and a comment on a
 line with a thread replies to it. `:review-ask` still goes to pi at once.
+
+`:review-submit [approve|request-changes|comment] [summary]` (`G m` opens it
+while reviewing a pull request) posts them as one review on the pull request's
+head commit, with the summary as its body (`comment` by default). A comment on
+lines of the pull request's diff (changed lines and 3 lines around them, on
+their side) becomes a line comment, spanning lines when it covers several;
+any other becomes a file-level comment quoting its lines (`> 11: text`).
+Replies are posted to their threads. On success the pending comments are
+cleared, the threads reloaded, and the status reads `Submitted APPROVE on #7:
+2 comments, 1 reply, 1 file-level`; on failure everything stays pending and
+the status shows `gh`'s error.
 
 ### Troubleshooting
 

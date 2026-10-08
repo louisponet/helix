@@ -4881,7 +4881,12 @@ fn review_refresh_buffer(cx: &mut Context) {
 }
 
 fn review_commit_staged(cx: &mut Context) {
-    review::run_typed(cx, review::review_commit)
+    // While reviewing a pull request, the commit key submits the review instead.
+    if cx.editor.review_pr.is_some() {
+        typed::command_mode_with_line(cx, "review-submit ");
+    } else {
+        review::run_typed(cx, review::review_commit)
+    }
 }
 
 fn review_send_handoff(cx: &mut Context) {

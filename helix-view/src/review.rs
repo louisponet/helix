@@ -717,7 +717,7 @@ pub enum ReviewSide {
 const CONTEXT_LINES: usize = 3;
 
 /// A review comment, serialized as described in `contrib/pi-helix-review/schema.md`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReviewComment {
     pub path: PathBuf,
     pub side: ReviewSide,

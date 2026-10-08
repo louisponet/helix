@@ -4,7 +4,9 @@ use std::process::Stdio;
 
 use serde::Deserialize;
 
-use helix_view::review::{PullRequest, ReviewThread, ThreadComment, ThreadSide};
+use helix_view::review::{
+    PullRequest, ReviewComment, ReviewSide, ReviewThread, ThreadComment, ThreadSide,
+};
 
 use crate::job::Job;
 
@@ -170,6 +172,180 @@ pub(super) fn review_pr(
         Ok(Callback::Followup(Box::new(callback)))
     });
     Ok(())
+}
+
+/// Lines of context around a change that GitHub still accepts review comments on.
+const DIFF_CONTEXT: usize = 3;
+
+pub(super) fn review_submit(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    let pr = cx
+        .editor
+        .review_pr
+        .clone()
+        .context("not reviewing a pull request, use :review-pr first")?;
+    let text = args.first().unwrap_or_default().trim();
+    let (event, summary) = match text.split_once(char::is_whitespace).unwrap_or((text, "")) {
+        ("approve", rest) => ("APPROVE", rest.trim()),
+        ("request-changes", rest) => ("REQUEST_CHANGES", rest.trim()),
+        ("comment", rest) => ("COMMENT", rest.trim()),
+        _ => ("COMMENT", text),
+    };
+    let pending = cx.editor.review_pr_comments.clone();
+    ensure!(
+        !pending.is_empty() || !summary.is_empty() || event != "COMMENT",
+        "nothing to submit: no pending pull request comments and no summary"
+    );
+    let workspace = helix_loader::find_workspace().0;
+    let mut comments = Vec::new();
+    let mut replies = Vec::new();
+    let mut file_level = 0;
+    for comment in &pending {
+        if let Some(root) = comment.reply_to {
+            replies.push(serde_json::json!({ "body": comment.comment, "in_reply_to": root }));
+            continue;
+        }
+        let path = comment
+            .path
+            .strip_prefix(&workspace)
+            .unwrap_or(&comment.path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let side = match comment.side {
+            ReviewSide::Current => "RIGHT",
+            ReviewSide::Old => "LEFT",
+        };
+        if in_diff(cx.editor, &pr, comment)? {
+            let mut entry = serde_json::json!({
+                "path": path,
+                "line": comment.end_line,
+                "side": side,
+                "body": comment.comment,
+            });
+            if comment.start_line != comment.end_line {
+                entry["start_line"] = comment.start_line.into();
+                entry["start_side"] = side.into();
+            }
+            comments.push(entry);
+        } else {
+            file_level += 1;
+            comments.push(serde_json::json!({
+                "path": path,
+                "subject_type": "file",
+                "body": file_level_body(comment),
+            }));
+        }
+    }
+    let lines = comments.len() - file_level;
+    let review = (!comments.is_empty() || !summary.is_empty() || event != "COMMENT").then(|| {
+        serde_json::json!({
+            "commit_id": pr.head_oid,
+            "event": event,
+            "body": summary,
+            "comments": comments,
+        })
+    });
+    cx.editor
+        .set_status(format!("Submitting the review of #{}…", pr.number));
+    cx.jobs.callback(async move {
+        let result = post_review(&pr, review, replies.clone(), &workspace).await;
+        let callback = move |editor: &mut Editor| match result {
+            Ok(()) => {
+                editor
+                    .review_pr_comments
+                    .retain(|comment| !pending.contains(comment));
+                editor.set_status(format!(
+                    "Submitted {event} on #{}: {}, {}, {} file-level",
+                    pr.number,
+                    plural(lines, "comment"),
+                    plural(replies.len(), "reply"),
+                    file_level
+                ));
+                Some(load_threads(pr))
+            }
+            Err(err) => {
+                editor.set_error(format!("submitting the review failed: {err:#}"));
+                None
+            }
+        };
+        Ok(Callback::Followup(Box::new(callback)))
+    });
+    Ok(())
+}
+
+/// Posts `review` (if any) to the pull request, then each reply to its thread.
+async fn post_review(
+    pr: &PullRequest,
+    review: Option<serde_json::Value>,
+    replies: Vec<serde_json::Value>,
+    cwd: &Path,
+) -> anyhow::Result<()> {
+    let gh = gh_program();
+    if let Some(review) = review {
+        let endpoint = format!("repos/{}/pulls/{}/reviews", pr.repo, pr.number);
+        let args = ["api", "-X", "POST", &endpoint, "--input", "-"];
+        run(&gh, &args, cwd, Some(serde_json::to_vec(&review)?)).await?;
+    }
+    let endpoint = format!("repos/{}/pulls/{}/comments", pr.repo, pr.number);
+    for reply in replies {
+        let args = ["api", "-X", "POST", &endpoint, "--input", "-"];
+        run(&gh, &args, cwd, Some(serde_json::to_vec(&reply)?)).await?;
+    }
+    Ok(())
+}
+
+/// Whether GitHub accepts a line comment on `comment`'s lines: they must be changed lines of the
+/// pull request (from its merge base), or within [`DIFF_CONTEXT`] lines of one, on their side.
+fn in_diff(editor: &Editor, pr: &PullRequest, comment: &ReviewComment) -> anyhow::Result<bool> {
+    let trust_full = editor
+        .workspace_trust
+        .query(
+            &helix_loader::find_workspace().0,
+            helix_loader::workspace_trust::TrustQuery::Git,
+        )
+        .is_trusted();
+    let base = editor
+        .diff_providers
+        .get_commit_base(&comment.path, &pr.merge_base, trust_full)
+        .map(|base| base.data)
+        .unwrap_or_default();
+    let current = match editor.document_by_path(&comment.path) {
+        Some(doc) => doc.text().to_string().into_bytes(),
+        None => std::fs::read(&comment.path).unwrap_or_default(),
+    };
+    let lines = comment.start_line - 1..comment.end_line;
+    Ok(helix_vcs::line_hunks(&base, &current).iter().any(|hunk| {
+        let changed = match comment.side {
+            ReviewSide::Current => hunk.after.start as usize..hunk.after.end as usize,
+            ReviewSide::Old => hunk.before.start as usize..hunk.before.end as usize,
+        };
+        let near = changed.start.saturating_sub(DIFF_CONTEXT)..changed.end + DIFF_CONTEXT;
+        near.start <= lines.start && lines.end <= near.end
+    }))
+}
+
+/// The body of a file-level comment for `comment`: its selected lines quoted with their line
+/// numbers, then the comment.
+fn file_level_body(comment: &ReviewComment) -> String {
+    let side = match comment.side {
+        ReviewSide::Current => "",
+        ReviewSide::Old => "old ",
+    };
+    let mut body: String = comment
+        .selected_text
+        .lines()
+        .enumerate()
+        .map(|(idx, line)| format!("> {side}{}: {line}\n", comment.start_line + idx))
+        .collect();
+    body.push('\n');
+    body.push_str(&comment.comment);
+    body
 }
 
 /// A job loading the review comment threads of `pr` and showing them in the reviews.

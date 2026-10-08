@@ -2590,6 +2590,92 @@ async fn staging_moves_on_to_the_next_unstaged_hunk_across_files() -> anyhow::Re
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn review_submit_posts_line_file_level_and_reply_comments() -> anyhow::Result<()> {
+    let base: String = "abcdefghijkl".chars().map(|c| format!("{c}\n")).collect();
+    let head = base.replacen("b\n", "B\n", 1);
+    let threads = r#"[{"id":1,"in_reply_to_id":null,"path":"file.txt","line":8,"original_line":8,"start_line":null,"side":"RIGHT","body":"why h?","user":{"login":"alice"},"created_at":"t","commit_id":"c"}]"#;
+    // The posted JSON is kept next to the fake; a `fail` file there makes the review POST fail.
+    let extra = format!(
+        r#"api\ -X\ POST\ repos/o/r/pulls/7/reviews*) [ -e "$(dirname "$0")/fail" ] && {{ echo 'HTTP 422: line could not be resolved' >&2; exit 1; }}; cat > "$(dirname "$0")/review.json"; echo '{{}}';;
+api\ -X\ POST\ repos/o/r/pulls/7/comments*) cat >> "$(dirname "$0")/replies.json"; echo >> "$(dirname "$0")/replies.json"; echo '{{}}';;
+api\ repos/o/r/pulls/7/comments*) echo '{threads}';;"#
+    );
+    let fixture = PrFixture::new(&base, &head, &extra);
+    let dir = fixture.repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let fake_dir = fixture.gh.log.parent().unwrap().to_path_buf();
+    let mut app = fixture.open().await?;
+    wait_for(&mut app, |app| app.editor.review_pr_threads.len() == 1).await?;
+
+    // A comment on the changed line 2, one on lines 3-4 (context), one far from the change on
+    // line 11, and a reply to the thread on line 8.
+    send_keys(&mut app, "2gg:review-comment fix B<ret>").await?;
+    send_keys(&mut app, "3ggxx:review-comment two lines<ret>").await?;
+    send_keys(&mut app, "<esc>11gg:review-comment far away<ret>").await?;
+    send_keys(&mut app, "8ggGcthanks<ret>").await?;
+    assert_eq!(app.editor.review_pr_comments.len(), 4);
+
+    // G m opens the submit prompt; a failing post keeps everything pending.
+    fs::write(fake_dir.join("fail"), "")?;
+    send_keys(&mut app, "Gmapprove looks good<ret>").await?;
+    wait_for(&mut app, |app| {
+        app.editor
+            .get_status()
+            .is_some_and(|(status, _)| status.contains("failed"))
+    })
+    .await?;
+    assert_error(&app, "HTTP 422: line could not be resolved");
+    assert_eq!(app.editor.review_pr_comments.len(), 4);
+
+    fs::remove_file(fake_dir.join("fail"))?;
+    send_keys(&mut app, ":review-submit approve looks good<ret>").await?;
+    wait_for(&mut app, |app| app.editor.review_pr_comments.is_empty()).await?;
+    assert_eq!(
+        app.editor.get_status().unwrap().0,
+        "Submitted APPROVE on #7: 2 comments, 1 reply, 1 file-level"
+    );
+    let review: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fake_dir.join("review.json"))?)?;
+    assert_eq!(
+        review,
+        serde_json::json!({
+            "commit_id": fixture.head,
+            "event": "APPROVE",
+            "body": "looks good",
+            "comments": [
+                { "path": "file.txt", "line": 2, "side": "RIGHT", "body": "fix B" },
+                {
+                    "path": "file.txt", "line": 4, "side": "RIGHT",
+                    "start_line": 3, "start_side": "RIGHT", "body": "two lines"
+                },
+                { "path": "file.txt", "subject_type": "file", "body": "> 11: k\n\nfar away" },
+            ],
+        })
+    );
+    let replies = fs::read_to_string(fake_dir.join("replies.json"))?;
+    let replies: Vec<serde_json::Value> = replies
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    assert_eq!(
+        replies,
+        [serde_json::json!({ "body": "thanks", "in_reply_to": 1 })]
+    );
+    // The threads are loaded again after the submit.
+    wait_for(&mut app, |_| {
+        let calls = fixture.gh.calls();
+        calls
+            .iter()
+            .filter(|call| call.starts_with("api repos/o/r/pulls/7/comments"))
+            .count()
+            == 2
+    })
+    .await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_g_menu_runs_review_commands_next_to_user_keys() -> anyhow::Result<()> {
     let repo = Repo::new("one\ntwo\n", "one\ntwo\n", "one\nTWO\n");
     let _cwd = Cwd::enter(repo.dir.path());

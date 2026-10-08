@@ -102,6 +102,7 @@
 | `:review-toggle-stage` | Stage the hunks the selections touch, or unstage them all if all are already staged (Enter while reviewing). |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept for :review-export. |
 | `:review-pr` | Review a GitHub pull request (number or URL) with gh: check it out and review every buffer against its merge base with the base branch. `close` leaves the pull request review. |
+| `:review-submit` | Post the pending pull request comments as a review with gh: [approve|request-changes|comment] [summary]. Comments outside the pull request's diff become file-level comments quoting their lines; replies go to their threads. |
 | `:review-commit-all` | Stage every file changed since the review baseline (modified, deleted and untracked, like git add -A limited to them), then hand back like :review-commit with an optional subject and a leading @label to address a pi session. |
 | `:review-next` | Go to the next changed block, continuing with the first block of the next file changed since the review baseline (in :review-files order, wrapping around). |
 | `:review-prev` | Go to the previous changed block, continuing with the last block of the previous file changed since the review baseline (wrapping around). |
