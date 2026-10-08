@@ -617,6 +617,11 @@ where
         Some(commit) => format!(" review {}", &commit[..8]),
         None => " review index".to_owned(),
     };
+    let hunks = review.hunk_count();
+    if hunks > 0 {
+        let suffix = if hunks == 1 { "" } else { "s" };
+        text.push_str(&format!(" {hunks} hunk{suffix}"));
+    }
     let comments = context.editor.review_batch.comments().len();
     if comments > 0 {
         let suffix = if comments == 1 { "" } else { "s" };

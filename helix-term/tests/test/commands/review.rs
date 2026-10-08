@@ -1362,7 +1362,10 @@ async fn uncomment_drops_the_latest_pending_comments() -> anyhow::Result<()> {
                 Some(&|app| {
                     assert_eq!(comments(app), ["one", "two", "three"]);
                     assert_eq!(status(app), "Dropped 1 review comment, 3 pending");
-                    assert_eq!(review_element(app).as_deref(), Some("index 3 comments"));
+                    assert_eq!(
+                        review_element(app).as_deref(),
+                        Some("index 2 hunks 3 comments")
+                    );
                 }),
             ),
             (
@@ -1370,7 +1373,10 @@ async fn uncomment_drops_the_latest_pending_comments() -> anyhow::Result<()> {
                 Some(&|app| {
                     assert_eq!(comments(app), ["one"]);
                     assert_eq!(status(app), "Dropped 2 review comments, 1 pending");
-                    assert_eq!(review_element(app).as_deref(), Some("index 1 comment"));
+                    assert_eq!(
+                        review_element(app).as_deref(),
+                        Some("index 2 hunks 1 comment")
+                    );
                 }),
             ),
             (
@@ -1390,7 +1396,7 @@ async fn uncomment_drops_the_latest_pending_comments() -> anyhow::Result<()> {
             (
                 Some(":review HEAD<ret>"),
                 Some(&|app| {
-                    assert_eq!(review_element(app), Some(head[..8].to_owned()));
+                    assert_eq!(review_element(app), Some(format!("{} 2 hunks", &head[..8])));
                 }),
             ),
         ],

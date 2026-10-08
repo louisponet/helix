@@ -260,6 +260,11 @@ impl Review {
         &self.blocks[start..start + len]
     }
 
+    /// The number of hunks, each a run of changed lines.
+    pub fn hunk_count(&self) -> usize {
+        self.hunks.len()
+    }
+
     /// The baseline and document line ranges of the hunk whose document lines contain `line`.
     pub fn hunk_at_line(&self, line: usize) -> Option<(ops::Range<usize>, ops::Range<usize>)> {
         self.hunks
