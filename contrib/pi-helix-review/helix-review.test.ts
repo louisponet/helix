@@ -739,14 +739,32 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	assert.ok(message.content.includes(JSON.stringify(message.details, null, 2)), message.content);
 	assert.match(message.content, /never revert them/);
 	assert.equal(state().baseline.acknowledged, true);
+	await until(() => lines.length === 10, "the receipt echo");
+	assert.equal(lines[9], "echo pi received your review: 1 file with edits, 2 AGENT comments, 1 review comment");
+
+	// An unchanged file without comments is nothing to do, and the reviewer is told so.
+	const empty = join(outbox, "1-2.json");
+	writeFileSync(
+		`${empty}.tmp`,
+		JSON.stringify({
+			format: "helix-review-batch",
+			version: 2,
+			files: [{ path: join(repo, "new.rs"), baseline: commitBase(head, null) }],
+			comments: [],
+		}),
+	);
+	renameSync(`${empty}.tmp`, empty);
+	await until(() => lines.length === 11, "the empty receipt echo");
+	assert.equal(lines[10], "echo pi received your review: nothing to do");
+	assert.equal(session.messages.length, 1);
 
 	await session.emit("agent_start");
-	assert.deepEqual(lines.slice(9), [`review-handoff ${outbox}`, `review-baseline ${next}`, started], "an acknowledged baseline moves to HEAD");
+	assert.deepEqual(lines.slice(11), [`review-handoff ${outbox}`, `review-baseline ${next}`, started], "an acknowledged baseline moves to HEAD");
 
 	const restarted = piSession(repo);
 	t.after(() => restarted.emit("session_shutdown"));
 	await restarted.emit("session_start", { reason: "startup" });
-	assert.deepEqual(lines.slice(12), [`review-handoff ${outbox}`, `review-baseline ${next}`], "session_start restores the baseline");
+	assert.deepEqual(lines.slice(14), [`review-handoff ${outbox}`, `review-baseline ${next}`], "session_start restores the baseline");
 });
 
 test("an unreachable Helix never fails the hook, and an empty handoff is dropped but acknowledged", async (t) => {

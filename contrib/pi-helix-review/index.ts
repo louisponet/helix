@@ -582,11 +582,23 @@ class Hook {
 		if (this.state.baseline) this.state.baseline.acknowledged = true;
 		await this.save();
 		await unlink(path);
+		await this.echo(`pi received your review: ${receipt(files)}`);
 	}
 
 	private save(): Promise<void> {
 		return writeFile(join(this.dir, "state.json"), `${JSON.stringify(this.state, null, 2)}\n`);
 	}
+}
+
+/** Summarizes a handoff for the reviewer, e.g. "1 file with edits, 2 AGENT comments". */
+function receipt(files: { user_edits: { hunks: string[] }; agent_comments: unknown[]; review_comments: unknown[] }[]): string {
+	const count = (n: number, one: string, many: string) => (n > 0 ? [`${n} ${n === 1 ? one : many}`] : []);
+	const parts = [
+		...count(files.filter((file) => file.user_edits.hunks.length > 0).length, "file with edits", "files with edits"),
+		...count(files.reduce((n, file) => n + file.agent_comments.length, 0), "AGENT comment", "AGENT comments"),
+		...count(files.reduce((n, file) => n + file.review_comments.length, 0), "review comment", "review comments"),
+	];
+	return parts.length > 0 ? parts.join(", ") : "nothing to do";
 }
 
 function git(cwd: string, args: string[], input?: string): Promise<string> {

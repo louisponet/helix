@@ -121,8 +121,11 @@ The mailbox is `<repo>/.pi/helix-review/` with an `outbox/` directory and
   saved file (marked `new` when you added it in this review), and the review
   comments. It starts a turn when pi is idle and steers the running turn
   otherwise. The baseline is then acknowledged and the batch deleted. A batch
-  with no edits, markers or comments is dropped silently but still
-  acknowledged. Invalid batches stay in the outbox untouched.
+  with no edits, markers or comments is dropped without a message but still
+  acknowledged. Either way pi echoes a receipt to Helix's status line, such as
+  `pi received your review: 2 files with edits, 1 AGENT comment, 1 review
+  comment` or `pi received your review: nothing to do`. Invalid batches stay
+  in the outbox untouched.
 - While the mailbox exists, the system prompt explains the handoff and the
   `AGENT:` convention: integrate your edits, never revert them, address each
   `AGENT:` comment and delete its marker once handled.

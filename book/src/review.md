@@ -167,7 +167,8 @@ a review of an agent's turn goes like this:
    agent is told to address it and delete the marker.
 8. Hand the review back: `:w` on a reviewed buffer exports your edits,
    markers and comments, or `:review-send` exports them without writing
-   anything when there is nothing to save.
+   anything when there is nothing to save. The status line then confirms it,
+   for example `pi received your review: 1 file with edits, 1 review comment`.
 
 The baseline stays on the same commit until a handoff is received, so a
 following agent turn is still reviewed against the commit you started from.
