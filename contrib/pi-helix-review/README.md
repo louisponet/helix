@@ -102,7 +102,11 @@ The mailbox is `<repo>/.pi/helix-review/` with an `outbox/` directory and
 
 - At the start of an agent turn the baseline becomes `HEAD`, unless the
   previous baseline has not been handed back yet (it is sticky until a
-  handoff). pi sends `review-handoff <outbox>` and `review-baseline <commit>`,
+  handoff). After a `:review-commit` handoff, the end of the turn it starts
+  (or steers) moves the baseline to the agent's new `HEAD` right away, sticky
+  again, so the committed hunks drop out of the review, and echoes `Agent turn
+  done: committed <oid>, N files still changed`. Commits the agent makes on
+  its own keep the sticky baseline. pi sends `review-handoff <outbox>` and `review-baseline <commit>`,
   so Helix reviews every open file in the workspace against that commit and
   writes a batch into the outbox whenever you save a reviewed file. It then
   sends `echo Agent turn started` to Helix's status line. A new pi session

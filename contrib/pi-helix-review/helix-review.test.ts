@@ -834,6 +834,60 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	]);
 });
 
+test("a commit-staged handoff moves the baseline to the agent's commit, an ordinary commit does not", async (t) => {
+	const w = workspace(t);
+	const socket = join(w.root, "helix.sock");
+	withEnv(t, { HELIX_COMMAND_SOCKET: socket });
+	const lines = await fakeHelix(t, socket);
+	const repo = realpathSync(w.repo);
+	w.stage("a.rs", "a\n");
+	w.stage("b.rs", "b\n");
+	const head = w.commit();
+	const outbox = join(repo, ".pi", "helix-review", "outbox");
+	const state = () => JSON.parse(readFileSync(join(repo, ".pi", "helix-review", "state.json"), "utf8"));
+
+	const session = piSession(repo);
+	t.after(() => session.emit("session_shutdown"));
+	await session.emit("session_start", { reason: "startup" });
+	await session.emit("agent_start");
+	assert.equal(state().baseline.commit_oid, head);
+
+	// The reviewer stages a.rs and asks for a commit; b.rs stays changed and unstaged.
+	const batch = join(outbox, "9-1.json");
+	writeFileSync(`${batch}.tmp`, JSON.stringify({ format: "helix-review-batch", version: 2, files: [], comments: [], request: { kind: "commit-staged" } }));
+	renameSync(`${batch}.tmp`, batch);
+	await until(() => !existsSync(batch), "the batch to be consumed");
+	assert.equal(session.messages.length, 1);
+
+	// The turn it starts commits; its end moves the baseline to the commit and says so.
+	await session.emit("agent_start");
+	w.stage("a.rs", "A\n");
+	const committed = w.commit();
+	writeFileSync(join(repo, "b.rs"), "B\n");
+	lines.length = 0;
+	await session.emit("agent_end", { messages: [] });
+	assert.deepEqual(lines, [
+		`review-baseline ${committed}`,
+		`review-baseline ${committed}`,
+		`echo Agent turn done: committed ${committed.slice(0, 8)}, 1 file still changed`,
+	]);
+	assert.deepEqual(state().baseline, { commit_oid: committed, acknowledged: false });
+	assert.deepEqual(Object.keys(state().snapshots), [join(repo, "b.rs")]);
+
+	// An ordinary turn that commits keeps the sticky baseline.
+	await session.emit("agent_start");
+	w.stage("b.rs", "B\n");
+	const ordinary = w.commit();
+	lines.length = 0;
+	await session.emit("agent_end", { messages: [] });
+	assert.deepEqual(state().baseline, { commit_oid: committed, acknowledged: false });
+	assert.notEqual(ordinary, committed);
+	assert.deepEqual(lines, [
+		`review-baseline ${committed}`,
+		`echo Agent turn done: 1 file changed since ${committed.slice(0, 8)} (:review-files)`,
+	]);
+});
+
 test("an unreachable Helix never fails the hook, and an empty handoff is dropped but acknowledged", async (t) => {
 	const w = workspace(t);
 	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });

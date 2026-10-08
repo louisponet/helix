@@ -200,3 +200,8 @@ quoted as a fenced JSON block in its content, is:
 
 Files without edits, markers or comments are omitted; a handoff with no files
 and no request is not sent.
+
+After a handoff with a `commit-staged` request, the hook checks `HEAD` at the
+end of the turn the handoff starts or steers: if the agent committed, the
+review baseline moves to that commit (not yet acknowledged, so it stays until
+the next handoff) and Helix is sent `review-baseline <commit>`.

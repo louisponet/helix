@@ -423,6 +423,8 @@ function quote(label: string, body: string): string[] {
 interface HookState {
 	baseline?: { commit_oid: string; acknowledged: boolean };
 	snapshots: Record<string, string>;
+	/** Set by a commit-staged handoff until the end of the turn it starts or steers. */
+	commit_requested?: boolean;
 }
 
 const GUIDELINES = `## Helix review handoff
@@ -519,9 +521,30 @@ class Hook {
 	}
 
 	/** Tells the reviewer in Helix that the turn ended and how many files differ from the baseline. */
-	async announceEnd(): Promise<void> {
+	/**
+	 * At the end of a turn that was asked to commit the staged hunks, moves the baseline to the new
+	 * `HEAD` (sticky again) so Helix stops showing the committed hunks. Returns the new commit.
+	 */
+	async followRequestedCommit(): Promise<string | undefined> {
+		if (!this.state.commit_requested) return undefined;
+		this.state.commit_requested = false;
+		await this.save();
+		if (!this.state.baseline) return undefined;
+		const head = (await git(this.repo, ["rev-parse", "HEAD"])).trim();
+		if (head === this.state.baseline.commit_oid) return undefined;
+		this.state.baseline = { commit_oid: head, acknowledged: false };
+		await this.save();
+		await helix(this.socket, [`review-baseline ${head}`]);
+		return head;
+	}
+
+	async announceEnd(committed?: string): Promise<void> {
 		if (!this.state.baseline) return;
 		const count = Object.keys(this.state.snapshots).length;
+		if (committed) {
+			const files = count === 1 ? "1 file" : `${count} files`;
+			return this.echo(`Agent turn done: committed ${committed.slice(0, 8)}, ${files} still changed`);
+		}
 		const since = this.state.baseline.commit_oid.slice(0, 8);
 		if (count === 0) return this.echo(`Agent turn done: no file changes since ${since}`);
 		const files = count === 1 ? "1 file" : `${count} files`;
@@ -625,6 +648,7 @@ class Hook {
 			);
 		}
 		if (this.state.baseline) this.state.baseline.acknowledged = true;
+		if (request?.kind === "commit-staged") this.state.commit_requested = true;
 		await this.save();
 		await unlink(path);
 		await this.echo(`pi received your review: ${receipt(files, request)}`);
@@ -733,9 +757,10 @@ export default function helixReview(pi: ExtensionAPI): void {
 		if (event.toolName === "edit" || event.toolName === "write" || event.toolName === "bash") hook?.refreshSoon();
 	});
 	pi.on("agent_end", async () => {
+		const committed = await hook?.followRequestedCommit();
 		await hook?.refresh();
 		await hook?.snapshot();
-		await hook?.announceEnd();
+		await hook?.announceEnd(committed);
 	});
 
 	pi.registerCommand("helix-review", {
