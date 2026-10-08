@@ -19,7 +19,7 @@ use helix_view::{
     editor::{AutoSaveAfterDelay, Severity, StatusLineElement},
     graphics::Rect,
     input::parse_macro,
-    review::{OldBlock, ReviewBaseline},
+    review::{HunkStage, OldBlock, ReviewBaseline},
 };
 use tempfile::TempDir;
 #[cfg(not(windows))]
@@ -1742,13 +1742,11 @@ async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()>
     assert_eq!(repo.disk(), worktree);
     assert_eq!(staged_hunks(&app), 1);
     let doc = app.editor.document_by_path(&repo.file).unwrap();
-    let flags: Vec<_> = doc
-        .review
-        .as_ref()
-        .unwrap()
-        .changed_lines_staged()
-        .collect();
-    assert_eq!(flags, [(1..2, true), (18..19, false)]);
+    let flags: Vec<_> = doc.review.as_ref().unwrap().changed_lines_stage().collect();
+    assert_eq!(
+        flags,
+        [(1..2, HunkStage::Staged), (18..19, HunkStage::Unstaged)]
+    );
     // Staged rows use the .staged scopes: their background differs from the unstaged hunk's.
     let surface = render_surface(&app);
     let (view, doc) = current_ref!(app.editor);
@@ -1768,8 +1766,8 @@ async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()>
         let doc = app.editor.document_by_path(&repo.file).unwrap();
         let review = doc.review.as_ref().unwrap();
         review
-            .changed_lines_staged()
-            .map(|(_, staged)| staged)
+            .changed_lines_stage()
+            .map(|(_, stage)| stage == HunkStage::Staged)
             .collect()
     };
     send_keys(&mut app, "ggjjjix<esc>").await?;
@@ -1991,6 +1989,27 @@ async fn hunks_committed_after_the_baseline_are_neither_staged_nor_stageable() -
     send_keys(&mut app, &pin).await?;
     let status = statusline(&app);
     assert!(status.contains(" 1 hunk 1 committed "), "{status}");
+    // The committed hunk uses its own scope.
+    let review = doc!(app.editor).review.as_ref().unwrap();
+    let stages: Vec<_> = review.changed_lines_stage().collect();
+    assert_eq!(stages, [(1..2, HunkStage::Committed)]);
+    let surface = render_surface(&app);
+    let (view, doc) = current_ref!(app.editor);
+    let inner = view.inner_area(doc);
+    let row_bg = |text: &str| {
+        let y = render(&app)
+            .iter()
+            .position(|(_, row)| row == text)
+            .unwrap_or_else(|| panic!("{text} is not visible")) as u16;
+        Some(surface[(inner.x, inner.y + y)].bg)
+    };
+    let theme = &app.editor.theme;
+    for (row, scope) in [("B", "diff.plus.review"), ("b", "diff.minus.review")] {
+        let committed = theme.get(&format!("{scope}.committed")).bg;
+        assert!(committed.is_some(), "{scope}.committed");
+        assert_ne!(committed, theme.get(&format!("{scope}.staged")).bg);
+        assert_eq!(row_bg(row), committed, "{row}");
+    }
 
     send_keys(&mut app, "j<ret>").await?;
     assert_error(&app, &format!("already committed in {}", &head[..8]));

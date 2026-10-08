@@ -31,6 +31,7 @@ use helix_view::{
     graphics::{Color, CursorKind, Modifier, Rect, Style},
     input::{KeyEvent, MouseButton, MouseEvent, MouseEventKind},
     keyboard::{KeyCode, KeyModifiers},
+    review::HunkStage,
     Document, Editor, Theme, View,
 };
 use std::{mem::take, num::NonZeroUsize, ops, path::PathBuf, rc::Rc};
@@ -100,18 +101,26 @@ impl EditorView {
 
         // A background on diff.plus.review shades whole changed rows and leaves the text
         // colours alone; without one the changed text itself is coloured (see below).
-        // Hunks already in the git index use the .staged scope, falling back to the plain one.
+        // Hunks already in the git index use the .staged scope, falling back to the plain one;
+        // hunks committed since the baseline use the .committed scope, falling back to .staged.
         let review_style = theme.get("diff.plus.review");
         let staged_style = theme.get("diff.plus.review.staged");
+        let committed_style = theme
+            .try_get_exact("diff.plus.review.committed")
+            .unwrap_or(staged_style);
         if let Some(review) = doc.review.as_ref().filter(|_| review_style.bg.is_some()) {
-            let changed: Vec<_> = review.changed_lines_staged().collect();
+            let changed: Vec<_> = review.changed_lines_stage().collect();
             decorations.add_decoration(move |renderer: &mut TextRenderer, pos: LinePos| {
                 let next = changed.partition_point(|(lines, _)| lines.end <= pos.doc_line);
-                if let Some((_, staged)) = changed
+                if let Some((_, stage)) = changed
                     .get(next)
                     .filter(|(lines, _)| lines.start <= pos.doc_line)
                 {
-                    let style = if *staged { staged_style } else { review_style };
+                    let style = match stage {
+                        HunkStage::Unstaged => review_style,
+                        HunkStage::Staged => staged_style,
+                        HunkStage::Committed => committed_style,
+                    };
                     let area = Rect::new(inner.x, pos.visual_line, inner.width, 1);
                     renderer.set_style(area, style);
                 }
@@ -171,16 +180,26 @@ impl EditorView {
 
         if let Some(review) = doc.review.as_ref().filter(|_| review_style.bg.is_none()) {
             let text = doc.text().slice(..);
-            for (scope, staged) in [
-                ("diff.plus.review", false),
-                ("diff.plus.review.staged", true),
+            let committed = theme
+                .find_highlight_exact("diff.plus.review.committed")
+                .or_else(|| theme.find_highlight("diff.plus.review.staged"));
+            for (highlight, stage) in [
+                (
+                    theme.find_highlight("diff.plus.review"),
+                    HunkStage::Unstaged,
+                ),
+                (
+                    theme.find_highlight("diff.plus.review.staged"),
+                    HunkStage::Staged,
+                ),
+                (committed, HunkStage::Committed),
             ] {
-                if let Some(highlight) = theme.find_highlight(scope) {
+                if let Some(highlight) = highlight {
                     overlays.push(OverlayHighlights::Homogeneous {
                         highlight,
                         ranges: review
-                            .changed_lines_staged()
-                            .filter(|(_, is_staged)| *is_staged == staged)
+                            .changed_lines_stage()
+                            .filter(|(_, hunk)| *hunk == stage)
                             .map(|(lines, _)| {
                                 text.line_to_char(lines.start)..text.line_to_char(lines.end)
                             })

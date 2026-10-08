@@ -3,7 +3,7 @@ use helix_core::line_ending::line_end_char_index;
 use helix_core::text_annotations::TextAnnotations;
 use helix_core::{Position, RopeSlice};
 use helix_view::graphics::{Modifier, Rect};
-use helix_view::review::{OldFocus, Review};
+use helix_view::review::{HunkStage, OldFocus, Review};
 use helix_view::theme::Style;
 use helix_view::Theme;
 
@@ -22,6 +22,8 @@ pub struct ReviewDecoration<'a> {
     old: Style,
     /// The old style for blocks whose hunk the git index already holds.
     old_staged: Style,
+    /// The old style for blocks whose hunk was committed after the baseline.
+    old_committed: Style,
     selection: Style,
     cursor: Style,
     next_block: usize,
@@ -46,6 +48,9 @@ impl<'a> ReviewDecoration<'a> {
             marker_col,
             old: theme.get("diff.minus.review"),
             old_staged: theme.get("diff.minus.review.staged"),
+            old_committed: theme
+                .try_get_exact("diff.minus.review.committed")
+                .unwrap_or_else(|| theme.get("diff.minus.review.staged")),
             selection: theme.get("ui.selection.primary"),
             cursor: theme.get("ui.cursor.primary"),
             next_block: 0,
@@ -185,10 +190,10 @@ impl Decoration for ReviewDecoration<'_> {
         let first_row = pos.visual_line as usize + virt_off.row;
         let mut row = first_row;
         for block in self.review.blocks_at(line) {
-            let old = if self.review.is_block_staged(block) {
-                self.old_staged
-            } else {
-                self.old
+            let old = match self.review.block_stage(block) {
+                HunkStage::Unstaged => self.old,
+                HunkStage::Staged => self.old_staged,
+                HunkStage::Committed => self.old_committed,
             };
             if let Some(label) = block.label() {
                 if is_visible(renderer, row) {

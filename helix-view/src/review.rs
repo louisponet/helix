@@ -122,6 +122,16 @@ pub struct OldFocus {
     pub extend: bool,
 }
 
+/// How far a review hunk has got towards a commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HunkStage {
+    Unstaged,
+    /// The git index holds it, `HEAD` does not.
+    Staged,
+    /// `HEAD` holds it: it was committed after the review baseline.
+    Committed,
+}
+
 /// A review of a document against an immutable Git snapshot.
 #[derive(Debug)]
 pub struct Review {
@@ -331,26 +341,36 @@ impl Review {
         self.committed = held(&self.head);
     }
 
-    /// Whether the git index or `HEAD` already holds the hunk `block` comes from.
-    pub fn is_block_staged(&self, block: &OldBlock) -> bool {
+    fn stage(&self, hunk: usize) -> HunkStage {
+        if self.is_committed(hunk) {
+            HunkStage::Committed
+        } else if self.is_staged(hunk) {
+            HunkStage::Staged
+        } else {
+            HunkStage::Unstaged
+        }
+    }
+
+    /// Whether `HEAD` or the git index already holds the hunk `block` comes from.
+    pub fn block_stage(&self, block: &OldBlock) -> HunkStage {
         self.hunks
             .iter()
             .position(|hunk| {
                 let current = hunk.after.start as usize..hunk.after.end as usize;
                 hunk.before.start as usize == block.old.start && current == block.current
             })
-            .is_some_and(|hunk| self.is_staged(hunk) || self.is_committed(hunk))
+            .map_or(HunkStage::Unstaged, |hunk| self.stage(hunk))
     }
 
-    /// Like [`Self::changed_lines`], with whether the git index or `HEAD` already holds each range.
-    pub fn changed_lines_staged(&self) -> impl Iterator<Item = (ops::Range<usize>, bool)> + '_ {
+    /// Like [`Self::changed_lines`], with whether `HEAD` or the git index already holds each range.
+    pub fn changed_lines_stage(&self) -> impl Iterator<Item = (ops::Range<usize>, HunkStage)> + '_ {
         self.hunks
             .iter()
             .enumerate()
             .map(|(idx, hunk)| {
                 (
                     hunk.after.start as usize..hunk.after.end as usize,
-                    self.is_staged(idx) || self.is_committed(idx),
+                    self.stage(idx),
                 )
             })
             .filter(|(lines, _)| !lines.is_empty())
