@@ -461,6 +461,9 @@ class Hook {
 	private state: HookState;
 	private watcher?: FSWatcher;
 	private timer?: NodeJS.Timeout;
+	private poller?: NodeJS.Timeout;
+	private attaching = false;
+	private stopped = false;
 	private queue = Promise.resolve();
 	private seen = new Set<string>();
 
@@ -504,8 +507,10 @@ class Hook {
 	}
 
 	stop(): void {
+		this.stopped = true;
 		this.watcher?.close();
 		clearTimeout(this.timer);
+		clearInterval(this.poller);
 	}
 
 	async begin(): Promise<void> {
@@ -517,9 +522,36 @@ class Hook {
 		await this.attach();
 	}
 
-	async attach(): Promise<void> {
-		if (this.state.baseline) {
-			await helix(this.socket, [`review-handoff ${this.outbox}`, `review-baseline ${this.state.baseline.commit_oid}`]);
+	/** Points Helix at the outbox and restores the baseline. Returns whether Helix was reachable. */
+	async attach(): Promise<boolean> {
+		const commands = [`review-handoff ${this.outbox}`];
+		if (this.state.baseline) commands.push(`review-baseline ${this.state.baseline.commit_oid}`);
+		return this.send(commands);
+	}
+
+	/** Sends `commands` to Helix; while its socket is gone, polls for a new Helix to attach to. */
+	private async send(commands: string[]): Promise<boolean> {
+		const reachable = await helix(this.socket, commands);
+		if (!reachable) this.awaitHelix();
+		return reachable;
+	}
+
+	private awaitHelix(): void {
+		if (this.poller || this.stopped) return;
+		this.poller = setInterval(() => void this.poll(), 2000);
+		this.poller.unref();
+	}
+
+	private async poll(): Promise<void> {
+		if (this.attaching || !(await stat(this.socket).catch(() => undefined))) return;
+		this.attaching = true;
+		try {
+			if (!(await this.attach())) return;
+			clearInterval(this.poller);
+			this.poller = undefined;
+			await this.announceAttach();
+		} finally {
+			this.attaching = false;
 		}
 	}
 
@@ -530,12 +562,12 @@ class Hook {
 
 	async refresh(): Promise<void> {
 		clearTimeout(this.timer);
-		if (this.state.baseline) await helix(this.socket, [`review-baseline ${this.state.baseline.commit_oid}`]);
+		if (this.state.baseline) await this.send([`review-baseline ${this.state.baseline.commit_oid}`]);
 	}
 
 	/** Shows `message` in Helix's status line with `:echo`; a failure is ignored like any other. */
 	async echo(message: string): Promise<void> {
-		await helix(this.socket, [`echo ${message}`]);
+		await this.send([`echo ${message}`]);
 	}
 
 	/** Tells the reviewer in Helix that the hook is linked, and with which restored baseline. */
@@ -557,7 +589,7 @@ class Hook {
 		if (head === this.state.baseline.commit_oid) return undefined;
 		this.state.baseline = { commit_oid: head, acknowledged: false };
 		await this.save();
-		await helix(this.socket, [`review-baseline ${head}`]);
+		await this.send([`review-baseline ${head}`]);
 		return head;
 	}
 
@@ -576,7 +608,7 @@ class Hook {
 		const file = join(dir, `${pending.batch}.json`);
 		const reply = { path: pending.path, current_line: pending.current_line, text: text.trim() };
 		await writeFile(file, `${JSON.stringify(reply, null, 2)}\n`);
-		await helix(this.socket, [`review-reply ${file}`]);
+		await this.send([`review-reply ${file}`]);
 		return true;
 	}
 
@@ -773,24 +805,29 @@ function git(cwd: string, args: string[], input?: string): Promise<string> {
 	});
 }
 
-function helix(path: string, commands: string[]): Promise<string[] | undefined> {
+/** Sends `commands` to Helix's socket. Returns false only when no Helix listens there. */
+function helix(path: string, commands: string[]): Promise<boolean> {
 	return new Promise((done) => {
-		const replies: string[] = [];
+		let replies = 0;
 		let pending = "";
+		let reachable = true;
 		const socket = connect(path);
 		const finish = () => {
 			socket.destroy();
-			done(replies.length === commands.length ? replies : undefined);
+			done(reachable);
 		};
 		socket.setTimeout(2000, finish);
-		socket.on("error", finish);
+		socket.on("error", (error: NodeJS.ErrnoException) => {
+			reachable = error.code !== "ENOENT" && error.code !== "ECONNREFUSED";
+			finish();
+		});
 		socket.on("close", finish);
 		socket.on("connect", () => socket.write(commands.map((command) => `${command}\n`).join("")));
 		socket.on("data", (chunk) => {
 			const lines = (pending + chunk.toString("utf8")).split("\n");
 			pending = lines.pop()!;
-			replies.push(...lines);
-			if (replies.length >= commands.length) finish();
+			replies += lines.length;
+			if (replies >= commands.length) finish();
 		});
 	});
 }
@@ -809,8 +846,7 @@ export default function helixReview(pi: ExtensionAPI): void {
 		hook?.stop();
 		hook = await Hook.open(pi, ctx.cwd);
 		hook?.start();
-		await hook?.attach();
-		await hook?.announceAttach();
+		if (await hook?.attach()) await hook?.announceAttach();
 	});
 	pi.on("session_shutdown", () => hook?.stop());
 	pi.on("before_agent_start", (event) => {

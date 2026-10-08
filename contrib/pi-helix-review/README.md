@@ -114,11 +114,16 @@ The mailbox is `<repo>/.pi/helix-review/` with an `outbox/` directory and
   <oid>`. pi sends `review-handoff <outbox>` and `review-baseline <commit>`,
   so Helix reviews every open file in the workspace against that commit and
   writes a batch into the outbox whenever you save a reviewed file. It then
-  sends `echo Agent turn started` to Helix's status line. A new pi session
-  (or `/reload`) restores the review commands from `state.json` and echoes
-  `pi hook attached` (with `, baseline <commit>` when one was restored), so
-  the status line shows the link is live; nothing is shown when Helix is not
-  running.
+  sends `echo Agent turn started` to Helix's status line.
+- A new pi session (or `/reload`) attaches to Helix: it sends
+  `review-handoff <outbox>` (even in a repository without `state.json` yet),
+  restores `review-baseline <commit>` from `state.json` when there is one,
+  and echoes `pi hook attached` (with `, baseline <commit>` when one was
+  restored), so the status line shows the link is live. While no Helix
+  listens on the socket (not started yet, or quit after attaching), pi checks
+  for the socket every 2 s, silently, and attaches the same way once a Helix
+  is there, so a Helix started after pi, or restarted, is picked up without a
+  new turn.
 - After `edit`, `write` and `bash` tool results (coalesced within 200 ms) and
   at the end of the turn pi sends `review-baseline <commit>` again, which
   refreshes Helix's review.

@@ -616,7 +616,8 @@ function fakeHelix(t: TestContext, path: string) {
 		});
 	});
 	t.after(() => server.close());
-	return new Promise<string[]>((done) => server.listen(path, () => done(lines)));
+	const quit = () => new Promise<void>((done) => server.close(() => done()));
+	return new Promise<{ lines: string[]; quit: typeof quit }>((done) => server.listen(path, () => done({ lines, quit })));
 }
 
 function withEnv(t: TestContext, vars: Record<string, string | undefined>) {
@@ -643,7 +644,7 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	withEnv(t, { HELIX_COMMAND_SOCKET: undefined, XDG_RUNTIME_DIR: runtime });
 	const repo = realpathSync(w.repo);
 	const id = createHash("sha256").update(repo).digest("hex").slice(0, 32);
-	const lines = await fakeHelix(t, join(runtime, "helix", `${id}.sock`));
+	const { lines } = await fakeHelix(t, join(runtime, "helix", `${id}.sock`));
 
 	const file = join(repo, "a.rs");
 	w.stage("a.rs", "fn a() {}\n");
@@ -655,7 +656,7 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	t.after(() => session.emit("session_shutdown"));
 	await session.emit("session_start", { reason: "startup" });
 	assert.ok(existsSync(outbox));
-	assert.deepEqual(lines.splice(0), ["echo pi hook attached"], "nothing to restore without a baseline");
+	assert.deepEqual(lines.splice(0), [`review-handoff ${outbox}`, "echo pi hook attached"], "no baseline to restore yet");
 	assert.ok(existsSync(join(repo, ".pi", "helix-review", ".gitignore")));
 	const promptGuidelines: string[] = [];
 	await session.emit("before_agent_start", { prompt: "p", systemPrompt: "base", systemPromptOptions: { promptGuidelines } });
@@ -838,7 +839,7 @@ test("a commit-staged handoff moves the baseline to the agent's commit, an ordin
 	const w = workspace(t);
 	const socket = join(w.root, "helix.sock");
 	withEnv(t, { HELIX_COMMAND_SOCKET: socket });
-	const lines = await fakeHelix(t, socket);
+	const { lines } = await fakeHelix(t, socket);
 	const repo = realpathSync(w.repo);
 	w.stage("a.rs", "a\n");
 	w.stage("b.rs", "b\n");
@@ -892,7 +893,7 @@ test("an ask handoff instructs the agent and shows its final message as a reply 
 	const w = workspace(t);
 	const socket = join(w.root, "helix.sock");
 	withEnv(t, { HELIX_COMMAND_SOCKET: socket });
-	const lines = await fakeHelix(t, socket);
+	const { lines } = await fakeHelix(t, socket);
 	const repo = realpathSync(w.repo);
 	const file = join(repo, "a.rs");
 	const blob = w.stage("a.rs", "fn a() {\n    let x = 1;\n}\n");
@@ -960,6 +961,32 @@ test("an ask handoff instructs the agent and shows its final message as a reply 
 		`review-baseline ${head}`,
 		`echo Agent turn done: 1 file changed since ${head.slice(0, 8)} (:review-files)`,
 	]);
+});
+
+test("a Helix started after pi, or restarted, is attached once its socket appears", async (t) => {
+	const w = workspace(t);
+	const socket = join(w.root, "helix.sock");
+	withEnv(t, { HELIX_COMMAND_SOCKET: socket });
+	const repo = realpathSync(w.repo);
+	w.stage("a.rs", "a\n");
+	const head = w.commit();
+	const outbox = join(repo, ".pi", "helix-review", "outbox");
+
+	const session = piSession(repo);
+	t.after(() => session.emit("session_shutdown"));
+	await session.emit("session_start", { reason: "startup" });
+	await new Promise((wake) => setTimeout(wake, 100));
+	const first = await fakeHelix(t, socket);
+	await until(() => first.lines.length === 2, "the late Helix to be attached");
+	assert.deepEqual(first.lines, [`review-handoff ${outbox}`, "echo pi hook attached"]);
+
+	await session.emit("agent_start");
+	await first.quit();
+	assert.ok(!existsSync(socket));
+	await session.emit("agent_end", { messages: [] });
+	const second = await fakeHelix(t, socket);
+	await until(() => second.lines.length === 3, "the restarted Helix to be attached");
+	assert.deepEqual(second.lines, [`review-handoff ${outbox}`, `review-baseline ${head}`, `echo pi hook attached, baseline ${head.slice(0, 8)}`]);
 });
 
 test("an unreachable Helix never fails the hook, and an empty handoff is dropped but acknowledged", async (t) => {
