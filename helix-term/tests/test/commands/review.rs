@@ -1546,6 +1546,26 @@ async fn revert_restores_baseline_lines_as_one_undoable_edit() -> anyhow::Result
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn review_files_reports_when_nothing_changed() -> anyhow::Result<()> {
+    let repo = Repo::new("same\n", "same\n", "same\n");
+    let commit = git_ok(repo.dir.path(), &["rev-parse", "HEAD"]);
+    let _cwd = Cwd::enter(repo.dir.path());
+    let mut app = repo.app()?;
+
+    // No picker opens, so the following keys edit the buffer.
+    send_keys(&mut app, ":review-baseline HEAD<ret>:review-files<ret>").await?;
+    let (status, severity) = app.editor.get_status().unwrap();
+    assert_eq!(
+        status.as_ref(),
+        format!("no files changed since {}", &commit[..8])
+    );
+    assert_ne!(*severity, Severity::Error);
+    send_keys(&mut app, "ix<esc>").await?;
+    assert_eq!(doc!(app.editor).text(), "xsame\n");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn repeating_the_baseline_only_reviews_buffers_changed_on_disk() -> anyhow::Result<()> {
     let repo = Repo::new("a\nb\n", "a\nb\n", "a\nB\n");
     let dir = repo.dir.path();

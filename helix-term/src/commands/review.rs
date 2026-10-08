@@ -791,6 +791,11 @@ pub(super) fn review_files(
         .editor
         .diff_providers
         .get_changed_files_since(&workspace, &commit, trust_full)?;
+    if changes.is_empty() {
+        cx.editor
+            .set_status(format!("no files changed since {}", &commit[..8]));
+        return Ok(());
+    }
     cx.jobs.callback(async move {
         let callback: job::Callback =
             Callback::EditorCompositor(Box::new(move |_editor, compositor| {
