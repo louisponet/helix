@@ -662,7 +662,7 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	await session.emit("before_agent_start", { prompt: "p", systemPrompt: "base", systemPromptOptions: { promptGuidelines } });
 	assert.equal(promptGuidelines.length, 1);
 	assert.match(promptGuidelines[0], /^## Helix review handoff\n.*AGENT:/s);
-	assert.match(promptGuidelines[0], /steering message.*keep it undone.*new: false.*integrated or declined/s);
+	assert.match(promptGuidelines[0], /steering message.*keep it undone.*new: false.*integrated or declined.*never run git commit or git push on your own.*commit-staged handoff.*exactly the index/s);
 
 	// The fake Helix rejects `echo`, which must not fail the hook.
 	const started = "echo Agent turn started";

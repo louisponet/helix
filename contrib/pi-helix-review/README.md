@@ -154,8 +154,11 @@ The mailbox is `<repo>/.pi/helix-review/` with an `outbox/` directory and
   integrate your edits and never revert them, keeping parts of the agent's
   change you undid undone (with tests and docs adjusted); treat old
   (`new: false`) `AGENT:` lines as possibly documentation; address each
-  `AGENT:` request and delete its marker once handled; and report per file
-  what was integrated or declined.
+  `AGENT:` request and delete its marker once handled; report per file
+  what was integrated or declined; and never commit or push on its own, even
+  when other instructions say to, but only commit exactly the index when a
+  `:review-commit` (commit-staged) handoff asks for it, so your partial
+  staging in Helix is not swallowed.
 
 The JSON in the handoff message is described in [`schema.md`](schema.md).
 
