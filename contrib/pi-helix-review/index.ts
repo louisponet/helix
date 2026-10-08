@@ -453,6 +453,8 @@ interface HookState {
 	commit_requested?: boolean;
 	/** Updated at session start and at the start and end of each turn (ms since the epoch). */
 	last_active?: number;
+	/** The session's name in Helix's status line, `pi-<N>`, unique among live sessions. */
+	label?: string;
 	cwd?: string;
 	/** The pi process, so other sessions can tell whether this one is live; cleared on shutdown. */
 	pid?: number;
@@ -513,8 +515,33 @@ class Hook {
 			if (state) await unlink(join(dir, "state.json")).catch(() => undefined);
 		}
 		const hook = new Hook(pi, repo, dir, id, { ...(state ?? { snapshots: {} }), cwd });
+		const taken = new Set((await hook.liveSessions()).filter((s) => s.id !== id).map((s) => s.state.label));
+		if (!hook.state.label || taken.has(hook.state.label)) {
+			let n = 1;
+			while (taken.has(`pi-${n}`)) n++;
+			hook.state.label = `pi-${n}`;
+		}
 		await hook.touch();
 		return hook;
+	}
+
+	get label(): string {
+		return this.state.label!;
+	}
+
+	/**
+	 * The baseline Helix reviews against: the oldest unacknowledged baseline of the live sessions,
+	 * so no session's unreviewed work drops out of the review, else this session's.
+	 */
+	private async reviewBaseline(): Promise<string | undefined> {
+		const pending = (await this.liveSessions())
+			.map((s) => s.state.baseline)
+			.filter((b) => b && !b.acknowledged)
+			.map((b) => b!.commit_oid);
+		const unique = [...new Set(pending)];
+		if (unique.length <= 1) return unique[0] ?? this.state.baseline?.commit_oid;
+		const newestFirst = await git(this.repo, ["log", "--no-walk=sorted", "--format=%H", ...unique]).catch(() => "");
+		return newestFirst.trim().split("\n").at(-1) || this.state.baseline?.commit_oid;
 	}
 
 	/** Marks this session live and active now. */
@@ -542,7 +569,9 @@ class Hook {
 	 */
 	private async addressee(batch: ReviewBatch): Promise<string | undefined> {
 		const sessions = await this.liveSessions();
-		if (batch.target !== undefined) return sessions.find((s) => s.id === batch.target)?.id ?? batch.target;
+		if (batch.target !== undefined) {
+			return sessions.find((s) => s.id === batch.target || s.state.label === batch.target)?.id ?? batch.target;
+		}
 		const paths = [...batch.files, ...batch.comments].map((entry) => entry.path);
 		const newest = (key: (s: Session) => number) =>
 			sessions.reduce((a, b) => (key(b) > key(a) || (key(b) === key(a) && b.id < a.id) ? b : a));
@@ -606,7 +635,8 @@ class Hook {
 	/** Points Helix at the outbox and restores the baseline. Returns whether Helix was reachable. */
 	async attach(): Promise<boolean> {
 		const commands = [`review-handoff ${this.outbox}`];
-		if (this.state.baseline) commands.push(`review-baseline ${this.state.baseline.commit_oid}`);
+		const baseline = await this.reviewBaseline();
+		if (baseline) commands.push(`review-baseline ${baseline}`);
 		return this.send(commands);
 	}
 
@@ -643,7 +673,8 @@ class Hook {
 
 	async refresh(): Promise<void> {
 		clearTimeout(this.timer);
-		if (this.state.baseline) await this.send([`review-baseline ${this.state.baseline.commit_oid}`]);
+		const baseline = await this.reviewBaseline();
+		if (baseline) await this.send([`review-baseline ${baseline}`]);
 	}
 
 	/** Shows `message` in Helix's status line with `:echo`; a failure is ignored like any other. */
@@ -653,8 +684,9 @@ class Hook {
 
 	/** Tells the reviewer in Helix that the hook is linked, and with which restored baseline. */
 	async announceAttach(): Promise<void> {
-		const baseline = this.state.baseline ? `, baseline ${this.state.baseline.commit_oid.slice(0, 8)}` : "";
-		await this.echo(`pi hook attached${baseline}`);
+		const commit = await this.reviewBaseline();
+		const baseline = commit ? `, baseline ${commit.slice(0, 8)}` : "";
+		await this.echo(`pi hook attached as ${this.label}${baseline}`);
 	}
 
 	/**
@@ -670,7 +702,7 @@ class Hook {
 		if (head === this.state.baseline.commit_oid) return undefined;
 		this.state.baseline = { commit_oid: head, acknowledged: false };
 		await this.save();
-		await this.send([`review-baseline ${head}`]);
+		await this.send([`review-baseline ${(await this.reviewBaseline()) ?? head}`]);
 		return head;
 	}
 
@@ -680,12 +712,12 @@ class Hook {
 		const count = Object.keys(this.state.snapshots).length;
 		if (committed) {
 			const files = count === 1 ? "1 file" : `${count} files`;
-			return this.echo(`Agent turn done: committed ${committed.slice(0, 8)}, ${files} still changed`);
+			return this.echo(`${this.label}: Agent turn done, committed ${committed.slice(0, 8)}, ${files} still changed`);
 		}
 		const since = this.state.baseline.commit_oid.slice(0, 8);
-		if (count === 0) return this.echo(`Agent turn done: no file changes since ${since}`);
+		if (count === 0) return this.echo(`${this.label}: Agent turn done, no file changes since ${since}`);
 		const files = count === 1 ? "1 file" : `${count} files`;
-		await this.echo(`Agent turn done: ${files} changed since ${since} (:review-files)`);
+		await this.echo(`${this.label}: Agent turn done, ${files} changed since ${since} (:review-files)`);
 	}
 
 	/** Stores the turn's snapshots and which files the turn changed, and marks the session active. */
@@ -826,7 +858,7 @@ class Hook {
 		if (request?.kind === "commit-staged") this.state.commit_requested = true;
 		await this.save();
 		await unlink(path);
-		await this.echo(`pi received your review: ${receipt(files, request)}`);
+		await this.echo(`${this.label} received your review: ${receipt(files, request)}`);
 	}
 
 	private async save(): Promise<void> {
@@ -949,7 +981,7 @@ export default function helixReview(pi: ExtensionAPI): void {
 	});
 	pi.on("agent_start", async () => {
 		await hook?.begin();
-		await hook?.echo("Agent turn started");
+		if (hook) await hook.echo(`${hook.label}: Agent turn started`);
 	});
 	pi.on("tool_result", (event) => {
 		if (event.toolName === "edit" || event.toolName === "write" || event.toolName === "bash") hook?.refreshSoon();

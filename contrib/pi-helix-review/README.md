@@ -106,19 +106,20 @@ version moves into the first session's file. Ignore `.pi/` in Git.
   previous baseline has not been handed back yet (it is sticky until a
   handoff). After a `:review-commit` handoff, the end of the turn it starts
   (or steers) moves the baseline to the agent's new `HEAD` right away, sticky
-  again, so the committed hunks drop out of the review, and echoes `Agent turn
-  done: committed <oid>, N files still changed`. Commits the agent makes on
+  again, so the committed hunks drop out of the review, and echoes `pi-1: Agent turn
+  done, committed <oid>, N files still changed`. Commits the agent makes on
   its own keep the sticky baseline. A `:review-ask` handoff ends with an
   instruction to do what the question asks, listing each selection with its
   lines, selected text, enclosing code and message; you read the answer in
   pi, and the turn ends with the ordinary echo. pi sends `review-handoff <outbox>` and `review-baseline <commit>`,
   so Helix reviews every open file in the workspace against that commit and
   writes a batch into the outbox whenever you save a reviewed file. It then
-  sends `echo Agent turn started` to Helix's status line.
+  sends `echo pi-1: Agent turn started` to Helix's status line (every echo
+  starts with the session's label, see below).
 - A new pi session (or `/reload`) attaches to Helix: it sends
-  `review-handoff <outbox>` (even in a repository without `state.json` yet),
-  restores `review-baseline <commit>` from `state.json` when there is one,
-  and echoes `pi hook attached` (with `, baseline <commit>` when one was
+  `review-handoff <outbox>` (even in a repository without a state file yet),
+  restores `review-baseline <commit>` from the state when there is one,
+  and echoes `pi hook attached as pi-1` (with `, baseline <commit>` when one was
   restored), so the status line shows the link is live. While no Helix
   listens on the socket (not started yet, or quit after attaching), pi checks
   for the socket every 2 s, silently, and attaches the same way once a Helix
@@ -129,8 +130,8 @@ version moves into the first session's file. Ignore `.pi/` in Git.
   refreshes Helix's review.
 - At the end of the turn pi stores a snapshot (`git hash-object -w`) of every
   file changed since the baseline, including untracked files but not pi's own
-  state under `<repo>/.pi/`, and then echoes a summary such as `Agent turn
-  done: 3 files changed since 1a832de9 (:review-files)` to Helix's status line. A failing echo is ignored like
+  state under `<repo>/.pi/`, and then echoes a summary such as `pi-1: Agent turn
+  done, 3 files changed since 1a832de9 (:review-files)` to Helix's status line. A failing echo is ignored like
   every other socket command.
 - A batch none of whose files is in the repository (after `realpath`) is
   meant for another agent: pi logs one line and deletes it, without a turn or a
@@ -148,8 +149,8 @@ version moves into the first session's file. Ignore `.pi/` in Git.
   or comments. The baseline is then acknowledged and the batch deleted. A batch
   with no edits, markers, comments or request is dropped without a message but
   still acknowledged. Either way pi echoes a receipt to Helix's status line, such as
-  `pi received your review: 2 files with edits, 1 AGENT comment, 1 review
-  comment` or `pi received your review: nothing to do`. Invalid batches stay
+  `pi-1 received your review: 2 files with edits, 1 AGENT comment, 1 review
+  comment` or `pi-1 received your review: nothing to do`. Invalid batches stay
   in the outbox untouched.
 - While the mailbox exists, the system prompt explains the handoff and the
   `AGENT:` convention: a handoff can arrive mid-turn as a steering message;
@@ -165,8 +166,16 @@ version moves into the first session's file. Ignore `.pi/` in Git.
 ### Multiple sessions
 
 Several pi sessions can be hooked to one repository. A session is live while
-the pid in its state file runs. Each batch goes to one live session: the one
-its `target` names (a session id), else the one that last changed one of its
+the pid in its state file runs. Each session is labelled `pi-N`, the smallest
+number no other live session in the repository uses, kept in its state file
+and shown in its echoes (`pi-2: Agent turn started`, `pi-2 received your
+review: ...`, `pi hook attached as pi-2`). The baseline sent to Helix is the
+oldest unacknowledged baseline of the live sessions (by commit date), else the
+session's own, so no session's unreviewed work drops out of the review; a
+`:review-commit` handoff moves only the baseline of the session that took it.
+
+Each batch goes to one live session: the one
+its `target` names (a session id or label such as `pi-2`), else the one that last changed one of its
 files during a turn, else the most recently active one. Only that session
 claims it, by renaming it to `<name>.<session id>.claimed` (if the rename
 fails another session got it first) before handling and deleting it. On
