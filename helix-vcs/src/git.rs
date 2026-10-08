@@ -84,12 +84,12 @@ pub fn get_index_base(file: &Path, trust_full: bool) -> Result<(Vec<u8>, ObjectI
 }
 
 /// Replaces the content of `file`'s git index entry, which must still have the blob `expected`,
-/// with `update`, and returns the new blob id. The index stays locked from reading it to writing
+/// with `content` (in its worktree form), and returns the new blob id. The index stays locked from reading it to writing
 /// it back, like `git add`, and is refused for entries and indexes that cannot be updated without
 /// git's own conversions or extensions.
 pub fn update_index_entry(
     file: &Path,
-    update: crate::IndexUpdate,
+    content: &[u8],
     expected: &str,
     trust_full: bool,
 ) -> Result<ObjectId> {
@@ -151,46 +151,40 @@ pub fn update_index_entry(
         kind => bail!("index entry at {} is not a file: {kind:?}", file.display()),
     }
 
-    let (id, stat) = match update {
-        crate::IndexUpdate::Content(content) => {
-            // The content is stored as-is, so files git would convert on the way in or out are
-            // refused rather than staged differently from `git add`.
-            let unconverted = |what: &str| {
-                anyhow::anyhow!(
-                    "git {what} {} (filters or line-ending conversion); stage it with git",
-                    file.display()
-                )
-            };
-            let (mut pipeline, _) = repo.filter_pipeline(None)?;
-            let mut to_git = Vec::new();
-            pipeline
-                .convert_to_git(content, &rela, &index)?
-                .read_to_end(&mut to_git)?;
-            if to_git != content {
-                return Err(unconverted("converts"));
-            }
-            let raw = if entry.id.is_empty_blob() {
-                Vec::new()
-            } else {
-                repo.find_object(entry.id)?.detach().data
-            };
-            let mut to_worktree = Vec::new();
-            pipeline
-                .convert_to_worktree(&raw, rela_path.as_ref(), Delay::Forbid)?
-                .read_to_end(&mut to_worktree)?;
-            if to_worktree != raw {
-                return Err(unconverted("converts the checked-out"));
-            }
-            let id = repo.write_blob(content)?.detach();
-            // Matching stat data tells git the file equals the entry; otherwise it must compare.
-            let stat = if std::fs::read(&file)? == content {
-                Stat::from_fs(&gix::index::fs::Metadata::from_path_no_follow(&file)?)?
-            } else {
-                Stat::default()
-            };
-            (id, stat)
-        }
-        crate::IndexUpdate::Blob(id) => (ObjectId::from_hex(id.as_bytes())?, Stat::default()),
+    // The content is stored as-is, so files git would convert on the way in or out are
+    // refused rather than staged differently from `git add`.
+    let unconverted = |what: &str| {
+        anyhow::anyhow!(
+            "git {what} {} (filters or line-ending conversion); stage it with git",
+            file.display()
+        )
+    };
+    let (mut pipeline, _) = repo.filter_pipeline(None)?;
+    let mut to_git = Vec::new();
+    pipeline
+        .convert_to_git(content, &rela, &index)?
+        .read_to_end(&mut to_git)?;
+    if to_git != content {
+        return Err(unconverted("converts"));
+    }
+    let raw = if entry.id.is_empty_blob() {
+        Vec::new()
+    } else {
+        repo.find_object(entry.id)?.detach().data
+    };
+    let mut to_worktree = Vec::new();
+    pipeline
+        .convert_to_worktree(&raw, rela_path.as_ref(), Delay::Forbid)?
+        .read_to_end(&mut to_worktree)?;
+    if to_worktree != raw {
+        return Err(unconverted("converts the checked-out"));
+    }
+    let id = repo.write_blob(content)?.detach();
+    // Matching stat data tells git the file equals the entry; otherwise it must compare.
+    let stat = if std::fs::read(&file)? == content {
+        Stat::from_fs(&gix::index::fs::Metadata::from_path_no_follow(&file)?)?
+    } else {
+        Stat::default()
     };
 
     let entry = &mut index.entries_mut()[range.start];

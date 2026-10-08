@@ -4100,8 +4100,19 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "review-unstage",
         aliases: &[],
-        doc: "Undo the most recent :review-stage by restoring that file's previous git index entry.",
+        doc: "Unstage the staged hunk under the cursor (or the focused old text's, or the :review-diff hunk's): the index gets the baseline's lines back for it.",
         fun: review::review_unstage,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-toggle-stage",
+        aliases: &[],
+        doc: "Stage the hunk under the cursor, or unstage it if it is already staged (Enter while reviewing).",
+        fun: review::review_toggle_stage,
         completer: CommandCompleter::none(),
         signature: Signature {
             positionals: (0, Some(0)),

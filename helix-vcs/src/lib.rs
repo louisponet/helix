@@ -29,15 +29,6 @@ pub struct CommitBase {
     pub blob_id: Option<String>,
 }
 
-/// The new content of a git index entry, see [`DiffProviderRegistry::update_index_entry`].
-#[derive(Clone, Copy, Debug)]
-pub enum IndexUpdate<'a> {
-    /// Stage these bytes, which must be what the file holds in the worktree.
-    Content(&'a [u8]),
-    /// Restore an existing blob, given by its hex id.
-    Blob(&'a str),
-}
-
 pub struct CommitInfo {
     pub id: String,
     pub summary: String,
@@ -81,18 +72,18 @@ impl DiffProviderRegistry {
         Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
     }
 
-    /// Replaces the git index entry of `file`, which must still have the blob `expected`, with
-    /// `update`. Returns the new blob id.
+    /// Replaces the content of the git index entry of `file`, which must still have the blob
+    /// `expected`, with `content` (in its worktree form). Returns the new blob id.
     pub fn update_index_entry(
         &self,
         file: &Path,
-        update: IndexUpdate,
+        content: &[u8],
         expected: &str,
         trust_full: bool,
     ) -> Result<String> {
         let mut first_err = None;
         for provider in &self.providers {
-            match provider.update_index_entry(file, update, expected, trust_full) {
+            match provider.update_index_entry(file, content, expected, trust_full) {
                 Ok(id) => return Ok(id),
                 Err(err) => {
                     first_err.get_or_insert(err);
@@ -251,13 +242,13 @@ impl DiffProvider {
     fn update_index_entry(
         &self,
         file: &Path,
-        update: IndexUpdate,
+        content: &[u8],
         expected: &str,
         trust_full: bool,
     ) -> Result<String> {
         match self {
             #[cfg(feature = "git")]
-            Self::Git => git::update_index_entry(file, update, expected, trust_full)
+            Self::Git => git::update_index_entry(file, content, expected, trust_full)
                 .map(|id| id.to_hex().to_string()),
             Self::None => bail!("No diff support compiled in"),
         }

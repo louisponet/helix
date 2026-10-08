@@ -587,18 +587,6 @@ impl ReviewComment {
     }
 }
 
-/// A hunk `:review-stage` staged, so `:review-unstage` can restore the index entry before it.
-#[derive(Debug, Clone)]
-pub struct StagedHunk {
-    pub path: PathBuf,
-    /// The index blob id before staging.
-    pub previous: String,
-    /// The index blob id staging wrote.
-    pub staged: String,
-    /// The worktree lines of the staged hunk.
-    pub lines: ops::Range<usize>,
-}
-
 /// Pending review comments and reviewed files, exported together as one batch.
 #[derive(Debug, Default)]
 pub struct ReviewBatch {

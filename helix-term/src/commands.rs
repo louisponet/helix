@@ -485,7 +485,7 @@ impl MappableCommand {
         kill_to_line_start, "Delete till start of line",
         kill_to_line_end, "Delete till end of line",
         undo, "Undo change",
-        review_stage_hunk, "Stage the review hunk under the cursor (only while reviewing)",
+        review_stage_hunk, "Stage or unstage the review hunk under the cursor (only while reviewing)",
         redo, "Redo change",
         earlier, "Move backward in history",
         later, "Move forward in history",
@@ -4779,10 +4779,6 @@ pub mod insert {
 // Undo / Redo
 
 fn undo(cx: &mut Context) {
-    // The read-only :review-diff buffer has nothing to undo; u unstages there instead.
-    if review::review_diff_undo(cx) {
-        return;
-    }
     let count = cx.count();
     let (view, doc) = current!(cx.editor);
     for _ in 0..count {

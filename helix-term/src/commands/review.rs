@@ -9,7 +9,7 @@ use helix_core::doc_formatter::TextFormat;
 use helix_core::graphemes::prev_grapheme_boundary;
 use helix_core::line_ending::line_end_char_index;
 use helix_core::text_annotations::TextAnnotations;
-use helix_view::review::{OldFocus, Review, ReviewComment, ReviewSide, StagedHunk};
+use helix_view::review::{OldFocus, Review, ReviewComment, ReviewSide};
 
 use helix_loader::workspace_trust::TrustQuery;
 use helix_vcs::FileChange;
@@ -25,6 +25,7 @@ const OLD_FOCUS_TYPABLE: &[&str] = &[
     "review-revert",
     "review-stage",
     "review-unstage",
+    "review-toggle-stage",
     "review-comment",
     "review-comments",
     "review-uncomment",
@@ -1058,9 +1059,42 @@ pub(super) fn review_stage(
     if event != PromptEvent::Validate {
         return Ok(());
     }
+    change_staging(cx.editor, Staging::Stage)
+}
 
-    let (path, target) = stage_target(cx.editor)?;
-    if let Some(doc) = cx.editor.document_by_path(&path) {
+pub(super) fn review_unstage(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    change_staging(cx.editor, Staging::Unstage)
+}
+
+pub(super) fn review_toggle_stage(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    change_staging(cx.editor, Staging::Toggle)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Staging {
+    Stage,
+    Unstage,
+    Toggle,
+}
+
+/// Stages or unstages the hunk under the cursor, see `:review-stage` and `:review-unstage`.
+fn change_staging(editor: &mut Editor, staging: Staging) -> anyhow::Result<()> {
+    let (path, target) = stage_target(editor)?;
+    if let Some(doc) = editor.document_by_path(&path) {
         // The index is staged from the file on disk, which must be what the buffer shows.
         ensure!(
             !doc.is_modified(),
@@ -1073,96 +1107,62 @@ pub(super) fn review_stage(
             doc.display_name()
         );
     }
-    let trust_full = cx
-        .editor
+    let trust_full = editor
         .workspace_trust
         .query(&helix_loader::find_workspace().0, TrustQuery::Git)
         .is_trusted();
-    let providers = &cx.editor.diff_providers;
-    let (index, previous) = providers.get_index_base(&path, trust_full)?;
+    let (index, expected) = editor.diff_providers.get_index_base(&path, trust_full)?;
     let worktree = std::fs::read(&path)?;
-    let hunks = helix_vcs::line_hunks(&index, &worktree);
-    let hunk = helix_vcs::find_hunk(&hunks, &target).context("nothing to stage here")?;
-    let content = helix_vcs::apply_hunk(&index, &worktree, hunk);
-    let staged = providers.update_index_entry(
-        &path,
-        helix_vcs::IndexUpdate::Content(&content),
-        &previous,
-        trust_full,
-    )?;
-    let (count, total) = update_staged_count(cx.editor, &path, &content, &worktree, trust_full);
+    let base = staging_base(editor, &path, &index, trust_full);
+    let unstaged = helix_vcs::line_hunks(&index, &worktree);
+
+    let (content, verb) = match helix_vcs::find_hunk(&unstaged, &target) {
+        Some(hunk) if staging != Staging::Unstage => {
+            (helix_vcs::apply_hunk(&index, &worktree, hunk), "Staged")
+        }
+        Some(_) => bail!("nothing staged here"),
+        None if staging == Staging::Stage => bail!("nothing to stage here"),
+        None => {
+            // The target is outside every unstaged hunk, so it maps onto the index unchanged
+            // but for the line count differences of the unstaged hunks before it.
+            let target = worktree_to_index_lines(&unstaged, &target);
+            let staged = helix_vcs::line_hunks(&base, &index);
+            let hunk = helix_vcs::find_hunk(&staged, &target).context(match staging {
+                Staging::Unstage => "nothing staged here",
+                _ => "nothing to stage here",
+            })?;
+            let revert = helix_vcs::Hunk {
+                before: hunk.after.clone(),
+                after: hunk.before.clone(),
+            };
+            (helix_vcs::apply_hunk(&index, &base, &revert), "Unstaged")
+        }
+    };
+    editor
+        .diff_providers
+        .update_index_entry(&path, &content, &expected, trust_full)?;
+
+    let (count, total) = helix_vcs::staged_hunk_count(&base, &content, &worktree);
+    if let Some(doc) = editor.document_by_path_mut(&path) {
+        let text = doc.text().clone();
+        if let Some(review) = doc.review.as_mut() {
+            review.set_index(&content, &text);
+        }
+    }
+    refresh_review_diff(editor);
     let name = path
         .strip_prefix(helix_loader::find_workspace().0)
         .unwrap_or(&path)
         .display()
         .to_string();
-    cx.editor.review_staged.push(StagedHunk {
-        path,
-        previous,
-        staged,
-        lines: hunk.after.start as usize..hunk.after.end as usize,
-    });
-    refresh_review_diff(cx.editor);
-    cx.editor.set_status(format!(
-        "Staged hunk; {count} of {} staged in {name}",
-        plural(total, "hunk")
-    ));
+    editor.set_status(format!("{verb} hunk; {count} of {total} staged in {name}"));
     Ok(())
 }
 
-pub(super) fn review_unstage(
-    cx: &mut compositor::Context,
-    _args: Args,
-    event: PromptEvent,
-) -> anyhow::Result<()> {
-    if event != PromptEvent::Validate {
-        return Ok(());
-    }
-
-    let hunk = cx
-        .editor
-        .review_staged
-        .pop()
-        .context("nothing staged with :review-stage to unstage")?;
-    let trust_full = cx
-        .editor
-        .workspace_trust
-        .query(&helix_loader::find_workspace().0, TrustQuery::Git)
-        .is_trusted();
-    // Only the exact entry staging wrote is restored, never one git or the agent changed since.
-    if let Err(err) = cx.editor.diff_providers.update_index_entry(
-        &hunk.path,
-        helix_vcs::IndexUpdate::Blob(&hunk.previous),
-        &hunk.staged,
-        trust_full,
-    ) {
-        cx.editor.review_staged.push(hunk);
-        return Err(err);
-    }
-    if let (Ok((index, _)), Ok(worktree)) = (
-        cx.editor
-            .diff_providers
-            .get_index_base(&hunk.path, trust_full),
-        std::fs::read(&hunk.path),
-    ) {
-        update_staged_count(cx.editor, &hunk.path, &index, &worktree, trust_full);
-    }
-    refresh_review_diff(cx.editor);
-    cx.editor.set_status("Unstaged hunk");
-    Ok(())
-}
-
-/// Counts the hunks of `path` the index content `index` holds against its open review's baseline
-/// (or the editor-wide baseline), records the count on the review, and returns the staged and
-/// total hunk counts.
-fn update_staged_count(
-    editor: &mut Editor,
-    path: &Path,
-    index: &[u8],
-    worktree: &[u8],
-    trust_full: bool,
-) -> (usize, usize) {
-    let base = match editor
+/// The content the hunks of `path` are counted and unstaged against: its open review's baseline,
+/// else the editor-wide baseline commit, else the index itself.
+fn staging_base(editor: &Editor, path: &Path, index: &[u8], trust_full: bool) -> Vec<u8> {
+    match editor
         .document_by_path(path)
         .and_then(|doc| doc.review.as_ref())
     {
@@ -1178,15 +1178,23 @@ fn update_staged_count(
             })
             .map(|base| base.data)
             .unwrap_or_else(|| index.to_vec()),
-    };
-    let (staged, total) = helix_vcs::staged_hunk_count(&base, index, worktree);
-    if let Some(doc) = editor.document_by_path_mut(path) {
-        let text = doc.text().clone();
-        if let Some(review) = doc.review.as_mut() {
-            review.set_index(index, &text);
-        }
     }
-    (staged, total)
+}
+
+/// Maps worktree `lines` outside every hunk of `unstaged` (index to worktree) to index lines.
+fn worktree_to_index_lines(
+    unstaged: &[helix_vcs::Hunk],
+    lines: &ops::Range<usize>,
+) -> ops::Range<usize> {
+    let map = |line: usize| {
+        let shift: isize = unstaged
+            .iter()
+            .filter(|hunk| hunk.after.end as usize <= line)
+            .map(|hunk| hunk.after.len() as isize - hunk.before.len() as isize)
+            .sum();
+        (line as isize - shift).max(0) as usize
+    };
+    map(lines.start)..map(lines.end)
 }
 
 /// Regenerates the open `:review-diff` buffer, if any, against the editor-wide baseline.
@@ -1206,38 +1214,16 @@ fn refresh_review_diff(editor: &mut Editor) {
     }
 }
 
-/// Stages the review hunk under the cursor when the buffer is reviewed or is the `:review-diff`
-/// buffer, and does nothing otherwise, so it can own a key that is otherwise free.
+/// Toggles the staging of the review hunk under the cursor when the buffer is reviewed or is the
+/// `:review-diff` buffer, and does nothing otherwise, so it can own a key that is otherwise free.
 pub(crate) fn review_stage_hunk(cx: &mut Context) {
     let doc = doc!(cx.editor);
     if doc.review.is_none() && cx.editor.review_diff != Some(doc.id()) {
         return;
     }
-    let mut cx = compositor::Context {
-        editor: cx.editor,
-        jobs: cx.jobs,
-        scroll: None,
-    };
-    if let Err(err) = review_stage(&mut cx, Args::default(), PromptEvent::Validate) {
+    if let Err(err) = change_staging(cx.editor, Staging::Toggle) {
         cx.editor.set_error(format!("{err:#}"));
     }
-}
-
-/// `u` in the read-only `:review-diff` buffer: unstages instead of undoing. Returns whether the
-/// current buffer is that buffer.
-pub(crate) fn review_diff_undo(cx: &mut Context) -> bool {
-    if cx.editor.review_diff != Some(doc!(cx.editor).id()) {
-        return false;
-    }
-    let mut cx = compositor::Context {
-        editor: cx.editor,
-        jobs: cx.jobs,
-        scroll: None,
-    };
-    if let Err(err) = review_unstage(&mut cx, Args::default(), PromptEvent::Validate) {
-        cx.editor.set_error(format!("{err:#}"));
-    }
-    true
 }
 
 /// The file and worktree line range `:review-stage` stages a hunk of: the hunk under the cursor of

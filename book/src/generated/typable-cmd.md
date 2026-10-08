@@ -97,7 +97,8 @@
 | `:review-export` | Write pending review comments and reviewed files as JSON to a new file. Reviewed buffers must be written first. |
 | `:review-revert` | Replace the changed lines under the cursor, or the focused old text's change, with the review baseline's lines. |
 | `:review-stage` | Stage the unstaged hunk under the cursor (or the focused old text's, or the :review-diff hunk's) in the git index, like git add -p. Refuses unsaved buffers. |
-| `:review-unstage` | Undo the most recent :review-stage by restoring that file's previous git index entry. |
+| `:review-unstage` | Unstage the staged hunk under the cursor (or the focused old text's, or the :review-diff hunk's): the index gets the baseline's lines back for it. |
+| `:review-toggle-stage` | Stage the hunk under the cursor, or unstage it if it is already staged (Enter while reviewing). |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept for :review-export. |
 | `:review-baseline` | Review every unmodified buffer in the workspace, and buffers opened later, against a commit revision such as HEAD. Repeating the same commit refreshes the reviews; `clear` closes them. |
 | `:review-handoff` | On every write of a reviewed buffer, export a review batch to a new file in the given directory; auto-save skips reviewed buffers meanwhile. `clear` stops it. |

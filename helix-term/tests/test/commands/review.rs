@@ -1727,7 +1727,7 @@ async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()>
 
     // Enter stages the first of two hunks: the index gets exactly that hunk.
     send_keys(&mut app, "<ret>").await?;
-    assert_eq!(status(&app), "Staged hunk; 1 of 2 hunks staged in file.txt");
+    assert_eq!(status(&app), "Staged hunk; 1 of 2 staged in file.txt");
     let staged = cached();
     assert!(
         staged.contains(first) && !staged.contains(second),
@@ -1759,9 +1759,15 @@ async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()>
     assert_ne!(row_bg("B"), row_bg("S"));
     assert_ne!(row_bg("b"), row_bg("s"));
 
-    // Stage the second: the index matches the worktree.
-    send_keys(&mut app, "17j:review-stage<ret>").await?;
-    assert_eq!(status(&app), "Staged hunk; 2 of 2 hunks staged in file.txt");
+    // :review-unstage only unstages staged hunks, and :review-stage only unstaged ones.
+    send_keys(&mut app, "17j:review-unstage<ret>").await?;
+    assert_error(&app, "nothing staged here");
+    send_keys(&mut app, "gg17k:review-stage<ret>").await?;
+    assert_error(&app, "nothing to stage here");
+
+    // Stage the second as well: the index matches the worktree.
+    send_keys(&mut app, "ggj17j:review-toggle-stage<ret>").await?;
+    assert_eq!(status(&app), "Staged hunk; 2 of 2 staged in file.txt");
     let staged = cached();
     assert!(
         staged.contains(first) && staged.contains(second),
@@ -1769,30 +1775,31 @@ async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()>
     );
     assert_eq!(git_ok(dir, &["diff", "--", "file.txt"]), "");
 
-    // Unstaging pops one staging at a time.
-    send_keys(&mut app, ":review-unstage<ret>").await?;
-    assert_eq!(status(&app), "Unstaged hunk");
+    // Toggling the second again unstages only it; the first stays staged.
+    send_keys(&mut app, "<ret>").await?;
+    assert_eq!(status(&app), "Unstaged hunk; 1 of 2 staged in file.txt");
     let staged = cached();
     assert!(
         staged.contains(first) && !staged.contains(second),
         "{staged}"
     );
-    send_keys(&mut app, ":review-unstage<ret>").await?;
+
+    // Toggling the first twice in total returns the index to its original content.
+    send_keys(&mut app, "ggj<ret>").await?;
+    assert_eq!(status(&app), "Unstaged hunk; 0 of 2 staged in file.txt");
     assert_eq!(cached(), "");
     assert!(git_ok(dir, &["ls-files", "-s", "file.txt"]).contains(&blob(&index)));
     assert_eq!(staged_hunks(&app), 0);
-    send_keys(&mut app, ":review-unstage<ret>").await?;
-    assert_error(&app, "nothing staged");
 
     // A lock held by another git command is refused, and the index stays as it was.
     let lock = dir.join(".git").join("index.lock");
     fs::write(&lock, "")?;
-    send_keys(&mut app, "ggj:review-stage<ret>").await?;
+    send_keys(&mut app, "<ret>").await?;
     assert_error(&app, "index.lock exists");
     fs::remove_file(&lock)?;
     assert_eq!(cached(), "");
 
-    // From the :review-diff buffer, Enter stages the hunk under the cursor and marks it.
+    // In the :review-diff buffer, Enter toggles the hunk under the cursor and marks it.
     let diff_text = |app: &Application| doc!(app.editor).text().to_string();
     send_keys(&mut app, ":review-diff<ret>").await?;
     let line = diff_text(&app)
@@ -1813,10 +1820,8 @@ async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()>
             .collect()
     };
     assert_eq!(headers(&app), [false, true]);
-
-    // u in the diff buffer unstages it again instead of undoing.
-    send_keys(&mut app, "u").await?;
-    assert_eq!(status(&app), "Unstaged hunk");
+    send_keys(&mut app, "<ret>").await?;
+    assert_eq!(status(&app), "Unstaged hunk; 0 of 2 staged in file.txt");
     assert_eq!(cached(), "");
     assert_eq!(headers(&app), [false, false]);
     Ok(())
