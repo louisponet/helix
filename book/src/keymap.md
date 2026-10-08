@@ -53,7 +53,7 @@ Normal mode is the default mode when you launch helix. You can return to it from
 | `f`                   | Find next char                                     | `find_next_char`            |
 | `T`                   | Find till previous char                            | `till_prev_char`            |
 | `F`                   | Find previous char                                 | `find_prev_char`            |
-| `<n>G`, `<n>gg`       | Go to line number `<n>`                            | `goto_line`                 |
+| `<n>gg`               | Go to line number `<n>`                            | `goto_line`                 |
 | `Alt-.`               | Repeat last motion (`f`, `t`, `m`, `[` or `]`)     | `repeat_last_motion`        |
 | `Home`                | Move to the start of the line                      | `goto_line_start`           |
 | `End`                 | Move to the end of the line                        | `goto_line_end`             |
@@ -181,6 +181,7 @@ These sub-modes are accessible from normal mode and typically switch back to nor
 | `Z`      | Enter sticky [view mode](#view-mode)               | N/A            |
 | `Ctrl-w` | Enter [window mode](#window-mode)                  | N/A            |
 | `Space`  | Enter [space mode](#space-mode)                    | N/A            |
+| `G`      | Enter [review mode](#review-mode)                  | N/A            |
 
 These modes (except command mode) can be configured by
 [remapping keys](https://docs.helix-editor.com/remapping.html#minor-modes).
@@ -355,6 +356,30 @@ Displays the signature of the selected completion item. Remapping currently not 
 | ----    | -----------        |
 | `Alt-p` | Previous signature |
 | `Alt-n` | Next signature     |
+
+#### Review mode
+
+Accessed by typing `G` in [normal mode](#normal-mode). The commands work on
+the [inline review](./review.md) and start one against `HEAD` when needed. `G`
+used to go to a line; use `<n>gg` for that.
+
+| Key | Description                                                  | Command                  |
+| --- | -----------                                                  | -------                  |
+| `f` | Pick a file changed since the review baseline                | `review_files_picker`    |
+| `d` | Show the review as one diff                                  | `review_diff_buffer`     |
+| `g` | Open the file of the review diff hunk under the cursor       | `review_diff_open_hunk`  |
+| `o` | Focus the old review text nearest the cursor                 | `review_old_text`        |
+| `m` | Comment on the selection (opens `:review-comment `)          | `review_comment_prompt`  |
+| `c` | Pick a pending review comment                                | `review_comments_picker` |
+| `u` | Drop the latest pending review comment                       | `review_uncomment_latest`|
+| `s` | Stage or unstage the review hunk under the cursor            | `review_toggle_stage`    |
+| `r` | Revert the change under the cursor to the review baseline    | `review_revert_change`   |
+| `x` | Close the review of the buffer                               | `review_close_buffer`    |
+| `b` | Refresh the review of the buffer                             | `review_refresh_buffer`  |
+| `C` | Hand the review back asking to commit the staged hunks       | `review_commit_staged`   |
+| `S` | Hand the review back now                                     | `review_send_handoff`    |
+| `n` | Go to the next change                                        | `goto_next_change`       |
+| `N` | Go to the previous change                                    | `goto_prev_change`       |
 
 #### Unimpaired
 

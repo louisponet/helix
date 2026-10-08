@@ -1966,6 +1966,43 @@ async fn one_enter_stages_without_or_right_after_a_review() -> anyhow::Result<()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_g_menu_runs_review_commands_next_to_user_keys() -> anyhow::Result<()> {
+    let repo = Repo::new("one\ntwo\n", "one\ntwo\n", "one\nTWO\n");
+    let _cwd = Cwd::enter(repo.dir.path());
+    // A user table under G, as in the reviewer's config, merges with the built-in menu.
+    let mut config = Config::load(
+        Ok(&"[keys.normal.G]\nl = \"extend_char_right\"\n".to_owned()),
+        Err(ConfigLoadError::default()),
+    )
+    .map_err(|err| anyhow::anyhow!("{err}"))?;
+    config.editor = test_editor_config();
+    let mut app = AppBuilder::new()
+        .with_config(config)
+        .with_file(&repo.file, None)
+        .build()?;
+
+    // G f opens the review-files picker, which pins HEAD; picking opens the file reviewed.
+    send_keys(&mut app, "Gf").await?;
+    send_keys(&mut app, "file.txt<ret>").await?;
+    assert_status_not_error(&app.editor);
+    let doc = doc!(app.editor);
+    assert!(doc.review.is_some());
+    let (view, doc) = current_ref!(app.editor);
+    let text = doc.text().slice(..);
+    assert_eq!(doc.selection(view.id).primary().cursor_line(text), 1);
+
+    // The user's G l still extends, and G m opens the comment prompt prefilled.
+    send_keys(&mut app, "ggGl").await?;
+    let (view, doc) = current_ref!(app.editor);
+    assert_eq!(doc.selection(view.id).primary().to(), 2);
+    send_keys(&mut app, "Gmlooks good<ret>").await?;
+    let comments = app.editor.review_batch.comments();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0].comment, "looks good");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn repeating_the_baseline_only_reviews_buffers_changed_on_disk() -> anyhow::Result<()> {
     let repo = Repo::new("a\nb\n", "a\nb\n", "a\nB\n");
     let dir = repo.dir.path();

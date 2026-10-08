@@ -144,15 +144,15 @@
 | `goto_last_accessed_file` | Goto last accessed file | normal: `` ga ``, select: `` ga `` |
 | `goto_last_modified_file` | Goto last modified file | normal: `` gm ``, select: `` gm `` |
 | `goto_last_modification` | Goto last modification | normal: `` g. ``, select: `` g. `` |
-| `goto_line` | Goto line | normal: `` G ``, select: `` G `` |
+| `goto_line` | Goto line |  |
 | `goto_last_line` | Goto last line | normal: `` ge `` |
 | `extend_to_last_line` | Extend to last line | select: `` ge `` |
 | `goto_first_diag` | Goto first diagnostic | normal: `` [D ``, select: `` [D `` |
 | `goto_last_diag` | Goto last diagnostic | normal: `` ]D ``, select: `` ]D `` |
 | `goto_next_diag` | Goto next diagnostic | normal: `` ]d ``, select: `` ]d `` |
 | `goto_prev_diag` | Goto previous diagnostic | normal: `` [d ``, select: `` [d `` |
-| `goto_next_change` | Goto next change | normal: `` ]g ``, select: `` ]g `` |
-| `goto_prev_change` | Goto previous change | normal: `` [g ``, select: `` [g `` |
+| `goto_next_change` | Goto next change | normal: `` Gn ``, `` ]g ``, select: `` Gn ``, `` ]g `` |
+| `goto_prev_change` | Goto previous change | normal: `` GN ``, `` [g ``, select: `` GN ``, `` [g `` |
 | `goto_first_change` | Goto first change | normal: `` [G ``, select: `` [G `` |
 | `goto_last_change` | Goto last change | normal: `` ]G ``, select: `` ]G `` |
 | `goto_line_start` | Goto line start | normal: `` gh ``, `` <home> ``, select: `` gh ``, insert: `` <home> `` |
@@ -182,6 +182,19 @@
 | `kill_to_line_end` | Delete till end of line | insert: `` <C-k> `` |
 | `undo` | Undo change | normal: `` u ``, select: `` u `` |
 | `review_stage_hunk` | Stage or unstage the review hunk under the cursor (only while reviewing) | normal: `` <ret> ``, select: `` <ret> `` |
+| `review_files_picker` | Pick a file changed since the review baseline | normal: `` Gf ``, select: `` Gf `` |
+| `review_diff_buffer` | Show the review as one diff | normal: `` Gd ``, select: `` Gd `` |
+| `review_diff_open_hunk` | Open the file of the review diff hunk under the cursor | normal: `` Gg ``, select: `` Gg `` |
+| `review_old_text` | Focus the old review text nearest the cursor | normal: `` Go ``, select: `` Go `` |
+| `review_comments_picker` | Pick a pending review comment | normal: `` Gc ``, select: `` Gc `` |
+| `review_uncomment_latest` | Drop the latest pending review comment | normal: `` Gu ``, select: `` Gu `` |
+| `review_toggle_stage` | Stage or unstage the review hunk under the cursor | normal: `` Gs ``, select: `` Gs `` |
+| `review_revert_change` | Revert the change under the cursor to the review baseline | normal: `` Gr ``, select: `` Gr `` |
+| `review_close_buffer` | Close the review of the buffer | normal: `` Gx ``, select: `` Gx `` |
+| `review_refresh_buffer` | Refresh the review of the buffer | normal: `` Gb ``, select: `` Gb `` |
+| `review_commit_staged` | Hand the review back asking to commit the staged hunks | normal: `` GC ``, select: `` GC `` |
+| `review_send_handoff` | Hand the review back now | normal: `` GS ``, select: `` GS `` |
+| `review_comment_prompt` | Comment on the selection for the review | normal: `` Gm ``, select: `` Gm `` |
 | `redo` | Redo change | normal: `` U ``, select: `` U `` |
 | `earlier` | Move backward in history | normal: `` <A-u> ``, select: `` <A-u> `` |
 | `later` | Move forward in history | normal: `` <A-U> ``, select: `` <A-U> `` |

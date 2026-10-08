@@ -486,6 +486,19 @@ impl MappableCommand {
         kill_to_line_end, "Delete till end of line",
         undo, "Undo change",
         review_stage_hunk, "Stage or unstage the review hunk under the cursor (only while reviewing)",
+        review_files_picker, "Pick a file changed since the review baseline",
+        review_diff_buffer, "Show the review as one diff",
+        review_diff_open_hunk, "Open the file of the review diff hunk under the cursor",
+        review_old_text, "Focus the old review text nearest the cursor",
+        review_comments_picker, "Pick a pending review comment",
+        review_uncomment_latest, "Drop the latest pending review comment",
+        review_toggle_stage, "Stage or unstage the review hunk under the cursor",
+        review_revert_change, "Revert the change under the cursor to the review baseline",
+        review_close_buffer, "Close the review of the buffer",
+        review_refresh_buffer, "Refresh the review of the buffer",
+        review_commit_staged, "Hand the review back asking to commit the staged hunks",
+        review_send_handoff, "Hand the review back now",
+        review_comment_prompt, "Comment on the selection for the review",
         redo, "Redo change",
         earlier, "Move backward in history",
         later, "Move forward in history",
@@ -4791,6 +4804,58 @@ fn undo(cx: &mut Context) {
 
 fn review_stage_hunk(cx: &mut Context) {
     review::review_stage_hunk(cx)
+}
+
+fn review_files_picker(cx: &mut Context) {
+    review::run_typed(cx, review::review_files)
+}
+
+fn review_diff_buffer(cx: &mut Context) {
+    review::run_typed(cx, review::review_diff)
+}
+
+fn review_diff_open_hunk(cx: &mut Context) {
+    review::run_typed(cx, review::review_diff_open)
+}
+
+fn review_old_text(cx: &mut Context) {
+    review::run_typed(cx, review::review_old)
+}
+
+fn review_comments_picker(cx: &mut Context) {
+    review::run_typed(cx, review::review_comments)
+}
+
+fn review_uncomment_latest(cx: &mut Context) {
+    review::run_typed(cx, review::review_uncomment)
+}
+
+fn review_toggle_stage(cx: &mut Context) {
+    review::run_typed(cx, review::review_toggle_stage)
+}
+
+fn review_revert_change(cx: &mut Context) {
+    review::run_typed(cx, review::review_revert)
+}
+
+fn review_close_buffer(cx: &mut Context) {
+    review::run_typed(cx, review::review_close)
+}
+
+fn review_refresh_buffer(cx: &mut Context) {
+    review::run_typed(cx, review::review_refresh)
+}
+
+fn review_commit_staged(cx: &mut Context) {
+    review::run_typed(cx, review::review_commit)
+}
+
+fn review_send_handoff(cx: &mut Context) {
+    review::run_typed(cx, review::review_send)
+}
+
+fn review_comment_prompt(cx: &mut Context) {
+    typed::command_mode_with_line(cx, "review-comment ")
 }
 
 fn redo(cx: &mut Context) {

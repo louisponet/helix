@@ -4410,6 +4410,21 @@ pub(super) fn execute_command(
 }
 
 #[allow(clippy::unnecessary_unwrap)]
+/// Opens the command prompt with `line` already typed, as if the user had typed it.
+pub(super) fn command_mode_with_line(cx: &mut Context, line: &str) {
+    command_mode(cx);
+    let callback: crate::compositor::Callback = {
+        let line = line.to_owned();
+        Box::new(move |compositor, cx| {
+            if let Some(prompt) = compositor.find::<Prompt>() {
+                prompt.set_line(line, cx.editor);
+                prompt.recalculate_completion(cx.editor);
+            }
+        })
+    };
+    cx.callback.push(callback);
+}
+
 pub(super) fn command_mode(cx: &mut Context) {
     let mut prompt = Prompt::new(
         ":".into(),

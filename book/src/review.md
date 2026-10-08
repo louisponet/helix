@@ -213,7 +213,13 @@ The baseline stays on the same commit until a handoff is received, so a
 following agent turn is still reviewed against the commit you started from.
 The first turn after a handoff moves the baseline to the then current `HEAD`.
 
-A keymap for these commands under `Space r`, for `config.toml`. It replaces
+These commands are built into the default keymap under `G` in normal mode
+(see [review mode](./keymap.md#review-mode)): `G f` picks a file, `G d` shows the
+diff, `G o` focuses old text, `G m` comments, `G s` stages, `G C` asks the agent
+to commit and `G n` / `G N` move between changes. Keys you map under
+`[keys.normal.G]` in `config.toml` are added to that menu.
+
+As an alternative, a keymap under `Space r`, for `config.toml`. It replaces
 the default `Space r` (rename symbol); pick another key to keep it.
 
 ```toml

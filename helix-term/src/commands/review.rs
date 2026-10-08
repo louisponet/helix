@@ -36,6 +36,35 @@ const OLD_FOCUS_TYPABLE: &[&str] = &[
     "review-old",
 ];
 
+/// Static review commands (the `G` menu) allowed while old text is focused; each runs a command
+/// of [`OLD_FOCUS_TYPABLE`] or opens the prompt for one.
+const OLD_FOCUS_STATIC: &[&str] = &[
+    "review_old_text",
+    "review_comment_prompt",
+    "review_comments_picker",
+    "review_uncomment_latest",
+    "review_toggle_stage",
+    "review_revert_change",
+    "review_close_buffer",
+    "review_commit_staged",
+    "review_send_handoff",
+];
+
+/// Runs the typable review command `command` without arguments from a key, showing its error.
+pub(crate) fn run_typed(
+    cx: &mut Context,
+    command: fn(&mut compositor::Context, Args, PromptEvent) -> anyhow::Result<()>,
+) {
+    let mut cx = compositor::Context {
+        editor: cx.editor,
+        jobs: cx.jobs,
+        scroll: None,
+    };
+    if let Err(err) = command(&mut cx, Args::default(), PromptEvent::Validate) {
+        cx.editor.set_error(format!("{err:#}"));
+    }
+}
+
 /// Whether the focused view is inspecting old review text.
 pub(crate) fn old_focused(editor: &Editor) -> bool {
     let (view, doc) = current_ref!(editor);
@@ -1543,6 +1572,13 @@ fn diff_location(lines: &[String], cursor: usize) -> Option<(&str, usize)> {
 pub(crate) fn old_focus_command(cx: &mut Context, name: &str) -> bool {
     if name == "review_stage_hunk" {
         review_stage_hunk(cx);
+        return true;
+    }
+    // Review menu entries that run typable commands allowed on old text.
+    if OLD_FOCUS_STATIC.contains(&name) {
+        if let Ok(command) = name.parse::<MappableCommand>() {
+            command.execute(cx);
+        }
         return true;
     }
     let count = cx.count();
