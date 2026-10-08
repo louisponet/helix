@@ -828,11 +828,32 @@ pub(super) fn review_files(
             .set_status(format!("no files changed since {}", &commit[..8]));
         return Ok(());
     }
+    let files: Vec<_> = changes
+        .into_iter()
+        .map(|change| {
+            let stats = file_stats(cx.editor, change.path(), &commit, trust_full);
+            (change, stats)
+        })
+        .collect();
+    let counted = files.iter().filter_map(|(_, stats)| *stats);
+    let (added, removed, staged, total) = counted.fold((0, 0, 0, 0), |sum, stats| {
+        (
+            sum.0 + stats.added,
+            sum.1 + stats.removed,
+            sum.2 + stats.staged,
+            sum.3 + stats.hunks,
+        )
+    });
+    let status = format!(
+        "{}, +{added} -{removed}, {staged}/{total} hunks staged",
+        plural(files.len(), "file")
+    );
     cx.jobs.callback(async move {
         let callback: job::Callback =
-            Callback::EditorCompositor(Box::new(move |_editor, compositor| {
+            Callback::EditorCompositor(Box::new(move |editor, compositor| {
+                type Item = (FileChange, Option<FileStats>);
                 let columns = [
-                    ui::PickerColumn::new("change", |change: &FileChange, _| {
+                    ui::PickerColumn::new("change", |(change, _): &Item, _| {
                         match change {
                             FileChange::Untracked { .. } => "A",
                             FileChange::Deleted { .. } => "D",
@@ -840,7 +861,7 @@ pub(super) fn review_files(
                         }
                         .into()
                     }),
-                    ui::PickerColumn::new("path", |change: &FileChange, workspace: &PathBuf| {
+                    ui::PickerColumn::new("path", |(change, _): &Item, workspace: &PathBuf| {
                         let path = change.path();
                         path.strip_prefix(workspace)
                             .unwrap_or(path)
@@ -848,13 +869,31 @@ pub(super) fn review_files(
                             .to_string()
                             .into()
                     }),
+                    ui::PickerColumn::new("+/-", |(_, stats): &Item, _| {
+                        match stats {
+                            Some(stats) => match (stats.added, stats.removed) {
+                                (added, 0) => format!("+{added}"),
+                                (0, removed) => format!("-{removed}"),
+                                (added, removed) => format!("+{added} -{removed}"),
+                            },
+                            None => "?".to_owned(),
+                        }
+                        .into()
+                    }),
+                    ui::PickerColumn::new("hunks", |(_, stats): &Item, _| {
+                        match stats {
+                            Some(stats) => format!("{}/{}", stats.staged, stats.hunks),
+                            None => "?".to_owned(),
+                        }
+                        .into()
+                    }),
                 ];
                 let picker = ui::Picker::new(
                     columns,
                     1,
-                    changes,
+                    files,
                     workspace,
-                    |cx, change: &FileChange, action| {
+                    |cx, (change, _): &Item, action| {
                         let doc_id = match cx.editor.open(change.path(), action) {
                             Ok(doc_id) => doc_id,
                             Err(err) => {
@@ -874,7 +913,7 @@ pub(super) fn review_files(
                         align_view(doc, view, Align::Center);
                     },
                 )
-                .with_preview(|editor, change| {
+                .with_preview(|editor, (change, _): &Item| {
                     let path = change.path();
                     let line = editor
                         .document_by_path(path)
@@ -882,6 +921,7 @@ pub(super) fn review_files(
                     Some((path.into(), line.map(|line| (line, line))))
                 });
                 compositor.push(Box::new(overlaid(picker)));
+                editor.set_status(status);
             }));
         Ok(callback)
     });
@@ -1195,6 +1235,49 @@ fn worktree_to_index_lines(
         (line as isize - shift).max(0) as usize
     };
     map(lines.start)..map(lines.end)
+}
+
+/// Line and hunk counts of a file's change since the review baseline, for `:review-files`.
+#[derive(Clone, Copy)]
+struct FileStats {
+    added: usize,
+    removed: usize,
+    /// Hunks the git index already holds in full.
+    staged: usize,
+    hunks: usize,
+}
+
+/// The change of `path` from `commit` to the worktree (or its unmodified open buffer), like
+/// `:review-diff` computes it, or `None` if the file is over the review size limits or its
+/// baseline cannot be read.
+fn file_stats(editor: &Editor, path: &Path, commit: &str, trust_full: bool) -> Option<FileStats> {
+    let before = editor
+        .diff_providers
+        .get_commit_base(path, commit, trust_full)
+        .ok()?
+        .data;
+    let after = match editor.document_by_path(path) {
+        Some(doc) if !doc.is_modified() => doc.text().to_string().into_bytes(),
+        _ => std::fs::read(path).unwrap_or_default(),
+    };
+    let lines = |text: &[u8]| text.split(|&byte| byte == b'\n').count();
+    if [&before, &after]
+        .iter()
+        .any(|text| text.len() > Review::MAX_BYTES || lines(text) > Review::MAX_LINES)
+    {
+        return None;
+    }
+    let hunks = helix_vcs::line_hunks(&before, &after);
+    let staged = match editor.diff_providers.get_index_base(path, trust_full) {
+        Ok((index, _)) => helix_vcs::staged_hunk_count(&before, &index, &after).0,
+        Err(_) => 0,
+    };
+    Some(FileStats {
+        added: hunks.iter().map(|hunk| hunk.after.len()).sum(),
+        removed: hunks.iter().map(|hunk| hunk.before.len()).sum(),
+        staged,
+        hunks: hunks.len(),
+    })
 }
 
 /// Regenerates the open `:review-diff` buffer, if any, against the editor-wide baseline.

@@ -2287,12 +2287,22 @@ async fn review_files_picks_files_changed_since_the_baseline() -> anyhow::Result
         let review = doc!(app.editor).review.as_ref().unwrap();
         assert_eq!(review.baseline().revision(), Some(head.as_str()));
     };
+    // file.txt +1 -1, added.txt and staged.txt +1 each (staged.txt in the index), gone.txt -1.
+    let totals = |app: &Application| {
+        let (status, _) = app.editor.get_status().unwrap();
+        assert_eq!(status.as_ref(), "4 files, +3 -2, 1/4 hunks staged");
+    };
 
     test_key_sequences(
         &mut repo.app()?,
         vec![
-            (Some(":review-files<ret>"), None),
+            (Some(":review-files<ret>"), Some(&totals)),
             (Some("file.txt<ret>"), Some(&pinned)),
+            // The stats columns can be filtered: only file.txt has "+1 -1", only staged.txt "1/1".
+            (Some(":review-files<ret>"), None),
+            (Some("%+/- ^+1 -1<ret>"), Some(&file)),
+            (Some(":review-files<ret>"), None),
+            (Some("%hunks ^1/1<ret>"), Some(&staged)),
             (Some(":o same.txt<ret>:review-files<ret>"), None),
             (Some("added<ret>"), Some(&added)),
             (Some(":review-files<ret>"), None),

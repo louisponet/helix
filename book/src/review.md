@@ -50,7 +50,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-send` | Export the handoff batch now without writing any file, for example to acknowledge a review without edits. |
 | `:review-diff` | Show one unified diff of every file changed since the review baseline (with none set, `HEAD` is pinned as it, like `:review-baseline HEAD`) in a read-only scratch buffer; running it again, or `:review-baseline` (as the pi hook does after each edit), refreshes that buffer in place. File headers are workspace-relative paths (`--- <path>`), so `gf` opens a file. |
 | `:review-diff-open` | In the `:review-diff` buffer, open the file of the hunk under the cursor at the current line it shows (the next current line on a removed line). |
-| `:review-files` | Pick a file added (`A`), modified (`M`) or deleted (`D`) since the review baseline, and open it at its first change. With no baseline set, it first pins `HEAD` like `:review-baseline HEAD`. |
+| `:review-files` | Pick a file added (`A`), modified (`M`) or deleted (`D`) since the review baseline, and open it at its first change. The `+/-` and `hunks` columns show added and removed lines and staged/total hunks (`?` over the size limits), and the status line the totals. With no baseline set, it first pins `HEAD` like `:review-baseline HEAD`. |
 
 ### Choosing a commit range
 
@@ -161,8 +161,9 @@ like this:
    end of the turn `Agent turn done: 3 files changed since 1a2b3c4d
    (:review-files)`. Unmodified open buffers in the workspace are already
    reviewed against the baseline commit.
-2. `:review-files` picks a file changed since the baseline and opens it with
-   the cursor on its first change (or read the whole change as one diff first
+2. `:review-files` picks a file changed since the baseline, listing its added
+   and removed lines and staged/total hunks, and opens it with the cursor on
+   its first change (or read the whole change as one diff first
    with `:review-diff`, and jump from a hunk into its file with
    `:review-diff-open`). It shows the review summary, for example
    `Reviewing against the git commit 1a2b3c4d: 2 blocks of old text,
