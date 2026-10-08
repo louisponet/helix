@@ -4145,6 +4145,28 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         },
     },
     TypableCommand {
+        name: "review-next",
+        aliases: &[],
+        doc: "Go to the next changed block, continuing with the first block of the next file changed since the review baseline (in :review-files order, wrapping around).",
+        fun: review::review_next,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-prev",
+        aliases: &[],
+        doc: "Go to the previous changed block, continuing with the last block of the previous file changed since the review baseline (wrapping around).",
+        fun: review::review_prev,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
         name: "review-older",
         aliases: &[],
         doc: "Move the review baseline one commit older (its first parent), pinning HEAD first when none is set, and refresh every review.",

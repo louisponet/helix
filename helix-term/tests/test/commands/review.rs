@@ -2114,6 +2114,65 @@ async fn the_baseline_steps_through_history_and_survives_the_hooks_refresh() -> 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn g_n_walks_changes_across_files_and_wraps_around() -> anyhow::Result<()> {
+    let lines = (1..=20).map(|n| format!("{n}\n")).collect::<String>();
+    let changed = (1..=20)
+        .map(|n| match n {
+            2 => "two\n".to_owned(),
+            15 => "fifteen\n".to_owned(),
+            n => format!("{n}\n"),
+        })
+        .collect::<String>();
+    let repo = Repo::new(&lines, &lines, &changed);
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    fs::write(dir.join("other.txt"), "x\ny\n")?;
+    git_ok(dir, &["add", "other.txt"]);
+    git_ok(dir, &["commit", "-m", "other"]);
+    fs::write(dir.join("other.txt"), "X\ny\n")?;
+    let mut app = repo.app()?;
+    let status = |app: &Application| app.editor.get_status().unwrap().0.to_string();
+    let at = |app: &Application| {
+        let (view, doc) = current_ref!(app.editor);
+        let name = doc
+            .path()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        (
+            name,
+            doc.selection(view.id)
+                .primary()
+                .cursor_line(doc.text().slice(..)),
+        )
+    };
+
+    // file.txt's hunks are on lines 2 and 15 (1-based); other.txt's on line 1.
+    send_keys(&mut app, "Gn").await?;
+    assert_eq!(at(&app), ("file.txt".to_owned(), 1));
+    assert_eq!(status(&app), "file.txt: hunk 1 of 2");
+    send_keys(&mut app, "Gn").await?;
+    assert_eq!(at(&app), ("file.txt".to_owned(), 14));
+    send_keys(&mut app, "Gn").await?;
+    assert_eq!(at(&app), ("other.txt".to_owned(), 0));
+    assert_eq!(status(&app), "other.txt: hunk 1 of 1");
+    send_keys(&mut app, "GN").await?;
+    assert_eq!(at(&app), ("file.txt".to_owned(), 14));
+    assert_eq!(status(&app), "file.txt: hunk 2 of 2");
+    // Wrapping: past other.txt's last hunk comes file.txt's first, and back again.
+    send_keys(&mut app, "2Gn").await?;
+    assert_eq!(at(&app), ("file.txt".to_owned(), 1));
+    send_keys(&mut app, "GN").await?;
+    assert_eq!(at(&app), ("other.txt".to_owned(), 0));
+    send_keys(&mut app, ":review-prev<ret>").await?;
+    assert_eq!(at(&app), ("file.txt".to_owned(), 14));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_g_menu_runs_review_commands_next_to_user_keys() -> anyhow::Result<()> {
     let repo = Repo::new("one\ntwo\n", "one\ntwo\n", "one\nTWO\n");
     let _cwd = Cwd::enter(repo.dir.path());

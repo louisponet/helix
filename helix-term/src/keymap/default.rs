@@ -52,8 +52,8 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "S" => review_send_handoff,
             "-" => review_baseline_older,
             "+" => review_baseline_newer,
-            "n" => goto_next_change,
-            "N" => goto_prev_change,
+            "n" => review_next_change,
+            "N" => review_prev_change,
         },
         "g" => { "Goto"
             "g" => goto_file_start,

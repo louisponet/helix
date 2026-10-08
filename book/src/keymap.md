@@ -381,8 +381,8 @@ used to go to a line; use `<n>gg` for that.
 | `S` | Hand the review back now                                     | `review_send_handoff`    |
 | `-` | Move the review baseline one commit older                    | `review_baseline_older`  |
 | `+` | Move the review baseline one commit newer                    | `review_baseline_newer`  |
-| `n` | Go to the next change                                        | `goto_next_change`       |
-| `N` | Go to the previous change                                    | `goto_prev_change`       |
+| `n` | Go to the next change, on into the next changed file         | `review_next_change`     |
+| `N` | Go to the previous change, back into the previous file       | `review_prev_change`     |
 
 #### Unimpaired
 

@@ -395,6 +395,14 @@ impl Review {
     }
 
     /// Line ranges of the document that differ from the baseline.
+    /// The document lines of every hunk, in order; a removal is an empty range where it was.
+    pub fn hunk_lines(&self) -> Vec<ops::Range<usize>> {
+        self.hunks
+            .iter()
+            .map(|hunk| hunk.after.start as usize..hunk.after.end as usize)
+            .collect()
+    }
+
     pub fn changed_lines(&self) -> impl Iterator<Item = ops::Range<usize>> + '_ {
         self.hunks
             .iter()

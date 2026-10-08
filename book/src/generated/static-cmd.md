@@ -151,8 +151,8 @@
 | `goto_last_diag` | Goto last diagnostic | normal: `` ]D ``, select: `` ]D `` |
 | `goto_next_diag` | Goto next diagnostic | normal: `` ]d ``, select: `` ]d `` |
 | `goto_prev_diag` | Goto previous diagnostic | normal: `` [d ``, select: `` [d `` |
-| `goto_next_change` | Goto next change | normal: `` Gn ``, `` ]g ``, select: `` Gn ``, `` ]g `` |
-| `goto_prev_change` | Goto previous change | normal: `` GN ``, `` [g ``, select: `` GN ``, `` [g `` |
+| `goto_next_change` | Goto next change | normal: `` ]g ``, select: `` ]g `` |
+| `goto_prev_change` | Goto previous change | normal: `` [g ``, select: `` [g `` |
 | `goto_first_change` | Goto first change | normal: `` [G ``, select: `` [G `` |
 | `goto_last_change` | Goto last change | normal: `` ]G ``, select: `` ]G `` |
 | `goto_line_start` | Goto line start | normal: `` gh ``, `` <home> ``, select: `` gh ``, insert: `` <home> `` |
@@ -194,6 +194,8 @@
 | `review_refresh_buffer` | Refresh the review of the buffer | normal: `` Gb ``, select: `` Gb `` |
 | `review_commit_staged` | Hand the review back asking to commit the staged hunks | normal: `` GC ``, select: `` GC `` |
 | `review_send_handoff` | Hand the review back now | normal: `` GS ``, select: `` GS `` |
+| `review_next_change` | Go to the next review change, across changed files | normal: `` Gn ``, select: `` Gn `` |
+| `review_prev_change` | Go to the previous review change, across changed files | normal: `` GN ``, select: `` GN `` |
 | `review_baseline_older` | Move the review baseline one commit older | normal: `` G<minus> ``, select: `` G<minus> `` |
 | `review_baseline_newer` | Move the review baseline one commit newer | normal: `` G+ ``, select: `` G+ `` |
 | `review_comment_prompt` | Comment on the selection for the review | normal: `` Gm ``, select: `` Gm `` |

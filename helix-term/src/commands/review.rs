@@ -35,6 +35,8 @@ const OLD_FOCUS_TYPABLE: &[&str] = &[
     "review-commit",
     "review-close",
     "review-old",
+    "review-next",
+    "review-prev",
 ];
 
 /// Static review commands (the `G` menu) allowed while old text is focused; each runs a command
@@ -50,6 +52,8 @@ const OLD_FOCUS_STATIC: &[&str] = &[
     "review_close_buffer",
     "review_commit_staged",
     "review_send_handoff",
+    "review_next_change",
+    "review_prev_change",
 ];
 
 /// Runs the typable review command `command` without arguments from a key, showing its error.
@@ -65,6 +69,155 @@ pub(crate) fn run_typed(
     if let Err(err) = command(&mut cx, Args::default(), PromptEvent::Validate) {
         cx.editor.set_error(format!("{err:#}"));
     }
+}
+
+/// Jumps to the next (or previous) changed block `count` times from a key, across files.
+pub(crate) fn run_jump(cx: &mut Context, forward: bool) {
+    let count = cx.count();
+    let mut cx = compositor::Context {
+        editor: cx.editor,
+        jobs: cx.jobs,
+        scroll: None,
+    };
+    if let Err(err) = jump_change(&mut cx, forward, count) {
+        cx.editor.set_error(format!("{err:#}"));
+    }
+}
+
+pub(super) fn review_next(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    jump_change(cx, true, 1)
+}
+
+pub(super) fn review_prev(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    jump_change(cx, false, 1)
+}
+
+/// The workspace files changed since the review baseline, in `:review-files` order, pinning
+/// `HEAD` as the baseline when none is set. Returns the baseline too.
+fn changed_files(cx: &mut compositor::Context) -> anyhow::Result<(String, Vec<FileChange>)> {
+    let commit = review_baseline_or_head(cx)?;
+    let workspace = helix_loader::find_workspace().0;
+    let trust_full = cx
+        .editor
+        .workspace_trust
+        .query(&workspace, TrustQuery::Git)
+        .is_trusted();
+    let changes = cx
+        .editor
+        .diff_providers
+        .get_changed_files_since(&workspace, &commit, trust_full)?;
+    Ok((commit, changes))
+}
+
+/// Moves to the next (or previous) changed block `count` times: within the current buffer, then
+/// on to the first (or last) block of the next (or previous) changed file, wrapping around.
+fn jump_change(cx: &mut compositor::Context, forward: bool, count: usize) -> anyhow::Result<()> {
+    let (commit, changes) = changed_files(cx)?;
+    // Deleted files have nothing to land on.
+    let files: Vec<PathBuf> = changes
+        .iter()
+        .filter(|change| !matches!(change, FileChange::Deleted { .. }))
+        .map(|change| change.path().to_path_buf())
+        .collect();
+    ensure!(!files.is_empty(), "no changes since {}", &commit[..8]);
+    if let Err(err) = ensure_review(cx) {
+        log::info!("not enabling review: {err:#}");
+    }
+    for _ in 0..count.max(1) {
+        let (view, doc) = current_ref!(cx.editor);
+        let cursor = doc
+            .selection(view.id)
+            .primary()
+            .cursor_line(doc.text().slice(..));
+        let hunks = doc
+            .review
+            .as_ref()
+            .map(Review::hunk_lines)
+            .unwrap_or_default();
+        let here = if forward {
+            hunks.iter().position(|lines| lines.start > cursor)
+        } else {
+            hunks.iter().rposition(|lines| lines.start < cursor)
+        };
+        if let Some(idx) = here {
+            land_on_hunk(cx.editor, hunks[idx].start);
+            continue;
+        }
+        // Past the last (or first) block: the next (or previous) file, wrapping around.
+        let current = doc
+            .path()
+            .and_then(|path| files.iter().position(|file| file == path));
+        let next = match (current, forward) {
+            (Some(idx), true) => (idx + 1) % files.len(),
+            (Some(idx), false) => (idx + files.len() - 1) % files.len(),
+            (None, true) => 0,
+            (None, false) => files.len() - 1,
+        };
+        cx.editor.open(&files[next], Action::Replace)?;
+        if let Err(err) = ensure_review(cx) {
+            log::info!("not enabling review: {err:#}");
+        }
+        let hunks = doc!(cx.editor)
+            .review
+            .as_ref()
+            .map(Review::hunk_lines)
+            .unwrap_or_default();
+        let target = if forward { hunks.first() } else { hunks.last() };
+        land_on_hunk(cx.editor, target.map_or(0, |lines| lines.start));
+    }
+    let (view, doc) = current_ref!(cx.editor);
+    let cursor = doc
+        .selection(view.id)
+        .primary()
+        .cursor_line(doc.text().slice(..));
+    let hunks = doc
+        .review
+        .as_ref()
+        .map(Review::hunk_lines)
+        .unwrap_or_default();
+    let name = doc
+        .path()
+        .map(|path| {
+            path.strip_prefix(helix_loader::find_workspace().0)
+                .unwrap_or(path)
+                .display()
+                .to_string()
+        })
+        .unwrap_or_else(|| doc.display_name().into_owned());
+    match hunks.iter().position(|lines| lines.start == cursor) {
+        Some(idx) => cx
+            .editor
+            .set_status(format!("{name}: hunk {} of {}", idx + 1, hunks.len())),
+        None => cx.editor.set_status(format!("{name}: no hunks to show")),
+    }
+    Ok(())
+}
+
+/// Puts the cursor at the start of `line` (clamped to the buffer), centred, leaving old text.
+fn land_on_hunk(editor: &mut Editor, line: usize) {
+    let (view, doc) = current!(editor);
+    if let Some(review) = doc.review.as_mut() {
+        review.clear_focus(view.id);
+    }
+    let text = doc.text().slice(..);
+    let pos = text.line_to_char(line.min(text.len_lines().saturating_sub(1)));
+    push_jump(view, doc);
+    doc.set_selection(view.id, Selection::point(pos));
+    align_view(doc, view, Align::Center);
 }
 
 /// Whether the focused view is inspecting old review text.

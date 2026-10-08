@@ -51,6 +51,8 @@ label such as `old lines 1-2 removed before line 1:`.
 | `Enter` | In normal mode, runs `:review-toggle-stage` while the buffer is reviewed or is the `:review-diff` buffer, and does nothing otherwise. |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept. Under a `:review-baseline`, the buffer is not reviewed again until a different baseline, `:review-baseline clear`, or an explicit `:review` on it. |
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. `clear` closes all reviews. |
+| `:review-next` | Go to the next changed block; after the last one, open the next file changed since the baseline (`:review-files` order, wrapping around) at its first block. Shows `<file>: hunk 2 of 5`. `G n` in the default keymap, which takes a count. |
+| `:review-prev` | Like `:review-next` backwards, landing on the previous file's last block. `G N` in the default keymap. |
 | `:review-older` | Move the baseline to its first parent (pinning `HEAD` first when none is set) and refresh every review; the status shows `Baseline <commit> <subject> (N behind HEAD)`. `G -` in the default keymap. |
 | `:review-newer` | Move the baseline to the next commit towards `HEAD` on its ancestry path and refresh every review. `G +` in the default keymap. |
 | `:review-handoff <dir>` | Export a batch to `<dir>` on every write of a reviewed buffer. Without it, the default is `<workspace>/.pi/helix-review/outbox` when that directory exists (the pi extension creates it) and every reviewed file and pending comment is in the workspace. `clear` returns to that default. |
@@ -238,7 +240,8 @@ does stepping back to where you started.
 These commands are built into the default keymap under `G` in normal mode
 (see [review mode](./keymap.md#review-mode)): `G f` picks a file, `G d` shows the
 diff, `G o` focuses old text, `G m` comments, `G s` stages, `G C` asks the agent
-to commit and `G n` / `G N` move between changes. Keys you map under
+to commit and `G n` / `G N` move between changes, on into the next or previous
+changed file (`:review-files` order, wrapping around) at its edge. Keys you map under
 `[keys.normal.G]` in `config.toml` are added to that menu.
 
 As an alternative, a keymap under `Space r`, for `config.toml`. It replaces

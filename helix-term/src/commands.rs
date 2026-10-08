@@ -498,6 +498,8 @@ impl MappableCommand {
         review_refresh_buffer, "Refresh the review of the buffer",
         review_commit_staged, "Hand the review back asking to commit the staged hunks",
         review_send_handoff, "Hand the review back now",
+        review_next_change, "Go to the next review change, across changed files",
+        review_prev_change, "Go to the previous review change, across changed files",
         review_baseline_older, "Move the review baseline one commit older",
         review_baseline_newer, "Move the review baseline one commit newer",
         review_comment_prompt, "Comment on the selection for the review",
@@ -4855,6 +4857,14 @@ fn review_commit_staged(cx: &mut Context) {
 
 fn review_send_handoff(cx: &mut Context) {
     review::run_typed(cx, review::review_send)
+}
+
+fn review_next_change(cx: &mut Context) {
+    review::run_jump(cx, true)
+}
+
+fn review_prev_change(cx: &mut Context) {
+    review::run_jump(cx, false)
 }
 
 fn review_baseline_older(cx: &mut Context) {
