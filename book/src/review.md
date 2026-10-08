@@ -125,8 +125,8 @@ session. Nothing is sent automatically; saving or commenting never notifies pi.
    review. It never writes to an existing file and keeps pending comments on
    failure. On success the pending comments are cleared. Keep reviewed buffers
    open until export. Missing or moved paths must be restored at their original
-   locations and reopened before exporting; renames are not tracked and pending
-   entries cannot currently be removed individually.
+   locations and reopened before exporting; renames are not tracked, and pending
+   comments can only be dropped latest first with `:review-uncomment`.
 4. In the idle pi session that should continue, run `/helix-review <path>`.
 
 The batch format is described in `contrib/pi-helix-review/schema.md`. Comments
@@ -139,6 +139,54 @@ diff before handing it off.
 
 Commit-aware batches use schema version 2 and require the updated pi extension.
 Version 1 batches are rejected; use matching editor and extension versions.
+
+### Reviewing an agent's work
+
+With the pi extension in hook mode (see [Driving Helix from pi](#driving-helix-from-pi)),
+a review of an agent's turn goes like this:
+
+1. Wait for the agent. The status line shows `Agent turn started`, and at the
+   end of the turn `Agent turn done: 3 files changed since 1a2b3c4d
+   (:review-files)`. Unmodified open buffers in the workspace are already
+   reviewed against the baseline commit.
+2. `:review-files` picks a file changed since the baseline. Opening it shows
+   the review summary, for example `Reviewing against the git commit 1a2b3c4d:
+   2 blocks of old text, :review-old to inspect them`.
+3. `]g` / `[g` move between changed hunks of the current text; the diff gutter
+   and these motions follow the baseline while the review is active.
+4. `:review-old` focuses the nearest old lines. Inside them, `]g` / `[g` move to
+   the next or previous block of old lines, and `Esc` returns to the current
+   text next to the block you were reading.
+5. Edit the current text as usual. Old lines are read-only.
+6. `:review-comment <text>` comments on the current selection, or on the
+   selected old text while it is focused. `:review-comments` lists pending
+   comments and jumps to one; `:review-uncomment [count]` drops the latest.
+7. For a request that belongs in the code, write a line containing
+   `AGENT: <request>` (for example `// AGENT: handle the empty case`); the
+   agent is told to address it and delete the marker.
+8. Hand the review back: `:w` on a reviewed buffer exports your edits,
+   markers and comments, or `:review-send` exports them without writing
+   anything when there is nothing to save.
+
+The baseline stays on the same commit until a handoff is received, so a
+following agent turn is still reviewed against the commit you started from.
+The first turn after a handoff moves the baseline to the then current `HEAD`.
+
+A keymap for these commands under `Space r`, for `config.toml`. It replaces
+the default `Space r` (rename symbol); pick another key to keep it.
+
+```toml
+[keys.normal.space.r]
+f = ":review-files"
+o = ":review-old"
+c = ":review-comments"
+u = ":review-uncomment"
+s = ":review-send"
+r = ":review-refresh"
+x = ":review-close"
+```
+
+`:review-comment` takes the comment text, so type it at the `:` prompt.
 
 ### Driving Helix from pi
 
