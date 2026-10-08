@@ -1303,6 +1303,8 @@ pub struct Editor {
     pub review_handoff: Option<PathBuf>,
     /// The scratch buffer `:review-diff` writes to.
     pub review_diff: Option<DocumentId>,
+    /// Hunks staged with `:review-stage`, most recent last.
+    pub review_staged: Vec<crate::review::StagedHunk>,
 
     pub debug_adapters: dap::registry::Registry,
     pub breakpoints: HashMap<PathBuf, Vec<Breakpoint>>,
@@ -1457,6 +1459,7 @@ impl Editor {
             review_baseline: None,
             review_handoff: None,
             review_diff: None,
+            review_staged: Vec::new(),
             debug_adapters: dap::registry::Registry::new(),
             breakpoints: HashMap::new(),
             syn_loader,

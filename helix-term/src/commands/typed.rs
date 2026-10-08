@@ -4087,6 +4087,28 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         },
     },
     TypableCommand {
+        name: "review-stage",
+        aliases: &[],
+        doc: "Stage the unstaged hunk under the cursor (or the focused old text's, or the :review-diff hunk's) in the git index, like git add -p. Refuses unsaved buffers.",
+        fun: review::review_stage,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-unstage",
+        aliases: &[],
+        doc: "Undo the most recent :review-stage by restoring that file's previous git index entry.",
+        fun: review::review_unstage,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
         name: "review-close",
         aliases: &[],
         doc: "Stop reviewing the buffer. Pending comments are kept for :review-export.",

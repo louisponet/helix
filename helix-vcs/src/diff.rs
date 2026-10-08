@@ -122,6 +122,27 @@ pub fn compute_hunks(diff_base: Rope, doc: Rope) -> Option<Vec<Hunk>> {
     Some(diff.hunks().collect())
 }
 
+/// The line hunks of the change from `before` to `after`, compared as raw bytes.
+pub fn line_hunks(before: &[u8], after: &[u8]) -> Vec<Hunk> {
+    let input = imara_diff::InternedInput::new(before, after);
+    let mut diff = imara_diff::Diff::compute(ALGORITHM, &input);
+    diff.postprocess_lines(&input);
+    diff.hunks().collect()
+}
+
+/// `before` with only `hunk` of the change from `before` to `after` applied.
+pub fn apply_hunk(before: &[u8], after: &[u8], hunk: &Hunk) -> Vec<u8> {
+    let before: Vec<&[u8]> = imara_diff::sources::byte_lines(before).collect();
+    let after: Vec<&[u8]> = imara_diff::sources::byte_lines(after).collect();
+    let range = |range: &std::ops::Range<u32>| range.start as usize..range.end as usize;
+    before[..hunk.before.start as usize]
+        .iter()
+        .chain(&after[range(&hunk.after)])
+        .chain(&before[hunk.before.end as usize..])
+        .flat_map(|line| line.iter().copied())
+        .collect()
+}
+
 /// Formats the changes from `before` to `after` as unified diff hunks with three lines of
 /// context, without file headers.
 pub fn unified_diff(before: &str, after: &str) -> String {

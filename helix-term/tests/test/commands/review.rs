@@ -1693,6 +1693,96 @@ async fn n_walks_review_hunks_until_something_is_searched() -> anyhow::Result<()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn stage_and_unstage_single_hunks_in_the_git_index() -> anyhow::Result<()> {
+    let index = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
+    let worktree = "a\nB\nc\nd\ne\nf\ng\nh\nI\nj\n";
+    let repo = Repo::new(index, index, worktree);
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let mut app = repo.app()?;
+    let cached = || git_ok(dir, &["diff", "--cached", "--", "file.txt"]);
+    let first = "-b\n+B";
+    let second = "-i\n+I";
+    let status = |app: &Application| app.editor.get_status().unwrap().0.to_string();
+    let blob = |content: &str| {
+        let path = dir.join("blob.tmp");
+        fs::write(&path, content).unwrap();
+        let oid = git_ok(dir, &["hash-object", "blob.tmp"]);
+        fs::remove_file(path).unwrap();
+        oid
+    };
+
+    // Outside any unstaged hunk, and with unsaved changes, nothing is staged.
+    send_keys(&mut app, ":review<ret>:review-stage<ret>").await?;
+    assert_error(&app, "nothing to stage here");
+    send_keys(&mut app, "jix<esc>:review-stage<ret>").await?;
+    assert_error(&app, "unsaved changes");
+    send_keys(&mut app, "u").await?;
+    assert_eq!(cached(), "");
+
+    // Stage the first of two hunks: the index gets exactly that hunk.
+    send_keys(&mut app, ":review-stage<ret>").await?;
+    assert_eq!(status(&app), "Staged hunk; 1 of 2 hunks staged in file.txt");
+    let staged = cached();
+    assert!(
+        staged.contains(first) && !staged.contains(second),
+        "{staged}"
+    );
+    let one = blob("a\nB\nc\nd\ne\nf\ng\nh\ni\nj\n");
+    let ls = git_ok(dir, &["ls-files", "-s", "file.txt"]);
+    assert!(ls.contains(&one), "{ls}");
+    assert_eq!(repo.disk(), worktree);
+
+    // Stage the second: the index matches the worktree.
+    send_keys(&mut app, "7j:review-stage<ret>").await?;
+    assert_eq!(status(&app), "Staged hunk; 2 of 2 hunks staged in file.txt");
+    let staged = cached();
+    assert!(
+        staged.contains(first) && staged.contains(second),
+        "{staged}"
+    );
+    assert_eq!(git_ok(dir, &["diff", "--", "file.txt"]), "");
+
+    // Unstaging pops one staging at a time.
+    send_keys(&mut app, ":review-unstage<ret>").await?;
+    assert_eq!(status(&app), "Unstaged hunk");
+    let staged = cached();
+    assert!(
+        staged.contains(first) && !staged.contains(second),
+        "{staged}"
+    );
+    send_keys(&mut app, ":review-unstage<ret>").await?;
+    assert_eq!(cached(), "");
+    assert!(git_ok(dir, &["ls-files", "-s", "file.txt"]).contains(&blob(index)));
+    send_keys(&mut app, ":review-unstage<ret>").await?;
+    assert_error(&app, "nothing staged");
+
+    // A lock held by another git command is refused, and the index stays as it was.
+    let lock = dir.join(".git").join("index.lock");
+    fs::write(&lock, "")?;
+    send_keys(&mut app, "ggj:review-stage<ret>").await?;
+    assert_error(&app, "index.lock exists");
+    fs::remove_file(&lock)?;
+    assert_eq!(cached(), "");
+
+    // From the :review-diff buffer, the hunk under the cursor is staged.
+    send_keys(&mut app, ":review-diff<ret>").await?;
+    let line = doc!(app.editor)
+        .text()
+        .to_string()
+        .lines()
+        .position(|line| line == "+I")
+        .unwrap();
+    send_keys(&mut app, &format!("gg{line}j:review-stage<ret>")).await?;
+    let staged = cached();
+    assert!(
+        staged.contains(second) && !staged.contains(first),
+        "{staged}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn repeating_the_baseline_only_reviews_buffers_changed_on_disk() -> anyhow::Result<()> {
     let repo = Repo::new("a\nb\n", "a\nb\n", "a\nB\n");
     let dir = repo.dir.path();

@@ -9,7 +9,7 @@ use helix_core::doc_formatter::TextFormat;
 use helix_core::graphemes::prev_grapheme_boundary;
 use helix_core::line_ending::line_end_char_index;
 use helix_core::text_annotations::TextAnnotations;
-use helix_view::review::{OldFocus, Review, ReviewComment, ReviewSide};
+use helix_view::review::{OldFocus, Review, ReviewComment, ReviewSide, StagedHunk};
 
 use helix_loader::workspace_trust::TrustQuery;
 use helix_vcs::FileChange;
@@ -23,6 +23,8 @@ const OLD_FOCUS_HELP: &str = "Old text (read-only): move, select, y yank, ]g/[g 
 /// and it leaves the old text first.
 const OLD_FOCUS_TYPABLE: &[&str] = &[
     "review-revert",
+    "review-stage",
+    "review-unstage",
     "review-comment",
     "review-comments",
     "review-uncomment",
@@ -1022,6 +1024,191 @@ fn fill_review_diff(editor: &mut Editor, doc_id: DocumentId, diff: String) -> an
     doc.readonly = true;
     doc.set_language_by_language_id("diff", &loader)?;
     Ok(())
+}
+
+pub(super) fn review_stage(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    let (path, target) = stage_target(cx.editor)?;
+    if let Some(doc) = cx.editor.document_by_path(&path) {
+        // The index is staged from the file on disk, which must be what the buffer shows.
+        ensure!(
+            !doc.is_modified(),
+            "{} has unsaved changes; write or undo them before staging",
+            doc.display_name()
+        );
+        ensure!(
+            !doc.is_modified_on_disk().unwrap_or(false),
+            "{} changed on disk; :reload it before staging",
+            doc.display_name()
+        );
+    }
+    let trust_full = cx
+        .editor
+        .workspace_trust
+        .query(&helix_loader::find_workspace().0, TrustQuery::Git)
+        .is_trusted();
+    let providers = &cx.editor.diff_providers;
+    let (index, previous) = providers.get_index_base(&path, trust_full)?;
+    let worktree = std::fs::read(&path)?;
+    let hunks = helix_vcs::line_hunks(&index, &worktree);
+    let hunk = pick_hunk(&hunks, &target).context("nothing to stage here")?;
+    let content = helix_vcs::apply_hunk(&index, &worktree, hunk);
+    let staged = providers.update_index_entry(
+        &path,
+        helix_vcs::IndexUpdate::Content(&content),
+        &previous,
+        trust_full,
+    )?;
+    let (count, total) = staged_count(cx.editor, &path, &content, &worktree, trust_full);
+    let name = path
+        .strip_prefix(helix_loader::find_workspace().0)
+        .unwrap_or(&path)
+        .display()
+        .to_string();
+    cx.editor.review_staged.push(StagedHunk {
+        path,
+        previous,
+        staged,
+        lines: hunk.after.start as usize..hunk.after.end as usize,
+    });
+    cx.editor.set_status(format!(
+        "Staged hunk; {count} of {} staged in {name}",
+        plural(total, "hunk")
+    ));
+    Ok(())
+}
+
+pub(super) fn review_unstage(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    let hunk = cx
+        .editor
+        .review_staged
+        .pop()
+        .context("nothing staged with :review-stage to unstage")?;
+    let trust_full = cx
+        .editor
+        .workspace_trust
+        .query(&helix_loader::find_workspace().0, TrustQuery::Git)
+        .is_trusted();
+    // Only the exact entry staging wrote is restored, never one git or the agent changed since.
+    if let Err(err) = cx.editor.diff_providers.update_index_entry(
+        &hunk.path,
+        helix_vcs::IndexUpdate::Blob(&hunk.previous),
+        &hunk.staged,
+        trust_full,
+    ) {
+        cx.editor.review_staged.push(hunk);
+        return Err(err);
+    }
+    cx.editor.set_status("Unstaged hunk");
+    Ok(())
+}
+
+/// The file and worktree line range `:review-stage` stages a hunk of: the hunk under the cursor of
+/// the `:review-diff` buffer, the focused old text's block, or the cursor line of a reviewed buffer.
+fn stage_target(editor: &Editor) -> anyhow::Result<(PathBuf, ops::Range<usize>)> {
+    let (view, doc) = current_ref!(editor);
+    let text = doc.text().slice(..);
+    let cursor = doc.selection(view.id).primary().cursor_line(text);
+    if editor.review_diff == Some(doc.id()) {
+        let lines: Vec<String> = text
+            .lines()
+            .map(|line| line.to_string().trim_end_matches(['\n', '\r']).to_owned())
+            .collect();
+        let (path, line) = diff_location(&lines, cursor).context("nothing to stage here")?;
+        let path = helix_loader::find_workspace().0.join(path);
+        return Ok((path, line - 1..line));
+    }
+    let review = doc
+        .review
+        .as_ref()
+        .context("not reviewing this buffer, use :review first")?;
+    ensure!(!review.is_suspended(), Review::LIMIT_MESSAGE);
+    let path = doc.path().context("buffer has no path")?.to_path_buf();
+    let lines = match review.focused_block_index(view.id) {
+        Some(idx) => review.blocks()[idx].current.clone(),
+        None => cursor..cursor + 1,
+    };
+    Ok((path, lines))
+}
+
+/// The hunk whose worktree lines meet `lines`; an empty range (a removal) meets the hunks at its
+/// position, and a removal is found from the line on either side of it.
+fn pick_hunk<'a>(
+    hunks: &'a [helix_vcs::Hunk],
+    lines: &ops::Range<usize>,
+) -> Option<&'a helix_vcs::Hunk> {
+    let after = |hunk: &helix_vcs::Hunk| hunk.after.start as usize..hunk.after.end as usize;
+    let exact = |hunk: &&helix_vcs::Hunk| {
+        let range = after(hunk);
+        match (range.is_empty(), lines.is_empty()) {
+            (false, false) => range.start < lines.end && lines.start < range.end,
+            (true, true) => range.start == lines.start,
+            _ => false,
+        }
+    };
+    let touching = |hunk: &&helix_vcs::Hunk| {
+        let range = after(hunk);
+        (range.is_empty() || lines.is_empty())
+            && range.start <= lines.end
+            && lines.start <= range.end
+    };
+    hunks
+        .iter()
+        .find(exact)
+        .or_else(|| hunks.iter().find(touching))
+}
+
+/// How many of the review hunks of `path` (against its open review, or else the editor-wide
+/// baseline) are fully in the index `index`, and how many review hunks there are.
+fn staged_count(
+    editor: &Editor,
+    path: &Path,
+    index: &[u8],
+    worktree: &[u8],
+    trust_full: bool,
+) -> (usize, usize) {
+    let base = match editor
+        .document_by_path(path)
+        .and_then(|doc| doc.review.as_ref())
+    {
+        Some(review) => review.snapshot().to_string().into_bytes(),
+        None => editor
+            .review_baseline
+            .as_deref()
+            .and_then(|commit| {
+                editor
+                    .diff_providers
+                    .get_commit_base(path, commit, trust_full)
+                    .ok()
+            })
+            .map(|base| base.data)
+            .unwrap_or_else(|| index.to_vec()),
+    };
+    let unstaged = helix_vcs::line_hunks(index, worktree);
+    let review = helix_vcs::line_hunks(&base, worktree);
+    let staged = review
+        .iter()
+        .filter(|hunk| {
+            let lines = hunk.after.start as usize..hunk.after.end as usize;
+            pick_hunk(&unstaged, &lines).is_none()
+        })
+        .count();
+    (staged, review.len())
 }
 
 pub(super) fn review_diff_open(

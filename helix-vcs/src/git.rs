@@ -83,6 +83,130 @@ pub fn get_index_base(file: &Path, trust_full: bool) -> Result<(Vec<u8>, ObjectI
     Ok((convert_to_worktree(&repo, &file, data)?, entry.id))
 }
 
+/// Replaces the content of `file`'s git index entry, which must still have the blob `expected`,
+/// with `update`, and returns the new blob id. The index stays locked from reading it to writing
+/// it back, like `git add`, and is refused for entries and indexes that cannot be updated without
+/// git's own conversions or extensions.
+pub fn update_index_entry(
+    file: &Path,
+    update: crate::IndexUpdate,
+    expected: &str,
+    trust_full: bool,
+) -> Result<ObjectId> {
+    use gix::index::entry::Stat;
+
+    let file = gix::path::realpath(file).context("resolve symlinks")?;
+    let repo = open_repo(get_repo_dir(&file)?, trust_full)
+        .context("failed to open git repo")?
+        .to_thread_local();
+    let work_dir = repo.workdir().context("repo has no worktree")?;
+    let rela = file.strip_prefix(work_dir)?.to_owned();
+    let rela_path = gix::path::to_unix_separators_on_windows(gix::path::try_into_bstr(&rela)?);
+    let expected = ObjectId::from_hex(expected.as_bytes())?;
+
+    let index_path = repo.index_path();
+    let lock = gix::lock::File::acquire_to_update_resource(
+        &index_path,
+        gix::lock::acquire::Fail::Immediately,
+        None,
+    )
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "the git index is locked ({}.lock exists): another git command is running",
+            index_path.display()
+        )
+    })?;
+    let mut index = repo.open_index()?;
+    // gix writes neither a split index nor its shared part, which would lose entries.
+    if index.link().is_some() || index.is_sparse() {
+        bail!("split or sparse git indexes are not supported; stage with git");
+    }
+    let range = index
+        .entry_range(rela_path.as_ref())
+        .with_context(|| format!("{} is not in the git index", file.display()))?;
+    if range.len() != 1 {
+        bail!("{} has unmerged entries in the git index", file.display());
+    }
+    let entry = &index.entries()[range.start];
+    if entry.stage() != Stage::Unconflicted {
+        bail!("{} has unmerged entries in the git index", file.display());
+    }
+    if entry.id != expected {
+        bail!(
+            "the git index entry of {} changed since it was read; try again",
+            file.display()
+        );
+    }
+    if entry
+        .flags
+        .intersects(Flags::INTENT_TO_ADD | Flags::ASSUME_VALID | Flags::SKIP_WORKTREE)
+    {
+        bail!(
+            "{} is intent-to-add, assume-unchanged or skip-worktree in the git index; stage it with git",
+            file.display()
+        );
+    }
+    match entry.mode.to_tree_entry_mode().map(|mode| mode.kind()) {
+        Some(EntryKind::Blob | EntryKind::BlobExecutable) => (),
+        kind => bail!("index entry at {} is not a file: {kind:?}", file.display()),
+    }
+
+    let (id, stat) = match update {
+        crate::IndexUpdate::Content(content) => {
+            // The content is stored as-is, so files git would convert on the way in or out are
+            // refused rather than staged differently from `git add`.
+            let unconverted = |what: &str| {
+                anyhow::anyhow!(
+                    "git {what} {} (filters or line-ending conversion); stage it with git",
+                    file.display()
+                )
+            };
+            let (mut pipeline, _) = repo.filter_pipeline(None)?;
+            let mut to_git = Vec::new();
+            pipeline
+                .convert_to_git(content, &rela, &index)?
+                .read_to_end(&mut to_git)?;
+            if to_git != content {
+                return Err(unconverted("converts"));
+            }
+            let raw = if entry.id.is_empty_blob() {
+                Vec::new()
+            } else {
+                repo.find_object(entry.id)?.detach().data
+            };
+            let mut to_worktree = Vec::new();
+            pipeline
+                .convert_to_worktree(&raw, rela_path.as_ref(), Delay::Forbid)?
+                .read_to_end(&mut to_worktree)?;
+            if to_worktree != raw {
+                return Err(unconverted("converts the checked-out"));
+            }
+            let id = repo.write_blob(content)?.detach();
+            // Matching stat data tells git the file equals the entry; otherwise it must compare.
+            let stat = if std::fs::read(&file)? == content {
+                Stat::from_fs(&gix::index::fs::Metadata::from_path_no_follow(&file)?)?
+            } else {
+                Stat::default()
+            };
+            (id, stat)
+        }
+        crate::IndexUpdate::Blob(id) => (ObjectId::from_hex(id.as_bytes())?, Stat::default()),
+    };
+
+    let entry = &mut index.entries_mut()[range.start];
+    entry.id = id;
+    entry.stat = stat;
+    // The tree cache would still describe the old entry; git rebuilds it when needed.
+    index.remove_tree();
+    let mut out = std::io::BufWriter::new(lock);
+    index.write_to(&mut out, gix::index::write::Options::default())?;
+    out.into_inner()
+        .map_err(|err| err.into_error())?
+        .commit()
+        .map_err(|err| err.error)?;
+    Ok(id)
+}
+
 pub fn get_commit_base(file: &Path, revision: &str, trust_full: bool) -> Result<CommitBase> {
     let file = gix::path::realpath(file).context("resolve symlinks")?;
     let repo = open_repo(get_repo_dir(&file)?, trust_full)?.to_thread_local();

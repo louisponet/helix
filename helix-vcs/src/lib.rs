@@ -14,7 +14,7 @@ mod git;
 
 mod diff;
 
-pub use diff::{compute_hunks, unified_diff, DiffHandle, Hunk};
+pub use diff::{apply_hunk, compute_hunks, line_hunks, unified_diff, DiffHandle, Hunk};
 
 mod status;
 
@@ -24,6 +24,15 @@ pub struct CommitBase {
     pub data: Vec<u8>,
     pub commit_id: String,
     pub blob_id: Option<String>,
+}
+
+/// The new content of a git index entry, see [`DiffProviderRegistry::update_index_entry`].
+#[derive(Clone, Copy, Debug)]
+pub enum IndexUpdate<'a> {
+    /// Stage these bytes, which must be what the file holds in the worktree.
+    Content(&'a [u8]),
+    /// Restore an existing blob, given by its hex id.
+    Blob(&'a str),
 }
 
 pub struct CommitInfo {
@@ -61,6 +70,27 @@ impl DiffProviderRegistry {
         for provider in &self.providers {
             match provider.get_index_base(file, trust_full) {
                 Ok(res) => return Ok(res),
+                Err(err) => {
+                    first_err.get_or_insert(err);
+                }
+            }
+        }
+        Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
+    }
+
+    /// Replaces the git index entry of `file`, which must still have the blob `expected`, with
+    /// `update`. Returns the new blob id.
+    pub fn update_index_entry(
+        &self,
+        file: &Path,
+        update: IndexUpdate,
+        expected: &str,
+        trust_full: bool,
+    ) -> Result<String> {
+        let mut first_err = None;
+        for provider in &self.providers {
+            match provider.update_index_entry(file, update, expected, trust_full) {
+                Ok(id) => return Ok(id),
                 Err(err) => {
                     first_err.get_or_insert(err);
                 }
@@ -211,6 +241,21 @@ impl DiffProvider {
             #[cfg(feature = "git")]
             Self::Git => git::get_index_base(file, trust_full)
                 .map(|(data, oid)| (data, oid.to_hex().to_string())),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn update_index_entry(
+        &self,
+        file: &Path,
+        update: IndexUpdate,
+        expected: &str,
+        trust_full: bool,
+    ) -> Result<String> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::update_index_entry(file, update, expected, trust_full)
+                .map(|id| id.to_hex().to_string()),
             Self::None => bail!("No diff support compiled in"),
         }
     }
