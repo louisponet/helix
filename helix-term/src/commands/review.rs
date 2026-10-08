@@ -549,6 +549,14 @@ pub(super) fn review_baseline(
     let scrolloff = cx.editor.config().scrolloff;
     let (view, doc) = current!(cx.editor);
     view.ensure_cursor_in_view(doc, scrolloff);
+    if reviewed == 0 && unsaved == 0 && failed == 0 && unchanged > 0 {
+        cx.editor.set_status(format!(
+            "{} up to date against {}",
+            plural(unchanged, "buffer"),
+            &commit[..8]
+        ));
+        return Ok(());
+    }
     let mut status = format!(
         "Reviewing {} against {}",
         plural(reviewed, "buffer"),

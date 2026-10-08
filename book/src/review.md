@@ -170,7 +170,8 @@ automatically, showing the same status as `:review` (or `no changes` when the
 buffer matches the baseline). Sending the same commit again refreshes all unmodified reviewed
 buffers, keeping any baseline chosen per buffer with `:review`; buffers already
 reviewed against that commit whose file has not changed on disk are left alone
-and counted as unchanged. A different commit switches all of them.
+and counted as unchanged (`2 buffers up to date against <commit>` when nothing
+else happened). A different commit switches all of them.
 
 While `:review-handoff <dir>` is set, auto-save skips reviewed buffers, and
 writing a reviewed buffer exports a batch (the same version 2 JSON as

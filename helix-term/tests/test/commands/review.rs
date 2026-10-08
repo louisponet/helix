@@ -1409,6 +1409,14 @@ async fn repeating_the_baseline_only_reviews_buffers_changed_on_disk() -> anyhow
     assert_eq!(review.baseline().revision(), Some(commit.as_str()));
     assert_eq!(review.changed_lines().collect::<Vec<_>>(), [1..2]);
 
+    // With nothing changed on disk, every buffer is up to date.
+    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+    assert_eq!(
+        app.editor.get_status().unwrap().0.as_ref(),
+        format!("2 buffers up to date against {short}")
+    );
+    assert_eq!(other_state(&app), before);
+
     // A different baseline reviews every buffer again.
     send_keys(&mut app, ":review-baseline HEAD~1<ret>").await?;
     let (status, _) = app.editor.get_status().unwrap();
