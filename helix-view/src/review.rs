@@ -649,6 +649,7 @@ pub struct ReviewBatch {
     files: BTreeMap<PathBuf, ReviewBaseline>,
     comments: Vec<ReviewComment>,
     request: Option<ReviewRequest>,
+    target: Option<String>,
 }
 
 impl ReviewBatch {
@@ -690,6 +691,16 @@ impl ReviewBatch {
         self.request = Some(request);
     }
 
+    /// Addresses the next export to the pi session `target` (a label such as `pi-2`).
+    pub fn set_target(&mut self, target: String) {
+        self.target = Some(target);
+    }
+
+    /// The pi session the next export is addressed to, if any.
+    pub fn target(&self) -> Option<&str> {
+        self.target.as_deref()
+    }
+
     /// Writes the files accepted by `include` and their comments as JSON to the new file `path`
     /// and removes them from the batch. Nothing is removed if writing fails.
     pub fn export(&mut self, path: &Path, include: impl Fn(&Path) -> bool) -> Result<()> {
@@ -706,6 +717,8 @@ impl ReviewBatch {
             comments: Vec<&'a ReviewComment>,
             #[serde(skip_serializing_if = "Option::is_none")]
             request: Option<&'a ReviewRequest>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            target: Option<&'a str>,
         }
 
         let batch = Batch {
@@ -723,6 +736,7 @@ impl ReviewBatch {
                 .filter(|comment| include(&comment.path))
                 .collect(),
             request: self.request.as_ref(),
+            target: self.target.as_deref(),
         };
         let mut json = serde_json::to_vec_pretty(&batch)?;
         json.push(b'\n');
@@ -741,6 +755,7 @@ impl ReviewBatch {
         self.files.retain(|path, _| !include(path));
         self.comments.retain(|comment| !include(&comment.path));
         self.request = None;
+        self.target = None;
         Ok(())
     }
 }

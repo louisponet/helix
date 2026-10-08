@@ -4047,7 +4047,7 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "review-ask",
         aliases: &[],
-        doc: "Ask the agent about every selection (or the selected old text): writes the buffer if modified and hands off the review with the question. Use %% for a literal %.",
+        doc: "Ask the agent about every selection (or the selected old text): writes the buffer if modified and hands off the review with the question. A leading @label addresses that pi session. Use %% for a literal %.",
         fun: review::review_ask,
         completer: CommandCompleter::none(),
         signature: Signature {
@@ -4169,7 +4169,7 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "review-send",
         aliases: &[],
-        doc: "Export a review batch to the handoff directory now, as a write would, without writing any file, with optional text as an instruction to the agent. Refuses while a reviewed buffer has unsaved changes.",
+        doc: "Export a review batch to the handoff directory now, as a write would, without writing any file, with optional text as an instruction to the agent, addressed to a pi session by a leading @label. Refuses while a reviewed buffer has unsaved changes.",
         fun: review::review_send,
         completer: CommandCompleter::none(),
         signature: Signature {
@@ -4181,7 +4181,7 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "review-commit",
         aliases: &[],
-        doc: "Hand the review back like :review-send, asking the agent to commit exactly what is staged in the git index, with an optional commit subject. Refuses when nothing is staged.",
+        doc: "Hand the review back like :review-send, asking the agent to commit exactly what is staged in the git index, with an optional commit subject and a leading @label to address a pi session. Refuses when nothing is staged.",
         fun: review::review_commit,
         completer: CommandCompleter::none(),
         signature: Signature {

@@ -1,6 +1,6 @@
 //! Inline review of a buffer against an index or commit snapshot.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -461,12 +461,17 @@ pub(super) fn review_ask(
     );
     ensure!(doc!(cx.editor).path().is_some(), "buffer has no path");
     ensure_review(cx)?;
-    let comments = selection_comments(cx.editor, &args[0], true)?;
+    let (target, message) = split_target(Some(&args[0]));
+    let message = message.context("the question is empty")?;
+    let comments = selection_comments(cx.editor, message, true)?;
     let count = comments.len();
     for comment in comments {
         cx.editor.review_batch.add_comment(comment);
     }
     cx.editor.review_batch.set_request(ReviewRequest::Ask);
+    if let Some(target) = target {
+        cx.editor.review_batch.set_target(target);
+    }
     if doc!(cx.editor).is_modified() {
         // Writing a reviewed buffer exports the handoff, carrying the comments and the request.
         typed::write_impl(
@@ -479,7 +484,7 @@ pub(super) fn review_ask(
             },
         )?;
     } else {
-        hand_off(cx.editor, None, ":review-ask")?;
+        hand_off(cx.editor, None, None, ":review-ask")?;
     }
     cx.editor.set_status(format!(
         "Asked the agent about {}",
@@ -896,10 +901,11 @@ pub(super) fn review_send(
     if let Err(err) = ensure_review(cx) {
         log::info!("not enabling review: {err:#}");
     }
-    let request = args.first().map(|text| ReviewRequest::Message {
+    let (target, text) = split_target(args.first());
+    let request = text.map(|text| ReviewRequest::Message {
         text: text.to_owned(),
     });
-    let path = hand_off(cx.editor, request, ":review-send")?;
+    let path = hand_off(cx.editor, request, target, ":review-send")?;
     cx.editor
         .set_status(format!("Exported review batch {}", path.display()));
     Ok(())
@@ -942,20 +948,42 @@ pub(super) fn review_commit(
             &head[..8]
         );
     }
-    let subject = args.first().map(str::to_owned);
+    let (target, subject) = split_target(args.first());
     hand_off(
         cx.editor,
-        Some(ReviewRequest::CommitStaged { subject }),
+        Some(ReviewRequest::CommitStaged {
+            subject: subject.map(str::to_owned),
+        }),
+        target,
         ":review-commit",
     )?;
     cx.editor.set_status("Handed off: commit staged hunks");
     Ok(())
 }
 
-/// Exports the handoff batch with `request`, refusing while a reviewed buffer is unsaved.
+/// Splits a leading `@label` naming the pi session to address off a command's text, returning
+/// the label and the rest of the text, if any is left.
+fn split_target(text: Option<&str>) -> (Option<String>, Option<&str>) {
+    let Some(text) = text else {
+        return (None, None);
+    };
+    let Some(rest) = text.strip_prefix('@') else {
+        return (None, Some(text));
+    };
+    let (label, rest) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    let rest = rest.trim_start();
+    (
+        Some(label.to_owned()).filter(|label| !label.is_empty()),
+        Some(rest).filter(|rest| !rest.is_empty()),
+    )
+}
+
+/// Exports the handoff batch with `request`, addressed to the pi session `target` if given,
+/// refusing while a reviewed buffer is unsaved.
 fn hand_off(
     editor: &mut Editor,
     request: Option<ReviewRequest>,
+    target: Option<String>,
     command: &str,
 ) -> anyhow::Result<PathBuf> {
     let dir = editor
@@ -973,6 +1001,9 @@ fn hand_off(
     );
     if let Some(request) = request {
         editor.review_batch.set_request(request);
+    }
+    if let Some(target) = target {
+        editor.review_batch.set_target(target);
     }
     export_handoff(editor, &dir)
 }
@@ -1012,6 +1043,7 @@ fn export_handoff(editor: &mut Editor, dir: &Path) -> anyhow::Result<PathBuf> {
     for (file, baseline) in reviewed {
         editor.review_batch.add_file(file, baseline);
     }
+    let target = editor.review_batch.target().map(str::to_owned);
 
     let millis = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
     let path = dir.join(format!("{millis}-{}.json", std::process::id()));
@@ -1021,6 +1053,7 @@ fn export_handoff(editor: &mut Editor, dir: &Path) -> anyhow::Result<PathBuf> {
         .export(&temp, |file| !modified.contains(file))?;
     std::fs::rename(&temp, &path)
         .with_context(|| format!("failed to rename {} to {}", temp.display(), path.display()))?;
+    editor.review_target = target;
     Ok(path)
 }
 
@@ -1049,14 +1082,16 @@ pub(super) fn review_files(
             .set_status(format!("no files changed since {}", &commit[..8]));
         return Ok(());
     }
+    let agents = agent_labels(&workspace);
     let files: Vec<_> = changes
         .into_iter()
         .map(|change| {
             let stats = file_stats(cx.editor, change.path(), &commit, trust_full);
-            (change, stats)
+            let agent = agents.get(change.path()).cloned();
+            (change, stats, agent)
         })
         .collect();
-    let counted = files.iter().filter_map(|(_, stats)| *stats);
+    let counted = files.iter().filter_map(|(_, stats, _)| *stats);
     let (added, removed, staged, committed, total) = counted.fold((0, 0, 0, 0, 0), |sum, stats| {
         (
             sum.0 + stats.added,
@@ -1077,9 +1112,9 @@ pub(super) fn review_files(
     cx.jobs.callback(async move {
         let callback: job::Callback =
             Callback::EditorCompositor(Box::new(move |editor, compositor| {
-                type Item = (FileChange, Option<FileStats>);
+                type Item = (FileChange, Option<FileStats>, Option<String>);
                 let columns = [
-                    ui::PickerColumn::new("change", |(change, _): &Item, _| {
+                    ui::PickerColumn::new("change", |(change, ..): &Item, _| {
                         match change {
                             FileChange::Untracked { .. } => "A",
                             FileChange::Deleted { .. } => "D",
@@ -1087,7 +1122,7 @@ pub(super) fn review_files(
                         }
                         .into()
                     }),
-                    ui::PickerColumn::new("path", |(change, _): &Item, workspace: &PathBuf| {
+                    ui::PickerColumn::new("path", |(change, ..): &Item, workspace: &PathBuf| {
                         let path = change.path();
                         path.strip_prefix(workspace)
                             .unwrap_or(path)
@@ -1095,7 +1130,7 @@ pub(super) fn review_files(
                             .to_string()
                             .into()
                     }),
-                    ui::PickerColumn::new("+/-", |(_, stats): &Item, _| {
+                    ui::PickerColumn::new("+/-", |(_, stats, _): &Item, _| {
                         match stats {
                             Some(stats) => match (stats.added, stats.removed) {
                                 (added, 0) => format!("+{added}"),
@@ -1106,7 +1141,7 @@ pub(super) fn review_files(
                         }
                         .into()
                     }),
-                    ui::PickerColumn::new("hunks", |(_, stats): &Item, _| {
+                    ui::PickerColumn::new("hunks", |(_, stats, _): &Item, _| {
                         match stats {
                             Some(stats) if stats.committed > 0 => format!(
                                 "{}/{} {} committed",
@@ -1117,13 +1152,16 @@ pub(super) fn review_files(
                         }
                         .into()
                     }),
+                    ui::PickerColumn::new("agent", |(.., agent): &Item, _| {
+                        agent.as_deref().unwrap_or_default().into()
+                    }),
                 ];
                 let picker = ui::Picker::new(
                     columns,
                     1,
                     files,
                     workspace,
-                    |cx, (change, _): &Item, action| {
+                    |cx, (change, ..): &Item, action| {
                         let doc_id = match cx.editor.open(change.path(), action) {
                             Ok(doc_id) => doc_id,
                             Err(err) => {
@@ -1143,7 +1181,7 @@ pub(super) fn review_files(
                         align_view(doc, view, Align::Center);
                     },
                 )
-                .with_preview(|editor, (change, _): &Item| {
+                .with_preview(|editor, (change, ..): &Item| {
                     let path = change.path();
                     let line = editor
                         .document_by_path(path)
@@ -1482,6 +1520,38 @@ fn worktree_to_index_lines(
         (line as isize - shift).max(0) as usize
     };
     map(lines.start)..map(lines.end)
+}
+
+/// The label of the pi session that last changed each file, from the hook's per-session state
+/// files in `<workspace>/.pi/helix-review/state/`: a session covers the files in its turn
+/// snapshots, and the most recently active session wins.
+fn agent_labels(workspace: &Path) -> HashMap<PathBuf, String> {
+    #[derive(serde::Deserialize)]
+    struct State {
+        label: Option<String>,
+        #[serde(default)]
+        snapshots: HashMap<PathBuf, String>,
+        #[serde(default)]
+        last_active: u64,
+    }
+    let dir = workspace.join(".pi/helix-review/state");
+    let mut states: Vec<State> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|entry| serde_json::from_slice(&std::fs::read(entry.path()).ok()?).ok())
+        .collect();
+    states.sort_by_key(|state| state.last_active);
+    let mut labels = HashMap::new();
+    for state in states {
+        if let Some(label) = state.label {
+            for path in state.snapshots.into_keys() {
+                labels.insert(path, label.clone());
+            }
+        }
+    }
+    labels
 }
 
 /// Line and hunk counts of a file's change since the review baseline, for `:review-files`.

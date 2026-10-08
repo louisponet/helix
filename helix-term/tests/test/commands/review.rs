@@ -2567,6 +2567,62 @@ async fn review_files_picks_files_changed_since_the_baseline() -> anyhow::Result
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn files_show_the_agent_that_changed_them_and_handoffs_can_address_one() -> anyhow::Result<()>
+{
+    let repo = Repo::new("1\n", "1\n", "one\n");
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    fs::write(dir.join("other.txt"), "other\n")?;
+    let mailbox = dir.join(".pi/helix-review");
+    fs::create_dir_all(mailbox.join("outbox"))?;
+    fs::create_dir_all(mailbox.join("state"))?;
+    let file = helix_stdx::path::canonicalize(&repo.file);
+    let other = helix_stdx::path::canonicalize(dir.join("other.txt"));
+    // pi-1 changed both files, then pi-2, active later, changed file.txt again.
+    let state = |label: &str, last_active: u64, files: &[&Path]| {
+        let snapshots: serde_json::Map<_, _> = files
+            .iter()
+            .map(|path| (path.display().to_string(), serde_json::json!("0")))
+            .collect();
+        serde_json::json!({ "label": label, "last_active": last_active, "snapshots": snapshots })
+            .to_string()
+    };
+    fs::write(
+        mailbox.join("state/a.json"),
+        state("pi-1", 1, &[&file, &other]),
+    )?;
+    fs::write(mailbox.join("state/b.json"), state("pi-2", 2, &[&file]))?;
+    let mut config = test_config();
+    config.editor.statusline.right = vec![StatusLineElement::Review];
+    let mut app = AppBuilder::new()
+        .with_file(&repo.file, None)
+        .with_config(config)
+        .build()?;
+
+    // The picker opens from a job callback, so filtering it takes a separate key sequence.
+    send_keys(&mut app, ":review-files<ret>").await?;
+    send_keys(&mut app, "%agent ^pi-1<ret>").await?;
+    assert_eq!(doc!(app.editor).path(), Some(other.as_path()));
+    send_keys(&mut app, ":review-files<ret>").await?;
+    send_keys(&mut app, "%agent ^pi-2<ret>").await?;
+    assert_eq!(doc!(app.editor).path(), Some(file.as_path()));
+
+    send_keys(&mut app, ":review-send @pi-2 rename it<ret>").await?;
+    assert_status_not_error(&app.editor);
+    let batches: Vec<_> = fs::read_dir(mailbox.join("outbox"))?.collect::<Result<_, _>>()?;
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(batches[0].path())?)?;
+    assert_eq!(json["target"], "pi-2");
+    assert_eq!(
+        json["request"],
+        serde_json::json!({ "kind": "message", "text": "rename it" })
+    );
+    let status = statusline(&app);
+    assert!(status.contains(" @pi-2 "), "{status}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn buffers_reviewed_against_the_baseline_show_a_summary() -> anyhow::Result<()> {
     let repo = Repo::new("old\n", "old\n", "old\n");
     let dir = repo.dir.path();

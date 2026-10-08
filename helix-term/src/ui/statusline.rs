@@ -638,6 +638,9 @@ where
     if review.is_suspended() {
         text.push_str(" suspended");
     }
+    if let Some(target) = &context.editor.review_target {
+        text.push_str(&format!(" @{target}"));
+    }
     text.push(' ');
     write(context, text.into());
 }

@@ -40,7 +40,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-old` | Focus the old text nearest the cursor. |
 | `:review-refresh` | Reload the buffer from disk; reread the index in index mode, or retain the selected commit in commit mode. Refuses unsaved changes. |
 | `:review-comment <text>` | Add a pending comment on the primary selection, or on the selected old text while it is focused. Use `%%` for a literal `%`. |
-| `:review-ask <text>` | Ask the agent about every selection, or the selected old text while it is focused: one comment per selection with the text, then hands the review off at once (writing the buffer first if it is modified). Needs a handoff directory (`:review-handoff` or the pi mailbox). Use `%%` for a literal `%`. |
+| `:review-ask <text>` | Ask the agent about every selection, or the selected old text while it is focused: one comment per selection with the text, then hands the review off at once (writing the buffer first if it is modified). Needs a handoff directory (`:review-handoff` or the pi mailbox). A leading `@label` (`:review-ask @pi-2 rename this`) addresses the pi session with that label. Use `%%` for a literal `%`. |
 | `:review-comments` | Pick a pending comment by file, lines or text and jump to its line in the current text. |
 | `:review-uncomment [count]` | Drop the latest pending comment, or the `count` latest ones, and show how many remain. |
 | `:review-export <path>` | Write all pending comments and reviewed files to a new JSON file. |
@@ -52,11 +52,11 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept. Under a `:review-baseline`, the buffer is not reviewed again until a different baseline, `:review-baseline clear`, or an explicit `:review` on it. |
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. `clear` closes all reviews. |
 | `:review-handoff <dir>` | Export a batch to `<dir>` on every write of a reviewed buffer. Without it, the default is `<workspace>/.pi/helix-review/outbox` when that directory exists (the pi extension creates it) and every reviewed file and pending comment is in the workspace. `clear` returns to that default. |
-| `:review-send [text]` | Export the handoff batch now without writing any file, for example to acknowledge a review without edits; optional text goes to the agent as an instruction (the batch's `request`). |
-| `:review-commit [subject]` | Hand back like `:review-send`, asking the agent to commit exactly what is staged in the git index (optionally with that subject). Refuses when nothing is staged, naming how many of the buffer's hunks are already committed in `HEAD` if any. |
+| `:review-send [text]` | Export the handoff batch now without writing any file, for example to acknowledge a review without edits; optional text goes to the agent as an instruction (the batch's `request`). A leading `@label` (`:review-send @pi-2 [text]`) addresses one of several pi sessions (the batch's `target`). |
+| `:review-commit [subject]` | Hand back like `:review-send`, asking the agent to commit exactly what is staged in the git index (optionally with that subject, and addressed to a session with a leading `@label`). Refuses when nothing is staged, naming how many of the buffer's hunks are already committed in `HEAD` if any. |
 | `:review-diff` | Show one unified diff of every file changed since the review baseline (with none set, `HEAD` is pinned as it, like `:review-baseline HEAD`) in a read-only scratch buffer; running it again, or `:review-baseline` (as the pi hook does after each edit), refreshes that buffer in place. File headers are workspace-relative paths (`--- <path>`), so `gf` opens a file. |
 | `:review-diff-open` | In the `:review-diff` buffer, open the file of the hunk under the cursor at the current line it shows (the next current line on a removed line). |
-| `:review-files` | Pick a file added (`A`), modified (`M`) or deleted (`D`) since the review baseline, and open it at its first change. The `+/-` and `hunks` columns show added and removed lines and staged/total hunks plus the hunks already committed since the baseline (`?` over the size limits), and the status line the totals. With no baseline set, it first pins `HEAD` like `:review-baseline HEAD`. |
+| `:review-files` | Pick a file added (`A`), modified (`M`) or deleted (`D`) since the review baseline, and open it at its first change. The `+/-` and `hunks` columns show added and removed lines and staged/total hunks plus the hunks already committed since the baseline (`?` over the size limits), and the status line the totals. The `agent` column names the pi session that last changed the file, from the hook's state files. With no baseline set, it first pins `HEAD` like `:review-baseline HEAD`. |
 
 ### Choosing a commit range
 
@@ -214,8 +214,11 @@ like this:
    anything when there is nothing to save; `:review-send <text>` adds an
    instruction for the agent. `:review-commit [subject]` hands back and asks
    the agent to commit exactly what you staged (and nothing else). The status
-   line then confirms it, for example `pi received your review: 1 file with
-   edits, 1 review comment`.
+   line then confirms it, for example `pi-1 received your review: 1 file with
+   edits, 1 review comment`. With several pi sessions hooked to the repository,
+   a handoff goes to the session that last changed its files (the `agent`
+   column of `:review-files`); start the text with `@label` to pick one, for
+   example `:review-send @pi-2 take this one`.
 
 The baseline stays on the same commit until a handoff is received, so a
 following agent turn is still reviewed against the commit you started from.
@@ -249,7 +252,8 @@ x = ":review-close"
 `:review-comment` takes the comment text, so type it at the `:` prompt. The
 `review` statusline element shows the baseline, the hunk count, how many hunks
 are already committed since the baseline and how many are staged (each omitted
-when zero, as in `9 hunks 3 committed 2 staged`) and the pending comment count; add it with, for example,
+when zero, as in `9 hunks 3 committed 2 staged`), the pending comment count and
+`@<label>` when the last handoff was addressed to a session; add it with, for example,
 `right = ["review", "diagnostics", "selections", "position"]` under
 `[editor.statusline]`.
 
