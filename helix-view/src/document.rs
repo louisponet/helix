@@ -215,6 +215,9 @@ pub struct Document {
     /// Inline review against an index or commit snapshot, see [`Document::load_review`]. Start
     /// and close it with [`Document::set_review`] and [`Document::close_review`].
     pub review: Option<Review>,
+    /// The editor-wide review baseline under which the reviewer closed this buffer's review.
+    /// That baseline does not review the buffer again; any other review clears it.
+    pub review_opt_out: Option<String>,
 
     // when document was used for most-recent-used buffer picker
     pub focused_at: std::time::Instant,
@@ -771,6 +774,7 @@ impl Document {
             config,
             version_control_head: None,
             review: None,
+            review_opt_out: None,
             focused_at: std::time::Instant::now(),
             readonly: false,
             jump_labels: HashMap::new(),
@@ -2042,6 +2046,7 @@ impl Document {
     /// is closed or suspended.
     pub fn set_review(&mut self, review: Review) {
         self.review = Some(review);
+        self.review_opt_out = None;
         self.update_differ();
     }
 

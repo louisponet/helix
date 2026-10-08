@@ -145,6 +145,7 @@ pub(super) fn review_close(
 
     let scrolloff = cx.editor.config().scrolloff;
     let trust_full = doc_trust_full(cx.editor);
+    let baseline = cx.editor.review_baseline.clone();
     let (view, doc) = current!(cx.editor);
     if doc
         .close_review(&cx.editor.diff_providers, trust_full)
@@ -153,7 +154,13 @@ pub(super) fn review_close(
         bail!("not reviewing this buffer");
     }
     view.ensure_cursor_in_view(doc, scrolloff);
-    cx.editor.set_status("Review closed");
+    // The editor-wide baseline would otherwise review the buffer again on its next refresh.
+    let status = match &baseline {
+        Some(commit) => format!("Review closed; :review {} resumes it", &commit[..8]),
+        None => "Review closed".to_owned(),
+    };
+    doc.review_opt_out = baseline;
+    cx.editor.set_status(status);
     Ok(())
 }
 
@@ -479,6 +486,7 @@ pub(super) fn review_baseline(
                 .query(doc.workspace_root(), TrustQuery::Git)
                 .is_trusted();
             doc.close_review(&cx.editor.diff_providers, trust_full);
+            doc.review_opt_out = None;
         }
         let scrolloff = cx.editor.config().scrolloff;
         let (view, doc) = current!(cx.editor);
@@ -506,10 +514,14 @@ pub(super) fn review_baseline(
         .filter(|doc| doc.path().is_some_and(|path| path.starts_with(&workspace)))
         .map(Document::id)
         .collect();
-    let (mut reviewed, mut unchanged, mut unsaved, mut failed) = (0, 0, 0, 0);
+    let (mut reviewed, mut unchanged, mut unsaved, mut failed, mut closed) = (0, 0, 0, 0, 0);
     let mut conflicts = Vec::new();
     for doc_id in doc_ids {
         let doc = doc!(cx.editor, &doc_id);
+        if doc.review_opt_out.as_ref() == Some(&commit) {
+            closed += 1;
+            continue;
+        }
         if doc.is_modified() {
             if doc.is_modified_on_disk().unwrap_or(false) {
                 conflicts.push(doc.display_name().into_owned());
@@ -554,21 +566,26 @@ pub(super) fn review_baseline(
     let scrolloff = cx.editor.config().scrolloff;
     let (view, doc) = current!(cx.editor);
     view.ensure_cursor_in_view(doc, scrolloff);
-    if reviewed == 0 && unsaved == 0 && failed == 0 && conflicts.is_empty() && unchanged > 0 {
-        cx.editor.set_status(format!(
-            "{} up to date against {}",
-            plural(unchanged, "buffer"),
-            &commit[..8]
-        ));
-        return Ok(());
-    }
-    let mut status = format!(
-        "Reviewing {} against {}",
-        plural(reviewed, "buffer"),
-        &commit[..8]
-    );
-    if unchanged > 0 {
-        status.push_str(&format!("; {unchanged} unchanged"));
+    let mut status =
+        if reviewed == 0 && unsaved == 0 && failed == 0 && conflicts.is_empty() && unchanged > 0 {
+            format!(
+                "{} up to date against {}",
+                plural(unchanged, "buffer"),
+                &commit[..8]
+            )
+        } else {
+            let mut status = format!(
+                "Reviewing {} against {}",
+                plural(reviewed, "buffer"),
+                &commit[..8]
+            );
+            if unchanged > 0 {
+                status.push_str(&format!("; {unchanged} unchanged"));
+            }
+            status
+        };
+    if closed > 0 {
+        status.push_str(&format!("; {closed} closed"));
     }
     if unsaved > 0 {
         status.push_str(&format!("; {unsaved} unsaved skipped"));

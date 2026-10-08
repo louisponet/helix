@@ -2171,6 +2171,7 @@ impl Editor {
         };
         let workspace = helix_loader::find_workspace().0;
         if doc.review.is_some()
+            || doc.review_opt_out.as_ref() == Some(commit)
             || doc.is_modified()
             || !doc.path().is_some_and(|path| path.starts_with(&workspace))
         {

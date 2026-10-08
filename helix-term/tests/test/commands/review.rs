@@ -1434,6 +1434,54 @@ async fn baseline_names_unsaved_buffers_whose_file_also_changed_on_disk() -> any
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn closing_a_review_survives_refreshes_of_the_same_baseline() -> anyhow::Result<()> {
+    let repo = Repo::new("a\n", "a\n", "a\n");
+    repo.write("b\n");
+    repo.stage();
+    git_ok(repo.dir.path(), &["commit", "-m", "b"]);
+    repo.write("c\n");
+    let head = git_ok(repo.dir.path(), &["rev-parse", "HEAD"]);
+    let parent = git_ok(repo.dir.path(), &["rev-parse", "HEAD~1"]);
+    let _cwd = Cwd::enter(repo.dir.path());
+    let mut app = repo.app()?;
+    let status = |app: &Application| app.editor.get_status().unwrap().0.to_string();
+    let revision = |app: &Application| {
+        let review = doc!(app.editor).review.as_ref()?;
+        Some(review.baseline().revision().map(str::to_owned))
+    };
+
+    send_keys(&mut app, ":review-baseline HEAD<ret>:review-close<ret>").await?;
+    assert_eq!(
+        status(&app),
+        format!("Review closed; :review {} resumes it", &head[..8])
+    );
+
+    // The hook's refresh and a reload leave the closed buffer alone.
+    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+    assert_eq!(revision(&app), None);
+    assert_eq!(
+        status(&app),
+        format!("Reviewing 0 buffers against {}; 1 closed", &head[..8])
+    );
+    send_keys(&mut app, ":reload<ret>").await?;
+    assert_eq!(revision(&app), None);
+
+    // A different baseline reviews it again.
+    send_keys(&mut app, ":review-baseline HEAD~1<ret>").await?;
+    assert_eq!(revision(&app), Some(Some(parent.clone())));
+
+    // An explicit :review clears the opt-out, so the same baseline keeps it reviewed.
+    send_keys(
+        &mut app,
+        ":review-close<ret>:review<ret>:review-baseline HEAD~1<ret>",
+    )
+    .await?;
+    assert_eq!(revision(&app), Some(None));
+    assert_eq!(doc!(app.editor).review_opt_out, None);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn repeating_the_baseline_only_reviews_buffers_changed_on_disk() -> anyhow::Result<()> {
     let repo = Repo::new("a\nb\n", "a\nb\n", "a\nB\n");
     let dir = repo.dir.path();
@@ -1949,7 +1997,11 @@ async fn buffers_reviewed_against_the_baseline_show_a_summary() -> anyhow::Resul
                 Some(&|app| assert_eq!(status(app), changed)),
             ),
             (
-                Some(":review-close<ret>:reload<ret>"),
+                // The baseline skips the unsaved buffer; once clean, reloading reviews it.
+                Some(concat!(
+                    "ix<esc>:review-baseline clear<ret>:review-baseline HEAD<ret>",
+                    "u:reload<ret>",
+                )),
                 Some(&|app| {
                     assert!(doc!(app.editor).review.is_some());
                     assert_eq!(status(app), changed);
