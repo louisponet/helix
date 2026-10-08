@@ -1342,6 +1342,68 @@ async fn uncomment_drops_the_latest_pending_comments() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn repeating_the_baseline_only_reviews_buffers_changed_on_disk() -> anyhow::Result<()> {
+    let repo = Repo::new("a\nb\n", "a\nb\n", "a\nB\n");
+    let dir = repo.dir.path();
+    let other = dir.join("other.txt");
+    fs::write(&other, "x\ny\n")?;
+    git_ok(dir, &["add", "other.txt"]);
+    git_ok(dir, &["commit", "-m", "other"]);
+    fs::write(&other, "x\nY\n")?;
+    let commit = git_ok(dir, &["rev-parse", "HEAD"]);
+    let short = commit[..8].to_owned();
+    let _cwd = Cwd::enter(dir);
+    let mut app = repo.app()?;
+
+    send_keys(&mut app, ":o other.txt<ret>j:review-baseline HEAD<ret>").await?;
+    assert_eq!(
+        app.editor.get_status().unwrap().0.as_ref(),
+        format!("Reviewing 2 buffers against {short}")
+    );
+    let other_state = |app: &Application| {
+        let doc = app.editor.document_by_path(&other).unwrap();
+        let (_, selection) = doc.selections().iter().next().unwrap();
+        (doc.text().to_string(), doc.version(), selection.clone())
+    };
+    let before = other_state(&app);
+
+    repo.write_external("a\nBB\n");
+    // Skipping is decided by modification time: other.txt is rewritten but keeps its time,
+    // so it is not reloaded.
+    let mtime = fs::metadata(&other)?.modified()?;
+    fs::write(&other, "rewritten\n")?;
+    fs::File::options()
+        .write(true)
+        .open(&other)?
+        .set_times(fs::FileTimes::new().set_modified(mtime))?;
+    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+
+    assert_eq!(
+        app.editor.get_status().unwrap().0.as_ref(),
+        format!("Reviewing 1 buffer against {short}; 1 unchanged")
+    );
+    assert_eq!(other_state(&app), before);
+    let file = app.editor.document_by_path(&repo.file).unwrap();
+    assert_eq!(file.text(), "a\nBB\n");
+    let review = file.review.as_ref().unwrap();
+    assert_eq!(review.baseline().revision(), Some(commit.as_str()));
+    assert_eq!(review.changed_lines().collect::<Vec<_>>(), [1..2]);
+
+    // A different baseline reviews every buffer again.
+    send_keys(&mut app, ":review-baseline HEAD~1<ret>").await?;
+    let (status, _) = app.editor.get_status().unwrap();
+    assert!(
+        status.starts_with("Reviewing 2 buffers against "),
+        "{status}"
+    );
+    assert_eq!(
+        app.editor.document_by_path(&other).unwrap().text(),
+        "rewritten\n"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn commit_review_handles_a_file_introduced_after_the_baseline() -> anyhow::Result<()> {
     let repo = Repo::new("initial\n", "initial\n", "initial\n");
     git_ok(repo.dir.path(), &["rm", "file.txt"]);

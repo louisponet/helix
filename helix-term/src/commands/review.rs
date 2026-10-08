@@ -505,11 +505,19 @@ pub(super) fn review_baseline(
         .filter(|doc| doc.path().is_some_and(|path| path.starts_with(&workspace)))
         .map(Document::id)
         .collect();
-    let (mut reviewed, mut unsaved, mut failed) = (0, 0, 0);
+    let (mut reviewed, mut unchanged, mut unsaved, mut failed) = (0, 0, 0, 0);
     for doc_id in doc_ids {
         let doc = doc!(cx.editor, &doc_id);
         if doc.is_modified() {
             unsaved += 1;
+            continue;
+        }
+        let current = doc
+            .review
+            .as_ref()
+            .is_some_and(|review| review.baseline().revision() == Some(commit.as_str()));
+        if refresh && current && doc.is_modified_on_disk().is_ok_and(|modified| !modified) {
+            unchanged += 1;
             continue;
         }
         let revision = match &doc.review {
@@ -545,6 +553,9 @@ pub(super) fn review_baseline(
         plural(reviewed, "buffer"),
         &commit[..8]
     );
+    if unchanged > 0 {
+        status.push_str(&format!("; {unchanged} unchanged"));
+    }
     if unsaved > 0 {
         status.push_str(&format!("; {unsaved} unsaved skipped"));
     }
