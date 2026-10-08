@@ -146,8 +146,9 @@ Version 1 batches are rejected; use matching editor and extension versions.
 
 ### Reviewing an agent's work
 
-With the pi extension in hook mode (see [Driving Helix from pi](#driving-helix-from-pi)),
-a review of an agent's turn goes like this:
+In hook mode (see [Driving Helix from pi](#driving-helix-from-pi)), the pi
+extension keeps Helix reviewing whatever the agent changes. A review then goes
+like this:
 
 1. Wait for the agent. The status line shows `Agent turn started`, and at the
    end of the turn `Agent turn done: 3 files changed since 1a2b3c4d
@@ -205,6 +206,25 @@ x = ":review-close"
 comment count; add it with, for example,
 `right = ["review", "diagnostics", "selections", "position"]` under
 `[editor.statusline]`.
+
+### Troubleshooting
+
+- No `pi hook attached` status: Helix was not listening when pi started (it
+  was started after pi, or in another workspace, which has its own socket).
+  Open Helix in the repository and run `/reload` in pi (or restart pi); the
+  next agent turn also attaches. Meanwhile `:review-baseline HEAD` re-pins the
+  baseline and reviews the open buffers by hand, but only pi sets the handoff
+  directory, so saving hands nothing back until it attaches.
+- `:review-files` says `no files changed since <commit>` although the agent did
+  work: it committed, and after your last handoff the next turn moved the
+  baseline to that commit. `:review-baseline <commit>` (for example
+  `:review-baseline HEAD~1`) re-pins an earlier one, until pi's next refresh
+  sends its own baseline again.
+- `... also changed on disk: :reload discards your edits, :w! overwrites the
+  agent's`: you and the agent edited the same file. `:reload` keeps the
+  agent's version, `:w!` keeps yours.
+- A stale `:review-diff`: it refreshes whenever `:review-baseline` runs, which
+  pi sends after each agent edit; run `:review-diff` to refresh it now.
 
 ### Driving Helix from pi
 
