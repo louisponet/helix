@@ -484,6 +484,11 @@ class Hook {
 	private timer?: NodeJS.Timeout;
 	private poller?: NodeJS.Timeout;
 	private attaching = false;
+	/**
+	 * The identity (inode and change time, as an inode number can be reused) of the Helix socket
+	 * last attached to; unset while no Helix is known to listen.
+	 */
+	private inode?: string;
 	private stopped = false;
 	private queue = Promise.resolve();
 	private seen = new Set<string>();
@@ -595,6 +600,9 @@ class Hook {
 		await this.sweep();
 		this.watcher = watch(this.outbox, (_event, name) => name && this.enqueue(name));
 		void readdir(this.outbox).then((names) => names.forEach((name) => this.enqueue(name)));
+		// Watches the socket: a new Helix (a new socket file) is attached to as soon as it appears.
+		this.poller = setInterval(() => void this.poll(), 2000);
+		this.poller.unref();
 	}
 
 	/** Puts batches claimed long ago by sessions that are gone back in the outbox. */
@@ -634,33 +642,34 @@ class Hook {
 
 	/** Points Helix at the outbox and restores the baseline. Returns whether Helix was reachable. */
 	async attach(): Promise<boolean> {
+		const inode = socketId(await stat(this.socket).catch(() => undefined));
 		const commands = [`review-handoff ${this.outbox}`];
 		const baseline = await this.reviewBaseline();
 		if (baseline) commands.push(`review-baseline ${baseline}`);
-		return this.send(commands);
-	}
-
-	/** Sends `commands` to Helix; while its socket is gone, polls for a new Helix to attach to. */
-	private async send(commands: string[]): Promise<boolean> {
-		const reachable = await helix(this.socket, commands);
-		if (!reachable) this.awaitHelix();
+		const reachable = await this.send(commands);
+		if (reachable) this.inode = inode;
 		return reachable;
 	}
 
-	private awaitHelix(): void {
-		if (this.poller || this.stopped) return;
-		this.poller = setInterval(() => void this.poll(), 2000);
-		this.poller.unref();
+	/** Sends `commands` to Helix; when no Helix listens, the poller attaches to the next one. */
+	private async send(commands: string[]): Promise<boolean> {
+		const reachable = await helix(this.socket, commands);
+		if (!reachable) this.inode = undefined;
+		return reachable;
 	}
 
+	/** Attaches again when the socket is a new file: Helix restarted, or started after pi. */
 	private async poll(): Promise<void> {
-		if (this.attaching || !(await stat(this.socket).catch(() => undefined))) return;
+		if (this.attaching || this.stopped) return;
+		const info = await stat(this.socket).catch(() => undefined);
+		if (!info) {
+			this.inode = undefined;
+			return;
+		}
+		if (socketId(info) === this.inode) return;
 		this.attaching = true;
 		try {
-			if (!(await this.attach())) return;
-			clearInterval(this.poller);
-			this.poller = undefined;
-			await this.announceAttach();
+			if (await this.attach()) await this.announceAttach();
 		} finally {
 			this.attaching = false;
 		}
@@ -866,6 +875,10 @@ class Hook {
 		await writeFile(`${file}.tmp`, `${JSON.stringify(this.state, null, 2)}\n`);
 		await rename(`${file}.tmp`, file);
 	}
+}
+
+function socketId(info: { ino: number; ctimeMs: number } | undefined): string | undefined {
+	return info && `${info.ino}:${info.ctimeMs}`;
 }
 
 function readState(path: string): Promise<HookState | undefined> {

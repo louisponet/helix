@@ -1141,6 +1141,29 @@ test("sessions are named pi-N in Helix, and Helix reviews against the oldest unr
 	assert.equal(lines[0], `review-baseline ${second}`, "pi-1's baseline was handed back");
 });
 
+test("a Helix restarted on the same socket is attached again without waiting for a failed send", async (t) => {
+	const w = workspace(t);
+	const socket = join(w.root, "helix.sock");
+	withEnv(t, { HELIX_COMMAND_SOCKET: socket });
+	const repo = realpathSync(w.repo);
+	w.stage("a.rs", "a\n");
+	w.commit();
+	const outbox = join(repo, ".pi", "helix-review", "outbox");
+	const first = await fakeHelix(t, socket);
+
+	const session = piSession(repo);
+	t.after(() => session.emit("session_shutdown"));
+	await session.emit("session_start", { reason: "startup" });
+	assert.deepEqual(first.lines, [`review-handoff ${outbox}`, "echo pi hook attached as pi-1"]);
+
+	// Helix quits and a new one listens on the same path; pi sends nothing meanwhile.
+	await first.quit();
+	const second = await fakeHelix(t, socket);
+	await until(() => second.lines.length === 2, "the new Helix to be attached");
+	assert.deepEqual(second.lines, [`review-handoff ${outbox}`, "echo pi hook attached as pi-1"]);
+	assert.equal(first.lines.length, 2);
+});
+
 test("an unreachable Helix never fails the hook, and an empty handoff is dropped but acknowledged", async (t) => {
 	const w = workspace(t);
 	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });

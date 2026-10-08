@@ -120,11 +120,12 @@ version moves into the first session's file. Ignore `.pi/` in Git.
   `review-handoff <outbox>` (even in a repository without a state file yet),
   restores `review-baseline <commit>` from the state when there is one,
   and echoes `pi hook attached as pi-1` (with `, baseline <commit>` when one was
-  restored), so the status line shows the link is live. While no Helix
-  listens on the socket (not started yet, or quit after attaching), pi checks
-  for the socket every 2 s, silently, and attaches the same way once a Helix
-  is there, so a Helix started after pi, or restarted, is picked up without a
-  new turn.
+  restored), so the status line shows the link is live. pi also checks the
+  socket every 2 s, silently: when it appears, or is a new file (its inode and
+  change time differ from the one attached to, as after a Helix restart), pi
+  attaches the same way, so a Helix started after pi, or restarted, is picked
+  up within 2 s without a new turn or a failed send. A send that finds no
+  Helix listening also makes the next check attach again.
 - After `edit`, `write` and `bash` tool results (coalesced within 200 ms) and
   at the end of the turn pi sends `review-baseline <commit>` again, which
   refreshes Helix's review.
