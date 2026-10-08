@@ -51,13 +51,18 @@ interface FileState {
 	git: Map<string, GitEntry>;
 }
 
+/** What the reviewer asks the agent to do with a handoff, beyond the edits and comments. */
+type ReviewRequest = { kind: "commit-staged"; subject?: string } | { kind: "message"; text: string };
+
 class ReviewBatch {
 	files: ReviewFile[];
 	comments: ReviewComment[];
+	request?: ReviewRequest;
 
-	constructor(files: ReviewFile[], comments: ReviewComment[]) {
+	constructor(files: ReviewFile[], comments: ReviewComment[], request?: ReviewRequest) {
 		this.files = files;
 		this.comments = comments;
+		this.request = request;
 	}
 
 	static async read(path: string): Promise<ReviewBatch> {
@@ -134,8 +139,9 @@ class ReviewBatch {
 			return comment;
 		});
 
-		if (files.length === 0 && comments.length === 0) throw new BatchError("it has no files or comments");
-		return new ReviewBatch(files, comments);
+		const request = top.request === undefined ? undefined : parseRequest(top.request);
+		if (files.length === 0 && comments.length === 0 && !request) throw new BatchError("it has no files or comments");
+		return new ReviewBatch(files, comments, request);
 	}
 
 	async inspect(): Promise<Map<string, FileState>> {
@@ -249,6 +255,27 @@ function list(value: unknown, at: string): unknown[] {
 function text(value: unknown, at: string): string {
 	if (typeof value !== "string") throw new BatchError(`${at} must be a string`);
 	return value;
+}
+
+function parseRequest(value: unknown): ReviewRequest {
+	const request = fields(value, "request");
+	if (request.kind === "commit-staged") {
+		return request.subject === undefined || request.subject === null
+			? { kind: "commit-staged" }
+			: { kind: "commit-staged", subject: text(request.subject, "request.subject") };
+	}
+	if (request.kind === "message") return { kind: "message", text: text(request.text, "request.text") };
+	throw new BatchError(`request.kind must be "commit-staged" or "message"`);
+}
+
+/** The "User request" section of a handoff message. */
+function requestSection(request: ReviewRequest): string[] {
+	if (request.kind === "message") return ["User request:", ...quote("Instruction", request.text)];
+	const subject = request.subject ? ` Use this subject: ${JSON.stringify(request.subject)}.` : "";
+	return [
+		"User request:",
+		`Commit exactly what is staged in the git index: run \`git commit\` without \`-a\` and without staging anything first, with a Conventional Commit message derived from \`git diff --cached\`.${subject} Do not stage, unstage or modify anything else, leave unstaged changes alone, and report the commit hash.`,
+	];
 }
 
 function absolutePath(value: unknown, at: string): string {
@@ -576,18 +603,21 @@ class Hook {
 				files.push({ path: file, user_edits: { against, ...capHunks(hunks) }, agent_comments: agentComments, review_comments: reviewComments });
 			}
 		}
-		if (files.length > 0) {
+		const request = batch.request;
+		if (files.length > 0 || request) {
 			const details = {
 				format: "helix-review-handoff",
 				version: 1,
 				baseline: this.state.baseline?.commit_oid ?? null,
 				files,
+				...(request ? { request } : {}),
 			};
 			const content = [
 				`The user reviewed your changes in Helix and saved ${files.length} file(s).`,
 				"Re-read those files from disk and act on the handoff below.",
 				...quote("Handoff", JSON.stringify(details, null, 2)),
 				"Integrate the user's edits and never revert them. Address each AGENT: comment and delete its marker line or comment once handled. Then continue editing or committing normally; that refreshes the review in Helix.",
+				...(request ? requestSection(request) : []),
 			].join("\n");
 			this.pi.sendMessage(
 				{ customType: "helix-review:handoff", content, display: true, details },
@@ -597,7 +627,7 @@ class Hook {
 		if (this.state.baseline) this.state.baseline.acknowledged = true;
 		await this.save();
 		await unlink(path);
-		await this.echo(`pi received your review: ${receipt(files)}`);
+		await this.echo(`pi received your review: ${receipt(files, request)}`);
 	}
 
 	private save(): Promise<void> {
@@ -625,9 +655,13 @@ function capHunks(hunks: string[]): { hunks: string[]; truncated: boolean } {
 }
 
 /** Summarizes a handoff for the reviewer, e.g. "1 file with edits, 2 AGENT comments". */
-function receipt(files: { user_edits: { hunks: string[] }; agent_comments: unknown[]; review_comments: unknown[] }[]): string {
+function receipt(
+	files: { user_edits: { hunks: string[] }; agent_comments: unknown[]; review_comments: unknown[] }[],
+	request?: ReviewRequest,
+): string {
 	const count = (n: number, one: string, many: string) => (n > 0 ? [`${n} ${n === 1 ? one : many}`] : []);
 	const parts = [
+		...(request ? [request.kind === "commit-staged" ? "commit request" : "message"] : []),
 		...count(files.filter((file) => file.user_edits.hunks.length > 0).length, "file with edits", "files with edits"),
 		...count(files.reduce((n, file) => n + file.agent_comments.length, 0), "AGENT comment", "AGENT comments"),
 		...count(files.reduce((n, file) => n + file.review_comments.length, 0), "review comment", "review comments"),

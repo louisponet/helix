@@ -100,6 +100,7 @@ updated Helix.
 | `version`  | number | Schema version, `2`. |
 | `files`    | array  | Every file reviewed since the previous export (including files without comments and reviews closed since), in no particular order. Each path appears once. |
 | `comments` | array  | Pending comments in the order they were made. May be empty. |
+| `request`  | object | Optional. What the reviewer asks the agent to do besides the edits and comments: `{ "kind": "commit-staged", "subject"?: string }` (from `:review-commit [subject]`: commit exactly what is staged in the index) or `{ "kind": "message", "text": string }` (from `:review-send <text>`). A batch with a request may have no files or comments. |
 
 There is no batch-wide baseline.
 
@@ -195,6 +196,7 @@ quoted as a fenced JSON block in its content, is:
 | `files[].user_edits.truncated` | `true` when hunks were omitted that way, else `false`. |
 | `files[].agent_comments` | Every line of the saved file matching `/\bAGENT:\s*(.+)$/`: 1-based `line`, the request `text`, and `new` when the line is not in the compared-against content. |
 | `files[].review_comments` | The batch's comments for the file, with the batch fields except `path` and `baseline`. |
+| `request` | The batch's `request`, when it has one. The message content then ends with a "User request" section: for `commit-staged`, an instruction to commit exactly what is staged (`git commit` without `-a`, a Conventional Commit message derived from `git diff --cached`, the subject if given), touch nothing else and report the commit hash; for `message`, the text verbatim. |
 
 Files without edits, markers or comments are omitted; a handoff with no files
-is not sent.
+and no request is not sent.

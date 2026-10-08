@@ -786,14 +786,36 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	assert.match(truncated.hunks[0], /^\.\.\. 1 more hunk \(30\d lines\) omitted; read the file$/);
 	writeFileSync(file, saved);
 
+	// A request makes an otherwise empty batch a handoff, with the instruction spelled out.
+	const requested = (name: string, request: unknown) => {
+		const path = join(outbox, name);
+		writeFileSync(`${path}.tmp`, JSON.stringify({ format: "helix-review-batch", version: 2, files: [], comments: [], request }));
+		renameSync(`${path}.tmp`, path);
+	};
+	requested("1-4.json", { kind: "commit-staged", subject: "fix: capitalize b" });
+	await until(() => lines.length === 13, "the commit request receipt");
+	assert.equal(lines[12], "echo pi received your review: commit request");
+	assert.equal(session.messages.length, 3);
+	const commit = session.messages[2].message;
+	assert.deepEqual(commit.details.files, []);
+	assert.deepEqual(commit.details.request, { kind: "commit-staged", subject: "fix: capitalize b" });
+	assert.match(commit.content, /User request:\nCommit exactly what is staged in the git index: run `git commit` without `-a`/);
+	assert.match(commit.content, /Use this subject: "fix: capitalize b"\..*leave unstaged changes alone, and report the commit hash\./);
+	requested("1-5.json", { kind: "message", text: "Please also update the changelog." });
+	await until(() => lines.length === 14, "the message receipt");
+	assert.equal(lines[13], "echo pi received your review: message");
+	const instruction = session.messages[3].message;
+	assert.deepEqual(instruction.details.request, { kind: "message", text: "Please also update the changelog." });
+	assert.match(instruction.content, /User request:\nInstruction:\n```\nPlease also update the changelog\.\n```$/);
+
 	await session.emit("agent_start");
-	assert.deepEqual(lines.slice(12), [`review-handoff ${outbox}`, `review-baseline ${next}`, started], "an acknowledged baseline moves to HEAD");
+	assert.deepEqual(lines.slice(14), [`review-handoff ${outbox}`, `review-baseline ${next}`, started], "an acknowledged baseline moves to HEAD");
 
 	const restarted = piSession(repo);
 	t.after(() => restarted.emit("session_shutdown"));
 	await restarted.emit("session_start", { reason: "startup" });
 	assert.deepEqual(
-		lines.slice(15),
+		lines.slice(17),
 		[`review-handoff ${outbox}`, `review-baseline ${next}`, `echo pi hook attached, baseline ${next.slice(0, 8)}`],
 		"session_start restores the baseline and says the link is live",
 	);
@@ -803,7 +825,7 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	unlinkSync(join(repo, "new.rs"));
 	await restarted.emit("agent_start");
 	await restarted.emit("agent_end", { messages: [] });
-	assert.deepEqual(lines.slice(18), [
+	assert.deepEqual(lines.slice(20), [
 		`review-handoff ${outbox}`,
 		`review-baseline ${next}`,
 		started,
