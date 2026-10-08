@@ -1423,14 +1423,21 @@ pub enum CloseError {
 
 impl Editor {
     /// The directory review batches are exported to: the `:review-handoff` one, else the pi
-    /// extension's `<workspace>/.pi/helix-review/outbox` mailbox when it exists.
+    /// extension's `<workspace>/.pi/helix-review/outbox` mailbox when it exists and every
+    /// reviewed or pending path is inside the workspace, so the agent there gets only its files.
     pub fn review_handoff_dir(&self) -> Option<PathBuf> {
-        self.review_handoff.clone().or_else(|| {
-            let outbox = helix_loader::find_workspace()
-                .0
-                .join(".pi/helix-review/outbox");
-            outbox.is_dir().then_some(outbox)
-        })
+        if let Some(dir) = &self.review_handoff {
+            return Some(dir.clone());
+        }
+        let workspace = helix_loader::find_workspace().0;
+        let outbox = workspace.join(".pi/helix-review/outbox");
+        let inside = self
+            .documents()
+            .filter(|doc| doc.review.is_some())
+            .filter_map(|doc| doc.path())
+            .chain(self.review_batch.files())
+            .all(|path| path.starts_with(&workspace));
+        (inside && outbox.is_dir()).then_some(outbox)
     }
 
     pub fn new(

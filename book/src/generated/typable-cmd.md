@@ -104,7 +104,7 @@
 | `:review-toggle-stage` | Stage the hunk under the cursor, or unstage it if it is already staged (Enter while reviewing). |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept for :review-export. |
 | `:review-baseline` | Review every unmodified buffer in the workspace, and buffers opened later, against a commit revision such as HEAD. Repeating the same commit refreshes the reviews; `clear` closes them. |
-| `:review-handoff` | On every write of a reviewed buffer, export a review batch to a new file in the given directory; auto-save skips reviewed buffers meanwhile. Without it, batches go to `<workspace>/.pi/helix-review/outbox` when that directory exists. `clear` returns to that default. |
+| `:review-handoff` | On every write of a reviewed buffer, export a review batch to a new file in the given directory; auto-save skips reviewed buffers meanwhile. Without it, batches go to `<workspace>/.pi/helix-review/outbox` when that directory exists and every reviewed file is in the workspace. `clear` returns to that default. |
 | `:review-send` | Export a review batch to the handoff directory now, as a write would, without writing any file, with optional text as an instruction to the agent. Refuses while a reviewed buffer has unsaved changes. |
 | `:review-commit` | Hand the review back like :review-send, asking the agent to commit exactly what is staged in the git index, with an optional commit subject. Refuses when nothing is staged. |
 | `:review-diff` | Show a unified diff of every workspace file changed since the review baseline commit in a scratch buffer. |

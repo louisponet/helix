@@ -2741,6 +2741,22 @@ async fn handoff_defaults_to_the_pi_mailbox_in_the_workspace() -> anyhow::Result
         serde_json::json!(helix_stdx::path::canonicalize(&repo.file))
     );
 
+    // A reviewed file outside the workspace keeps its batches out of the workspace's mailbox.
+    let outside = Repo::new("other\n", "other\n", "other\n");
+    let keys = format!(
+        ":review-baseline clear<ret>:o {}<ret>:review<ret>",
+        outside.file.display()
+    );
+    send_keys(&mut app, &keys).await?;
+    assert!(
+        doc!(app.editor).review.is_some(),
+        "{:?}",
+        app.editor.get_status()
+    );
+    send_keys(&mut app, ":review-send<ret>").await?;
+    assert_error(&app, "no review handoff directory");
+    assert_eq!(fs::read_dir(&outbox)?.count(), 1);
+
     send_keys(&mut app, ":q!<ret>").await?;
     Ok(())
 }
