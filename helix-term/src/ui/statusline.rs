@@ -170,6 +170,7 @@ where
         helix_view::editor::StatusLineElement::Register => render_register,
         helix_view::editor::StatusLineElement::CurrentWorkingDirectory => render_cwd,
         helix_view::editor::StatusLineElement::CodeActionHint => render_code_action_hint,
+        helix_view::editor::StatusLineElement::Review => render_review,
     }
 }
 
@@ -603,6 +604,29 @@ where
         .to_string_lossy()
         .to_string();
     write(context, cwd.into())
+}
+
+fn render_review<'a, F>(context: &mut RenderContext<'a>, write: F)
+where
+    F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
+{
+    let Some(review) = &context.doc.review else {
+        return;
+    };
+    let mut text = match review.baseline().revision() {
+        Some(commit) => format!(" review {}", &commit[..8]),
+        None => " review index".to_owned(),
+    };
+    let comments = context.editor.review_batch.comments().len();
+    if comments > 0 {
+        let suffix = if comments == 1 { "" } else { "s" };
+        text.push_str(&format!(" {comments} comment{suffix}"));
+    }
+    if review.is_suspended() {
+        text.push_str(" suspended");
+    }
+    text.push(' ');
+    write(context, text.into());
 }
 
 fn render_code_action_hint<'a, F>(context: &mut RenderContext<'a>, write: F)

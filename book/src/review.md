@@ -186,7 +186,10 @@ r = ":review-refresh"
 x = ":review-close"
 ```
 
-`:review-comment` takes the comment text, so type it at the `:` prompt.
+`:review-comment` takes the comment text, so type it at the `:` prompt. The
+`review` statusline element shows the baseline and the pending comment count,
+for example `right = ["review", "diagnostics", "selections", "position"]` under
+`[editor.statusline]`.
 
 ### Driving Helix from pi
 

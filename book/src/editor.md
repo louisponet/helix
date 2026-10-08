@@ -160,6 +160,7 @@ The following statusline elements can be configured:
 | `version-control` | The current branch name or detached commit hash of the opened workspace |
 | `register` | The current selected register |
 | `code-action-hint` | Indicator for when code actions are available |
+| `review` | While the buffer is [reviewed](./review.md): `review index` or `review <commit>`, followed by the number of pending comments and `suspended` when the review is suspended |
 
 ### `[editor.lsp]` Section
 

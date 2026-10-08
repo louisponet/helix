@@ -805,6 +805,9 @@ pub enum StatusLineElement {
 
     /// Indicator for when code actions are available
     CodeActionHint,
+
+    /// The review baseline, pending review comments and suspension, while the buffer is reviewed
+    Review,
 }
 
 // Cursor shape is read and used on every rendered frame and so needs

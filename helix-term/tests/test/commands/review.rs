@@ -16,7 +16,7 @@ use helix_term::{
 };
 use helix_view::{
     current_ref, doc,
-    editor::{AutoSaveAfterDelay, Severity},
+    editor::{AutoSaveAfterDelay, Severity, StatusLineElement},
     graphics::Rect,
     input::parse_macro,
     review::{OldBlock, ReviewBaseline},
@@ -1314,13 +1314,27 @@ async fn uncomment_drops_the_latest_pending_comments() -> anyhow::Result<()> {
             .collect()
     };
     let status = |app: &Application| app.editor.get_status().unwrap().0.to_string();
+    let head = git_ok(repo.dir.path(), &["rev-parse", "HEAD"]);
+    let mut config = test_config();
+    config.editor.statusline.right = vec![StatusLineElement::Review];
+    let review_element = |app: &Application| {
+        let line = statusline(app);
+        line.split_once(" review ")
+            .map(|(_, element)| element.trim_end().to_owned())
+    };
 
     test_key_sequences(
-        &mut repo.app()?,
+        &mut AppBuilder::new()
+            .with_config(config)
+            .with_file(&repo.file, None)
+            .build()?,
         vec![
             (
                 Some(":review-uncomment<ret>"),
-                Some(&|app| assert_error(app, "no pending review comments")),
+                Some(&|app| {
+                    assert_error(app, "no pending review comments");
+                    assert_eq!(review_element(app), None);
+                }),
             ),
             (
                 Some(concat!(
@@ -1331,6 +1345,7 @@ async fn uncomment_drops_the_latest_pending_comments() -> anyhow::Result<()> {
                 Some(&|app| {
                     assert_eq!(comments(app), ["one", "two", "three"]);
                     assert_eq!(status(app), "Dropped 1 review comment, 3 pending");
+                    assert_eq!(review_element(app).as_deref(), Some("index 3 comments"));
                 }),
             ),
             (
@@ -1338,6 +1353,7 @@ async fn uncomment_drops_the_latest_pending_comments() -> anyhow::Result<()> {
                 Some(&|app| {
                     assert_eq!(comments(app), ["one"]);
                     assert_eq!(status(app), "Dropped 2 review comments, 1 pending");
+                    assert_eq!(review_element(app).as_deref(), Some("index 1 comment"));
                 }),
             ),
             (
@@ -1352,6 +1368,12 @@ async fn uncomment_drops_the_latest_pending_comments() -> anyhow::Result<()> {
                 Some(&|app| {
                     assert!(comments(app).is_empty());
                     assert_error(app, "no pending review comments");
+                }),
+            ),
+            (
+                Some(":review HEAD<ret>"),
+                Some(&|app| {
+                    assert_eq!(review_element(app), Some(head[..8].to_owned()));
                 }),
             ),
         ],
