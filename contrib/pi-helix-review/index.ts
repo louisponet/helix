@@ -489,8 +489,10 @@ class Hook {
 	async announceEnd(): Promise<void> {
 		if (!this.state.baseline) return;
 		const count = Object.keys(this.state.snapshots).length;
+		const since = this.state.baseline.commit_oid.slice(0, 8);
+		if (count === 0) return this.echo(`Agent turn done: no file changes since ${since}`);
 		const files = count === 1 ? "1 file" : `${count} files`;
-		await this.echo(`Agent turn done: ${files} changed since ${this.state.baseline.commit_oid.slice(0, 8)} (:review-files)`);
+		await this.echo(`Agent turn done: ${files} changed since ${since} (:review-files)`);
 	}
 
 	async snapshot(): Promise<void> {

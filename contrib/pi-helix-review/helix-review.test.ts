@@ -765,6 +765,19 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	t.after(() => restarted.emit("session_shutdown"));
 	await restarted.emit("session_start", { reason: "startup" });
 	assert.deepEqual(lines.slice(14), [`review-handoff ${outbox}`, `review-baseline ${next}`], "session_start restores the baseline");
+
+	// A turn that leaves nothing changed since its (still sticky) baseline says so.
+	writeFileSync(file, "fn a() {}\n// AGENT: old request\nfn b() {}\n");
+	unlinkSync(join(repo, "new.rs"));
+	await restarted.emit("agent_start");
+	await restarted.emit("agent_end", { messages: [] });
+	assert.deepEqual(lines.slice(16), [
+		`review-handoff ${outbox}`,
+		`review-baseline ${next}`,
+		started,
+		`review-baseline ${next}`,
+		`echo Agent turn done: no file changes since ${next.slice(0, 8)}`,
+	]);
 });
 
 test("an unreachable Helix never fails the hook, and an empty handoff is dropped but acknowledged", async (t) => {
