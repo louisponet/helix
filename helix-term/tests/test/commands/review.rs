@@ -1476,14 +1476,23 @@ async fn closing_a_review_survives_refreshes_of_the_same_baseline() -> anyhow::R
     send_keys(&mut app, ":review-baseline HEAD~1<ret>").await?;
     assert_eq!(revision(&app), Some(Some(parent.clone())));
 
-    // An explicit :review clears the opt-out, so the same baseline keeps it reviewed.
+    // Plain :review resumes the editor-wide baseline rather than the index.
+    send_keys(&mut app, ":review-close<ret>:review<ret>").await?;
+    assert_eq!(revision(&app), Some(Some(parent.clone())));
+    assert_eq!(doc!(app.editor).review_opt_out, None);
+
+    // :review index compares against the index, and the same baseline then keeps it.
     send_keys(
         &mut app,
-        ":review-close<ret>:review<ret>:review-baseline HEAD~1<ret>",
+        ":review-close<ret>:review index<ret>:review-baseline HEAD~1<ret>",
     )
     .await?;
     assert_eq!(revision(&app), Some(None));
     assert_eq!(doc!(app.editor).review_opt_out, None);
+
+    // Without an editor-wide baseline, plain :review uses the index.
+    send_keys(&mut app, ":review-baseline clear<ret>:review<ret>").await?;
+    assert_eq!(revision(&app), Some(None));
     Ok(())
 }
 

@@ -66,7 +66,14 @@ pub(super) fn review(
     if event != PromptEvent::Validate {
         return Ok(());
     }
-    start_review(cx, args.get(0))
+    // Without an argument, the editor-wide baseline wins so a reviewer stays on the agent's commit.
+    let baseline = cx.editor.review_baseline.clone();
+    let revision = match args.get(0) {
+        Some("index") => None,
+        Some(revision) => Some(revision),
+        None => baseline.as_deref(),
+    };
+    start_review(cx, revision)
 }
 
 fn start_review(cx: &mut compositor::Context, revision: Option<&str>) -> anyhow::Result<()> {

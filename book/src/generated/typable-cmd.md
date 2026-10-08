@@ -87,7 +87,7 @@
 | `:pipe`, `:\|` | Pipe each selection to the shell command. |
 | `:pipe-to` | Pipe each selection to the shell command, ignoring output. |
 | `:run-shell-command`, `:sh`, `:!` | Run a shell command |
-| `:review` | Review the buffer against the git index, or a commit revision such as HEAD~1, showing old lines inline. |
+| `:review` | Review the buffer against the :review-baseline commit if one is set, else the git index, showing old lines inline. 'index' selects the git index, any other argument a commit revision such as HEAD~1. |
 | `:review-commits` | Choose a commit baseline from the latest 200 commits reachable from HEAD, then review against the current buffer. |
 | `:review-old` | Focus the old text nearest the cursor. It can be selected, yanked and commented on but not edited; Esc returns. |
 | `:review-refresh` | Reload an unmodified reviewed buffer from disk and refresh its index baseline or retain its selected commit. |

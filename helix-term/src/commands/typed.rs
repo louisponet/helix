@@ -3989,7 +3989,7 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "review",
         aliases: &[],
-        doc: "Review the buffer against the git index, or a commit revision such as HEAD~1, showing old lines inline.",
+        doc: "Review the buffer against the :review-baseline commit if one is set, else the git index, showing old lines inline. 'index' selects the git index, any other argument a commit revision such as HEAD~1.",
         fun: review::review,
         completer: CommandCompleter::none(),
         signature: Signature {

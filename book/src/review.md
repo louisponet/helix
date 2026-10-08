@@ -1,8 +1,9 @@
 ## Inline review
 
 `:review` compares the current buffer with the file's content staged in the git
-index, so only unstaged changes are shown. `:review <revision>` instead uses a
-commit snapshot; `:review-commits` opens a picker of recent commit baselines.
+index, so only unstaged changes are shown, unless an editor-wide
+`:review-baseline` is set: then it uses that commit. `:review index` always
+uses the index, and `:review <revision>` uses a commit snapshot; `:review-commits` opens a picker of recent commit baselines.
 For buffers within the [size limits](#size-limits), a clean buffer is first
 reloaded from disk, after the requested baseline is successfully loaded.
 Unsaved edits are kept; if the file also changed on disk, review refuses to start.
@@ -28,7 +29,8 @@ label such as `old lines 1-2 removed before line 1:`.
 
 | Command | Description |
 | --- | --- |
-| `:review` | Start or switch review to the git index. Fails for files that are not in the index or have unmerged (conflicted) entries. |
+| `:review` | Start or switch review to the `:review-baseline` commit when one is set, otherwise to the git index. |
+| `:review index` | Start or switch review to the git index. Fails for files that are not in the index or have unmerged (conflicted) entries. |
 | `:review <revision>` | Start or switch review to a commit, such as `HEAD~1`, a branch, tag or commit hash. |
 | `:review-commits` | Choose a baseline by hash or subject from the latest 200 commits reachable from `HEAD`. |
 | `:review-old` | Focus the old text nearest the cursor. |
@@ -66,7 +68,7 @@ commit even after the branch advances; choose another baseline explicitly to
 change the range. Missing files in a valid baseline commit are treated as empty,
 so files added later can be reviewed. Renames are not followed. Switching
 baselines preserves pending comments and their original snapshot metadata.
-Use `:review` without arguments to return to unstaged-only review.
+Use `:review index` to return to unstaged-only review.
 
 ### Old text
 
@@ -255,8 +257,8 @@ so only processes of the same user can connect; do not point
 `HELIX_COMMAND_SOCKET` into a directory other users can access.
 
 `:review-baseline <revision>` resolves the revision once and pins the commit
-for the editor. Every unmodified buffer in the workspace is reloaded from disk
-and reviewed against it; buffers with unsaved changes are skipped and picked up
+for the editor; while it is set, plain `:review` uses it too. Every unmodified
+buffer in the workspace is reloaded from disk and reviewed against it; buffers with unsaved changes are skipped and picked up
 on their next write. If such a buffer's file also changed on disk, the status
 names it (for example `; review.rs also changed on disk: :reload discards your
 edits, :w! overwrites the agent's`): you and the agent edited the same file, so
