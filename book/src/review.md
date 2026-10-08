@@ -41,7 +41,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. `clear` closes all reviews. |
 | `:review-handoff <dir>` | Export a batch to `<dir>` on every write of a reviewed buffer. `clear` stops it. |
 | `:review-send` | Export the handoff batch now without writing any file, for example to acknowledge a review without edits. |
-| `:review-diff` | Show one unified diff of every file changed since the review baseline in a scratch buffer; running it again refreshes that buffer. |
+| `:review-diff` | Show one unified diff of every file changed since the review baseline in a read-only scratch buffer; running it again refreshes that buffer. File headers are workspace-relative paths (`--- <path>`), so `gf` opens a file. |
 | `:review-files` | Pick a file added (`A`), modified (`M`) or deleted (`D`) since the review baseline, and open it at its first change. |
 
 ### Choosing a commit range

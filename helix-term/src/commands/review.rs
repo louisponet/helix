@@ -928,7 +928,8 @@ pub(super) fn review_diff(
         }
         let hunks = helix_vcs::unified_diff(&before, &after);
         if !hunks.is_empty() {
-            diff.push_str(&format!("--- a/{name}\n+++ b/{name}\n{hunks}"));
+            // Bare workspace-relative paths, so `gf` opens the file.
+            diff.push_str(&format!("--- {name}\n+++ {name}\n{hunks}"));
         }
     }
 
@@ -951,6 +952,9 @@ pub(super) fn review_diff(
     .with_selection(Selection::point(0));
     doc.apply(&transaction, view.id);
     doc.append_changes_to_history(view);
+    // Generated text: nothing to save, so quitting and auto-save leave it alone.
+    doc.reset_modified();
+    doc.readonly = true;
     doc.set_language_by_language_id("diff", &loader)?;
     view.ensure_cursor_in_view(doc, scrolloff);
     cx.editor.set_status(format!(

@@ -1591,6 +1591,7 @@ async fn review_diff_shows_every_change_in_one_scratch_buffer() -> anyhow::Resul
         let doc = doc!(app.editor);
         assert_eq!(doc.path(), None);
         assert_eq!(doc.language_name(), Some("diff"));
+        assert!(doc.readonly && !doc.is_modified());
         (doc.id(), doc.text().to_string())
     };
 
@@ -1600,10 +1601,10 @@ async fn review_diff_shows_every_change_in_one_scratch_buffer() -> anyhow::Resul
     send_keys(&mut app, ":review-baseline HEAD<ret>:review-diff<ret>").await?;
     let (first, text) = diff_buffer(&app);
     assert!(
-        text.contains("--- a/file.txt\n+++ b/file.txt\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"),
+        text.contains("--- file.txt\n+++ file.txt\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"),
         "{text}"
     );
-    assert!(text.contains("--- a/new.txt\n+++ b/new.txt\n"), "{text}");
+    assert!(text.contains("--- new.txt\n+++ new.txt\n"), "{text}");
     assert!(text.contains("\n+n\n"), "{text}");
     let documents = app.editor.documents().count();
 
