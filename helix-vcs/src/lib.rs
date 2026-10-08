@@ -138,6 +138,21 @@ impl DiffProviderRegistry {
         Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
     }
 
+    /// Stages the worktree state of `paths` in the repository at `cwd` like `git add -A` limited
+    /// to them, returning how many paths changed in the index.
+    pub fn stage_paths(&self, cwd: &Path, paths: &[PathBuf], trust_full: bool) -> Result<usize> {
+        let mut first_err = None;
+        for provider in &self.providers {
+            match provider.stage_paths(cwd, paths, trust_full) {
+                Ok(count) => return Ok(count),
+                Err(err) => {
+                    first_err.get_or_insert(err);
+                }
+            }
+        }
+        Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
+    }
+
     /// The commit one step older or newer than `commit` towards `HEAD`, with how many commits it is
     /// behind `HEAD`.
     pub fn step_commit(
@@ -309,6 +324,14 @@ impl DiffProvider {
         match self {
             #[cfg(feature = "git")]
             Self::Git => git::get_commit_history(file, trust_full),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn stage_paths(&self, cwd: &Path, paths: &[PathBuf], trust_full: bool) -> Result<usize> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::stage_paths(cwd, paths, trust_full),
             Self::None => bail!("No diff support compiled in"),
         }
     }

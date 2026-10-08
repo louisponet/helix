@@ -4145,6 +4145,18 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         },
     },
     TypableCommand {
+        name: "review-commit-all",
+        aliases: &[],
+        doc: "Stage every file changed since the review baseline (modified, deleted and untracked, like git add -A limited to them), then hand back like :review-commit with an optional subject and a leading @label to address a pi session.",
+        fun: review::review_commit_all,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(1)),
+            raw_after: Some(0),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
         name: "review-next",
         aliases: &[],
         doc: "Go to the next changed block, continuing with the first block of the next file changed since the review baseline (in :review-files order, wrapping around).",

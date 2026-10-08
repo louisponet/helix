@@ -194,6 +194,7 @@
 | `review_refresh_buffer` | Refresh the review of the buffer | normal: `` Gb ``, select: `` Gb `` |
 | `review_commit_staged` | Hand the review back asking to commit the staged hunks | normal: `` GC ``, select: `` GC `` |
 | `review_send_handoff` | Hand the review back now | normal: `` GS ``, select: `` GS `` |
+| `review_commit_all` | Stage every changed file and hand the review back asking to commit | normal: `` GA ``, select: `` GA `` |
 | `review_next_change` | Go to the next review change, across changed files | normal: `` Gn ``, select: `` Gn `` |
 | `review_prev_change` | Go to the previous review change, across changed files | normal: `` GN ``, select: `` GN `` |
 | `review_baseline_older` | Move the review baseline one commit older | normal: `` G<minus> ``, select: `` G<minus> `` |

@@ -33,6 +33,7 @@ const OLD_FOCUS_TYPABLE: &[&str] = &[
     "review-export",
     "review-send",
     "review-commit",
+    "review-commit-all",
     "review-close",
     "review-old",
     "review-next",
@@ -51,6 +52,7 @@ const OLD_FOCUS_STATIC: &[&str] = &[
     "review_revert_change",
     "review_close_buffer",
     "review_commit_staged",
+    "review_commit_all",
     "review_send_handoff",
     "review_next_change",
     "review_prev_change",
@@ -1190,6 +1192,86 @@ pub(super) fn review_commit(
     Ok(())
 }
 
+/// Refuses `command` while a reviewed buffer has unsaved changes.
+fn ensure_reviews_saved(editor: &Editor, command: &str) -> anyhow::Result<()> {
+    let unsaved: Vec<_> = editor
+        .documents()
+        .filter(|doc| doc.review.is_some() && doc.is_modified())
+        .map(|doc| doc.display_name().into_owned())
+        .collect();
+    ensure!(
+        unsaved.is_empty(),
+        "reviewed buffers have unsaved changes: {}; write or undo them before {command}",
+        unsaved.join(", ")
+    );
+    Ok(())
+}
+
+pub(super) fn review_commit_all(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    if let Err(err) = ensure_review(cx) {
+        log::info!("not enabling review: {err:#}");
+    }
+    let (commit, changes) = changed_files(cx)?;
+    ensure!(!changes.is_empty(), "no changes since {}", &commit[..8]);
+    ensure_reviews_saved(cx.editor, ":review-commit-all")?;
+    ensure!(
+        cx.editor.review_handoff_dir().is_some(),
+        "no review handoff directory, use :review-handoff <dir> first"
+    );
+    let workspace = helix_loader::find_workspace().0;
+    let trust_full = cx
+        .editor
+        .workspace_trust
+        .query(&workspace, TrustQuery::Git)
+        .is_trusted();
+    let paths: Vec<PathBuf> = changes
+        .iter()
+        .map(|change| change.path().to_path_buf())
+        .collect();
+    cx.editor
+        .diff_providers
+        .stage_paths(&workspace, &paths, trust_full)?;
+    // Reviews mark staged hunks from the index they last saw.
+    for path in &paths {
+        let Ok((index, _)) = cx.editor.diff_providers.get_index_base(path, trust_full) else {
+            continue;
+        };
+        let head = cx
+            .editor
+            .diff_providers
+            .get_commit_base(path, "HEAD", trust_full)
+            .ok();
+        if let Some(doc) = cx.editor.document_by_path_mut(path) {
+            let text = doc.text().clone();
+            if let Some(review) = doc.review.as_mut() {
+                review.set_index(&index, head.as_ref().map(|head| &head.data[..]), &text);
+            }
+        }
+    }
+    refresh_review_diff(cx.editor);
+    let (target, subject) = split_target(args.first());
+    hand_off(
+        cx.editor,
+        Some(ReviewRequest::CommitStaged {
+            subject: subject.map(str::to_owned),
+        }),
+        target,
+        ":review-commit-all",
+    )?;
+    cx.editor.set_status(format!(
+        "Staged {}; handed off: commit staged hunks",
+        plural(paths.len(), "file")
+    ));
+    Ok(())
+}
+
 /// Splits a leading `@label` naming the pi session to address off a command's text, returning
 /// the label and the rest of the text, if any is left.
 fn split_target(text: Option<&str>) -> (Option<String>, Option<&str>) {
@@ -1218,16 +1300,7 @@ fn hand_off(
     let dir = editor
         .review_handoff_dir()
         .context("no review handoff directory, use :review-handoff <dir> first")?;
-    let unsaved: Vec<_> = editor
-        .documents()
-        .filter(|doc| doc.review.is_some() && doc.is_modified())
-        .map(|doc| doc.display_name().into_owned())
-        .collect();
-    ensure!(
-        unsaved.is_empty(),
-        "reviewed buffers have unsaved changes: {}; write or undo them before {command}",
-        unsaved.join(", ")
-    );
+    ensure_reviews_saved(editor, command)?;
     if let Some(request) = request {
         editor.review_batch.set_request(request);
     }

@@ -2173,6 +2173,43 @@ async fn g_n_walks_changes_across_files_and_wraps_around() -> anyhow::Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn commit_all_stages_every_changed_file_and_asks_for_a_commit() -> anyhow::Result<()> {
+    let repo = Repo::new("a\n", "a\n", "A\n");
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    fs::write(dir.join("gone.txt"), "gone\n")?;
+    git_ok(dir, &["add", "gone.txt"]);
+    git_ok(dir, &["commit", "-m", "gone"]);
+    fs::remove_file(dir.join("gone.txt"))?;
+    fs::write(dir.join("new.txt"), "new\n")?;
+    let outbox = tempfile::tempdir()?;
+    let mut app = repo.app()?;
+    let handoff = format!(":review-handoff {}<ret>", outbox.path().display());
+    send_keys(&mut app, &handoff).await?;
+
+    send_keys(&mut app, ":review-commit-all fix: everything<ret>").await?;
+    assert_eq!(
+        app.editor.get_status().unwrap().0,
+        "Staged 3 files; handed off: commit staged hunks"
+    );
+    let staged = git_ok(dir, &["diff", "--cached", "--name-status"]);
+    assert_eq!(staged, "M\tfile.txt\nD\tgone.txt\nA\tnew.txt");
+    assert_eq!(git_ok(dir, &["diff", "--name-only"]), "");
+    let batches: Vec<_> = fs::read_dir(outbox.path())?.collect::<Result<_, _>>()?;
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(batches[0].path())?)?;
+    assert_eq!(
+        json["request"],
+        serde_json::json!({ "kind": "commit-staged", "subject": "fix: everything" })
+    );
+
+    git_ok(dir, &["commit", "-m", "all"]);
+    send_keys(&mut app, ":review-baseline HEAD<ret>GA").await?;
+    assert_error(&app, "no changes since");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_g_menu_runs_review_commands_next_to_user_keys() -> anyhow::Result<()> {
     let repo = Repo::new("one\ntwo\n", "one\ntwo\n", "one\nTWO\n");
     let _cwd = Cwd::enter(repo.dir.path());

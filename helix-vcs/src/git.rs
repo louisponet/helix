@@ -201,6 +201,109 @@ pub fn update_index_entry(
     Ok(id)
 }
 
+/// Stages the worktree state of `paths` (files of the repository at `cwd`) like
+/// `git add -A -- <paths>`: present files get their content (new ones a new entry), missing ones
+/// lose their entry. Writes the index once and returns how many paths changed in it.
+pub fn stage_paths(cwd: &Path, paths: &[std::path::PathBuf], trust_full: bool) -> Result<usize> {
+    use gix::index::entry::{Mode, Stat};
+
+    let repo = open_repo(cwd, trust_full)
+        .context("failed to open git repo")?
+        .to_thread_local();
+    let work_dir = repo.workdir().context("repo has no worktree")?.to_owned();
+    let index_path = repo.index_path();
+    let lock = gix::lock::File::acquire_to_update_resource(
+        &index_path,
+        gix::lock::acquire::Fail::Immediately,
+        None,
+    )
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "the git index is locked ({}.lock exists): another git command is running",
+            index_path.display()
+        )
+    })?;
+    let mut index = repo.open_index()?;
+    if index.link().is_some() || index.is_sparse() {
+        bail!("split or sparse git indexes are not supported; stage with git");
+    }
+    let (mut pipeline, _) = repo.filter_pipeline(None)?;
+    let mut changed = 0;
+    let mut removed = Vec::new();
+    for path in paths {
+        let rela = path.strip_prefix(&work_dir)?.to_owned();
+        let rela_path = gix::path::to_unix_separators_on_windows(gix::path::try_into_bstr(&rela)?);
+        let range = index.entry_range(rela_path.as_ref());
+        if let Some(range) = &range {
+            let entries = &index.entries()[range.clone()];
+            if entries.len() != 1 || entries[0].stage() != Stage::Unconflicted {
+                bail!("{} has unmerged entries in the git index", path.display());
+            }
+        }
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            if range.is_some() {
+                removed.push(rela_path.into_owned());
+                changed += 1;
+            }
+            continue;
+        };
+        if !meta.is_file() {
+            bail!(
+                "{} is not a regular file; stage it with git",
+                path.display()
+            );
+        }
+        let content = std::fs::read(path)?;
+        let mut to_git = Vec::new();
+        pipeline
+            .convert_to_git(&content[..], &rela, &index)?
+            .read_to_end(&mut to_git)?;
+        if to_git != content {
+            bail!(
+                "git converts {} (filters or line-ending conversion); stage it with git",
+                path.display()
+            );
+        }
+        let id = repo.write_blob(&content)?.detach();
+        let stat = Stat::from_fs(&gix::index::fs::Metadata::from_path_no_follow(path)?)?;
+        #[cfg(unix)]
+        let executable = std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0;
+        #[cfg(not(unix))]
+        let executable = false;
+        let mode = if executable {
+            Mode::FILE_EXECUTABLE
+        } else {
+            Mode::FILE
+        };
+        match range {
+            Some(range) => {
+                let entry = &mut index.entries_mut()[range.start];
+                if entry.id != id || entry.mode != mode {
+                    changed += 1;
+                }
+                entry.id = id;
+                entry.stat = stat;
+                entry.mode = mode;
+                entry.flags.remove(Flags::INTENT_TO_ADD);
+            }
+            None => {
+                index.dangerously_push_entry(stat, id, Flags::empty(), mode, rela_path.as_ref());
+                changed += 1;
+            }
+        }
+    }
+    index.remove_entries(|_, path, _| removed.iter().any(|removed| removed == path));
+    index.sort_entries();
+    index.remove_tree();
+    let mut out = std::io::BufWriter::new(lock);
+    index.write_to(&mut out, gix::index::write::Options::default())?;
+    out.into_inner()
+        .map_err(|err| err.into_error())?
+        .commit()
+        .map_err(|err| err.error)?;
+    Ok(changed)
+}
+
 pub fn get_commit_base(file: &Path, revision: &str, trust_full: bool) -> Result<CommitBase> {
     let file = gix::path::realpath(file).context("resolve symlinks")?;
     let repo = open_repo(get_repo_dir(&file)?, trust_full)?.to_thread_local();

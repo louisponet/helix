@@ -49,6 +49,7 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "x" => review_close_buffer,
             "b" => review_refresh_buffer,
             "C" => review_commit_staged,
+            "A" => review_commit_all,
             "S" => review_send_handoff,
             "-" => review_baseline_older,
             "+" => review_baseline_newer,
