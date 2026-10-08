@@ -41,7 +41,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-refresh` | Reload the buffer from disk; reread the index in index mode, or retain the selected commit in commit mode. Refuses unsaved changes. |
 | `:review-comment <text>` | Add a pending comment on the primary selection, or on the selected old text while it is focused. Use `%%` for a literal `%`. |
 | `:review-ask <text>` | Ask the agent about every selection, or the selected old text while it is focused: one comment per selection with the text, then hands the review off at once (writing the buffer first if it is modified). Needs a handoff directory (`:review-handoff` or the pi mailbox). A leading `@label` (`:review-ask @pi-2 rename this`) addresses the pi session with that label. Use `%%` for a literal `%`. |
-| `:review-comments` | Pick a pending comment by file, lines or text and jump to its line in the current text. |
+| `:review-comments` | Pick a pending comment, or while reviewing a pull request one of its comment threads, by kind, author, place or text, and jump to its line in the current text. |
 | `:review-uncomment [count]` | Drop the latest pending comment, or the `count` latest ones, and show how many remain. |
 | `:review-export <path>` | Write all pending comments and reviewed files to a new JSON file. |
 | `:review-revert` | Replace the change under the cursor, or the focused old text's change, with the baseline's lines (added lines are deleted; removed lines shown below the cursor line are restored). One undoable edit; the file on disk is not touched. |
@@ -297,6 +297,19 @@ baseline only refreshes the reviews. `G -` / `G +` still step through history
 `:review-baseline` yourself leaves the pull request review, and so does
 `:review-pr close`, which keeps the checkout. `:review-pr` also works over the
 command socket, so other tools can open a pull request in Helix.
+
+The pull request's existing review comments (`gh api .../pulls/<n>/comments`)
+are shown as threads above the line they are on, greyed
+(`ui.review.thread`): `login │ text`, replies indented, at most 12 rows each.
+A comment on the base side is shown above the change that removed its line,
+tagged `(old side)`; one on a line the pull request has since changed is
+shown at its original line, tagged `(outdated)`. They reload with
+`:review-refresh` (`G b`). `G C` lists them next to your pending comments.
+
+While reviewing a pull request, `G c` (`:review-comment`) collects comments
+for the pull request instead of for pi: they are kept out of the batches
+handed to pi (saving, `:review-send`, `:review-commit`), and a comment on a
+line with a thread replies to it. `:review-ask` still goes to pi at once.
 
 ### Troubleshooting
 

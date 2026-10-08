@@ -163,6 +163,8 @@ pub struct Review {
     head: Option<Vec<u8>>,
     /// Per hunk, whether `head` already holds it, i.e. it was committed after the baseline.
     committed: Vec<bool>,
+    /// The pull request's comment threads on this file, see `:review-pr`.
+    threads: Vec<ReviewThread>,
 }
 
 impl Review {
@@ -193,6 +195,7 @@ impl Review {
             staged: Vec::new(),
             head: None,
             committed: Vec::new(),
+            threads: Vec::new(),
         };
         review.update_blocks();
         Ok(review)
@@ -374,6 +377,84 @@ impl Review {
                 hunk.before.start as usize == block.old.start && current == block.current
             })
             .map_or(HunkStage::Unstaged, |hunk| self.stage(hunk))
+    }
+
+    /// Shows `threads`, the pull request's comment threads on this file.
+    pub fn set_threads(&mut self, threads: Vec<ReviewThread>) {
+        self.threads = threads;
+    }
+
+    /// Keeps the threads of `previous`, the review this one replaces.
+    pub fn keep_threads(&mut self, previous: Review) {
+        self.threads = previous.threads;
+    }
+
+    pub fn threads(&self) -> &[ReviewThread] {
+        &self.threads
+    }
+
+    /// The 0-based document line `thread` is anchored at in a document of `len_lines` lines, and
+    /// a tag for threads not on the current text: outdated ones at their original line, and
+    /// base-side ones at the first current line of the change that removed their line.
+    pub fn thread_anchor(
+        &self,
+        thread: &ReviewThread,
+        len_lines: usize,
+    ) -> (usize, Option<&'static str>) {
+        let (line, tag) = match (thread.side, thread.line) {
+            (ThreadSide::Right, Some(line)) => (line, None),
+            (ThreadSide::Right, None) => (thread.original_line.unwrap_or(1), Some("outdated")),
+            (ThreadSide::Left, line) => {
+                let base = line.or(thread.original_line).unwrap_or(1) - 1;
+                let mapped = match self.hunks.iter().find(|hunk| {
+                    (hunk.before.start as usize..hunk.before.end as usize).contains(&base)
+                }) {
+                    Some(hunk) => hunk.after.start as usize,
+                    None => {
+                        let shift: isize = self
+                            .hunks
+                            .iter()
+                            .filter(|hunk| hunk.before.end as usize <= base)
+                            .map(|hunk| hunk.after.len() as isize - hunk.before.len() as isize)
+                            .sum();
+                        (base as isize + shift).max(0) as usize
+                    }
+                };
+                (mapped + 1, Some("old side"))
+            }
+        };
+        ((line.max(1) - 1).min(len_lines.saturating_sub(1)), tag)
+    }
+
+    /// The document line a thread anchored at `anchor` is shown below: the line above it, so the
+    /// thread reads above its line, except for the first line.
+    fn thread_row_line(anchor: usize) -> usize {
+        anchor.saturating_sub(1)
+    }
+
+    /// The rows of the threads shown below document line `line` at text width `width`.
+    pub fn thread_rows_below(&self, line: usize, len_lines: usize, width: usize) -> Vec<String> {
+        let mut threads: Vec<_> = self
+            .threads
+            .iter()
+            .map(|thread| (self.thread_anchor(thread, len_lines), thread))
+            .filter(|((anchor, _), _)| Self::thread_row_line(*anchor) == line)
+            .collect();
+        threads.sort_by_key(|((anchor, _), _)| *anchor);
+        threads
+            .into_iter()
+            .flat_map(|((_, tag), thread)| thread.rows(width, tag))
+            .collect()
+    }
+
+    /// The document lines threads are shown below, ascending and without repeats.
+    pub fn thread_lines(&self, len_lines: usize) -> Vec<usize> {
+        let mut lines: Vec<_> = (self.threads.iter())
+            .map(|thread| Self::thread_row_line(self.thread_anchor(thread, len_lines).0))
+            .collect();
+        lines.sort_unstable();
+        lines.dedup();
+        lines
     }
 
     /// The first document line of every unstaged hunk, removals included, in order.
@@ -608,13 +689,21 @@ impl LineAnnotation for ReviewLines<'_> {
         {
             return Position::new(0, 0);
         }
-        let rows = self
+        let rows: usize = self
             .review
             .blocks_at(doc_line)
             .iter()
             .map(|block| self.review.block_height(block, &self.text_fmt))
             .sum();
-        Position::new(rows, 0)
+        let threads = self
+            .review
+            .thread_rows_below(
+                doc_line,
+                self.text.len_lines(),
+                self.text_fmt.viewport_width as usize,
+            )
+            .len();
+        Position::new(rows + threads, 0)
     }
 }
 
@@ -643,6 +732,9 @@ pub struct ReviewComment {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enclosing_text: Option<String>,
     pub comment: String,
+    /// The pull request comment thread (its first comment's id) this comment replies to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<u64>,
 }
 
 impl ReviewComment {
@@ -674,8 +766,100 @@ impl ReviewComment {
             context_after: text.slice(to..context_end).to_string(),
             enclosing_text: None,
             comment,
+            reply_to: None,
         }
     }
+}
+
+/// The side of a pull request diff a comment thread is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadSide {
+    /// The base (removed) side.
+    Left,
+    /// The head (current) side.
+    Right,
+}
+
+/// One comment of a pull request comment thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadComment {
+    pub id: u64,
+    pub login: String,
+    pub body: String,
+}
+
+/// A pull request review comment thread on a file, shown above the line it is anchored at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewThread {
+    pub path: PathBuf,
+    pub side: ThreadSide,
+    /// The 1-based line on `side` in the pull request's latest diff, `None` when outdated.
+    pub line: Option<usize>,
+    /// The 1-based line on `side` when the thread was started.
+    pub original_line: Option<usize>,
+    /// The root comment first, then the replies, oldest first.
+    pub comments: Vec<ThreadComment>,
+}
+
+impl ReviewThread {
+    pub const MAX_ROWS: usize = 12;
+
+    pub fn root_id(&self) -> u64 {
+        self.comments.first().map_or(0, |comment| comment.id)
+    }
+
+    /// The rows of the thread at text width `width`: each comment as `login │ text`, wrapped, with
+    /// continuation rows under the `│`, replies indented, cut at [`Self::MAX_ROWS`] rows. `tag`
+    /// is appended to the first row.
+    pub fn rows(&self, width: usize, tag: Option<&str>) -> Vec<String> {
+        let mut rows = Vec::new();
+        for (idx, comment) in self.comments.iter().enumerate() {
+            let indent = if idx == 0 { "" } else { "  " };
+            let first = format!("{indent}{} │ ", comment.login);
+            let next = format!("{}│ ", " ".repeat(first.chars().count() - 2));
+            let text_width = width.saturating_sub(first.chars().count()).max(1);
+            let mut body = comment.body.replace('\t', "    ");
+            if let (0, Some(tag)) = (idx, tag) {
+                body = match body.split_once('\n') {
+                    Some((head, rest)) => format!("{head} ({tag})\n{rest}"),
+                    None => format!("{body} ({tag})"),
+                };
+            }
+            let lines: Vec<_> = body
+                .lines()
+                .flat_map(|line| wrap_columns(line, text_width))
+                .collect();
+            for (row, text) in lines.iter().enumerate() {
+                let lead = if row == 0 { &first } else { &next };
+                rows.push(format!("{lead}{text}"));
+            }
+            if lines.is_empty() {
+                rows.push(first);
+            }
+        }
+        if rows.len() > Self::MAX_ROWS {
+            rows.truncate(Self::MAX_ROWS - 1);
+            rows.push("      │ …".to_owned());
+        }
+        rows
+    }
+}
+
+/// Splits `line` into pieces at most `width` columns wide; an empty line gives one empty piece.
+fn wrap_columns(line: &str, width: usize) -> Vec<String> {
+    use helix_core::unicode::width::UnicodeWidthChar;
+    let mut rows = vec![String::new()];
+    let mut columns = 0;
+    for ch in line.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if columns + ch_width > width && columns > 0 {
+            rows.push(String::new());
+            columns = 0;
+        }
+        rows.last_mut().unwrap().push(ch);
+        columns += ch_width;
+    }
+    rows
 }
 
 /// What the reviewer asks the agent to do with a handoff, beyond the edits and comments.

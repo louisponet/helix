@@ -434,6 +434,9 @@ pub(super) fn review_refresh(
     let baseline = doc!(cx.editor).review.as_ref().unwrap().baseline();
     cx.editor
         .set_status(format!("Review refreshed from disk and the {baseline}"));
+    if let Some(pr) = cx.editor.review_pr.clone() {
+        cx.jobs.add(super::review_pr::load_threads(pr));
+    }
     Ok(())
 }
 
@@ -511,7 +514,29 @@ pub(super) fn review_comment(
         return Ok(());
     }
     ensure_review(cx)?;
-    let comment = selection_comments(cx.editor, &args[0], false)?.remove(0);
+    let mut comment = selection_comments(cx.editor, &args[0], false)?.remove(0);
+    if cx.editor.review_pr.is_some() {
+        // Pull request comments wait for :review-submit; on a thread's line they reply to it.
+        let (view, doc) = current_ref!(cx.editor);
+        let text = doc.text().slice(..);
+        let cursor = doc.selection(view.id).primary().cursor_line(text);
+        comment.reply_to = doc.review.as_ref().and_then(|review| {
+            review
+                .threads()
+                .iter()
+                .find(|thread| review.thread_anchor(thread, text.len_lines()).0 == cursor)
+                .map(|thread| thread.root_id())
+        });
+        let reply = comment.reply_to.is_some();
+        cx.editor.review_pr_comments.push(comment);
+        let pending = cx.editor.review_pr_comments.len();
+        cx.editor.set_status(format!(
+            "{}{}, :review-submit posts them",
+            if reply { "Reply added; " } else { "" },
+            plural(pending, "pending pull request comment")
+        ));
+        return Ok(());
+    }
     let pending = cx.editor.review_batch.add_comment(comment);
     cx.editor.set_status(format!(
         "{}, :review-export <path> writes them",
@@ -657,6 +682,91 @@ pub(super) fn review_ask(
     Ok(())
 }
 
+/// A row of the `:review-comments` picker: a pending comment or a pull request thread.
+struct CommentEntry {
+    kind: &'static str,
+    author: String,
+    path: PathBuf,
+    /// The lines shown, such as `3`, `3-5` or `old 3`.
+    lines: String,
+    text: String,
+    /// The 0-based document line to jump to.
+    line: usize,
+    /// The 0-based document lines to highlight in the preview.
+    preview: (usize, usize),
+}
+
+/// The pending comments (for the pull request in PR mode) and the pull request's threads.
+fn comment_entries(editor: &Editor) -> Vec<CommentEntry> {
+    let pending = match editor.review_pr {
+        Some(_) => &editor.review_pr_comments[..],
+        None => editor.review_batch.comments(),
+    };
+    let mut entries: Vec<_> = pending
+        .iter()
+        .map(|comment| {
+            let author = comment
+                .reply_to
+                .and_then(|root| {
+                    editor
+                        .review_pr_threads
+                        .iter()
+                        .find(|thread| thread.root_id() == root)
+                })
+                .and_then(|thread| thread.comments.first())
+                .map_or_else(
+                    || "you".to_owned(),
+                    |root| format!("reply to {}", root.login),
+                );
+            let (lines, preview) = match comment.side {
+                ReviewSide::Current => (
+                    match comment.start_line == comment.end_line {
+                        true => comment.start_line.to_string(),
+                        false => format!("{}-{}", comment.start_line, comment.end_line),
+                    },
+                    (comment.start_line - 1, comment.end_line - 1),
+                ),
+                ReviewSide::Old => (
+                    format!("old {}", comment.start_line),
+                    (comment.current_line - 1, comment.current_line - 1),
+                ),
+            };
+            CommentEntry {
+                kind: "pending",
+                author,
+                path: comment.path.clone(),
+                lines,
+                text: comment.comment.clone(),
+                line: comment.current_line - 1,
+                preview,
+            }
+        })
+        .collect();
+    for thread in &editor.review_pr_threads {
+        let anchor = editor
+            .document_by_path(&thread.path)
+            .and_then(|doc| {
+                let review = doc.review.as_ref()?;
+                Some(review.thread_anchor(thread, doc.text().len_lines()).0)
+            })
+            .unwrap_or_else(|| thread.line.or(thread.original_line).unwrap_or(1) - 1);
+        let root = thread.comments.first();
+        entries.push(CommentEntry {
+            kind: "thread",
+            author: root.map(|root| root.login.clone()).unwrap_or_default(),
+            path: thread.path.clone(),
+            lines: (anchor + 1).to_string(),
+            text: root
+                .and_then(|root| root.body.lines().next())
+                .unwrap_or_default()
+                .to_owned(),
+            line: anchor,
+            preview: (anchor, anchor),
+        });
+    }
+    entries
+}
+
 pub(super) fn review_comments(
     cx: &mut compositor::Context,
     _args: Args,
@@ -669,47 +779,33 @@ pub(super) fn review_comments(
         log::info!("not enabling review: {err:#}");
     }
 
-    let comments = cx.editor.review_batch.comments().to_vec();
-    ensure!(!comments.is_empty(), "no pending review comments");
+    let entries = comment_entries(cx.editor);
+    ensure!(!entries.is_empty(), "no pending review comments");
     let workspace = helix_loader::find_workspace().0;
     cx.jobs.callback(async move {
         let callback: job::Callback =
             Callback::EditorCompositor(Box::new(move |_editor, compositor| {
                 let columns = [
-                    ui::PickerColumn::new(
-                        "file",
-                        |comment: &ReviewComment, workspace: &PathBuf| {
-                            let path = &comment.path;
-                            path.strip_prefix(workspace)
-                                .unwrap_or(path)
-                                .display()
-                                .to_string()
-                                .into()
-                        },
-                    ),
-                    ui::PickerColumn::new("lines", |comment: &ReviewComment, _| {
-                        let side = match comment.side {
-                            ReviewSide::Old => "old",
-                            ReviewSide::Current => "current",
-                        };
-                        match comment.start_line == comment.end_line {
-                            true => format!("{side} {}", comment.start_line),
-                            false => format!("{side} {}-{}", comment.start_line, comment.end_line),
-                        }
-                        .into()
+                    ui::PickerColumn::new("kind", |entry: &CommentEntry, _| entry.kind.into()),
+                    ui::PickerColumn::new("author", |entry: &CommentEntry, _| {
+                        entry.author.as_str().into()
                     }),
-                    ui::PickerColumn::new("comment", |comment: &ReviewComment, _| {
-                        comment.comment.as_str().into()
+                    ui::PickerColumn::new("place", |entry: &CommentEntry, workspace: &PathBuf| {
+                        let path = entry.path.strip_prefix(workspace).unwrap_or(&entry.path);
+                        format!("{}:{}", path.display(), entry.lines).into()
+                    }),
+                    ui::PickerColumn::new("comment", |entry: &CommentEntry, _| {
+                        entry.text.as_str().into()
                     }),
                 ];
                 let picker =
-                    ui::Picker::new(columns, 2, comments, workspace, |cx, comment, action| {
-                        let doc_id = match cx.editor.open(&comment.path, action) {
+                    ui::Picker::new(columns, 3, entries, workspace, |cx, entry, action| {
+                        let doc_id = match cx.editor.open(&entry.path, action) {
                             Ok(id) => id,
                             Err(err) => {
                                 cx.editor.set_error(format!(
                                     "failed to open {}: {err}",
-                                    comment.path.display()
+                                    entry.path.display()
                                 ));
                                 return;
                             }
@@ -720,18 +816,14 @@ pub(super) fn review_comments(
                             review.clear_focus(view.id);
                         }
                         let text = doc.text().slice(..);
-                        let line = (comment.current_line - 1).min(text.len_lines() - 1);
+                        let line = entry.line.min(text.len_lines() - 1);
                         doc.set_selection(view.id, Selection::point(text.line_to_char(line)));
                         if action.align_view(view, doc_id) {
                             align_view(doc, view, Align::Center);
                         }
                     })
-                    .with_preview(|_editor, comment| {
-                        let lines = match comment.side {
-                            ReviewSide::Current => (comment.start_line - 1, comment.end_line - 1),
-                            ReviewSide::Old => (comment.current_line - 1, comment.current_line - 1),
-                        };
-                        Some((comment.path.as_path().into(), Some(lines)))
+                    .with_preview(|_editor, entry| {
+                        Some((entry.path.as_path().into(), Some(entry.preview)))
                     });
                 compositor.push(Box::new(overlaid(picker)));
             }));
@@ -760,10 +852,18 @@ pub(super) fn review_uncomment(
             .context("count must be a positive number")?,
         None => 1,
     };
-    let batch = &mut cx.editor.review_batch;
-    ensure!(!batch.comments().is_empty(), "no pending review comments");
-    let removed = batch.remove_latest_comments(count);
-    let pending = batch.comments().len();
+    let (removed, pending) = if cx.editor.review_pr.is_some() {
+        let comments = &mut cx.editor.review_pr_comments;
+        ensure!(!comments.is_empty(), "no pending review comments");
+        let removed = count.min(comments.len());
+        comments.truncate(comments.len() - removed);
+        (removed, comments.len())
+    } else {
+        let batch = &mut cx.editor.review_batch;
+        ensure!(!batch.comments().is_empty(), "no pending review comments");
+        let removed = batch.remove_latest_comments(count);
+        (removed, batch.comments().len())
+    };
     cx.editor.set_status(format!(
         "Dropped {}, {pending} pending",
         plural(removed, "review comment")
@@ -872,6 +972,8 @@ pub(super) fn review_baseline(
         // A baseline the user picks ends the pull request review.
         cx.editor.review_pr = None;
         cx.editor.review_stepped_from = None;
+        cx.editor.review_pr_threads.clear();
+        cx.editor.share_review_threads();
     }
     if &args[0] == "clear" {
         cx.editor.review_baseline = None;

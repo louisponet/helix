@@ -46,6 +46,7 @@ tabstop = { modifiers = ["italic"], bg = "bossanova" }
 "diff.minus.review.staged" = { fg = "#8a8696", bg = "#3b3946" }
 "diff.plus.review.committed" = { bg = "#1d4b55" }
 "diff.minus.review.committed" = { fg = "#7fa8b0", bg = "#26383d" }
+"ui.review.thread" = { fg = "#9a96a8", bg = "#2a2833" }
 
 # TODO: differentiate doc comment
 # concat (ERROR) @error.syntax and "MISSING ;" selectors for errors

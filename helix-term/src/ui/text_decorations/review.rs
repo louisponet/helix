@@ -26,7 +26,11 @@ pub struct ReviewDecoration<'a> {
     old_committed: Style,
     selection: Style,
     cursor: Style,
-    next_block: usize,
+    /// The style of pull request comment threads.
+    thread: Style,
+    /// Document lines with old lines or threads below them, ascending.
+    anchors: Vec<usize>,
+    next_anchor: usize,
     /// Document line whose end was just rendered and that has old lines below it.
     pending_line: Option<usize>,
 }
@@ -40,6 +44,12 @@ impl<'a> ReviewDecoration<'a> {
         marker_col: Option<u16>,
         theme: &Theme,
     ) -> Self {
+        let mut anchors: Vec<usize> = (review.blocks().iter())
+            .map(|block| block.anchor_line)
+            .chain(review.thread_lines(text.len_lines()))
+            .collect();
+        anchors.sort_unstable();
+        anchors.dedup();
         ReviewDecoration {
             review,
             text,
@@ -53,15 +63,17 @@ impl<'a> ReviewDecoration<'a> {
                 .unwrap_or_else(|| theme.get("diff.minus.review.staged")),
             selection: theme.get("ui.selection.primary"),
             cursor: theme.get("ui.cursor.primary"),
-            next_block: 0,
+            thread: theme.get("ui.review.thread"),
+            anchors,
+            next_anchor: 0,
             pending_line: None,
         }
     }
 
-    fn anchor_char(&self, block: usize) -> usize {
-        self.review.blocks().get(block).map_or(usize::MAX, |block| {
-            line_end_char_index(&self.text, block.anchor_line)
-        })
+    fn anchor_char(&self, anchor: usize) -> usize {
+        self.anchors
+            .get(anchor)
+            .map_or(usize::MAX, |&line| line_end_char_index(&self.text, line))
     }
 
     /// Draws snapshot line `line` in `old` style starting at `row` and returns the number of rows
@@ -160,11 +172,10 @@ fn is_visible(renderer: &TextRenderer, row: usize) -> bool {
 impl Decoration for ReviewDecoration<'_> {
     fn reset_pos(&mut self, pos: usize) -> usize {
         self.pending_line = None;
-        self.next_block = self
-            .review
-            .blocks()
-            .partition_point(|block| line_end_char_index(&self.text, block.anchor_line) < pos);
-        self.anchor_char(self.next_block)
+        self.next_anchor = self
+            .anchors
+            .partition_point(|&line| line_end_char_index(&self.text, line) < pos);
+        self.anchor_char(self.next_anchor)
     }
 
     fn decorate_grapheme(
@@ -172,10 +183,9 @@ impl Decoration for ReviewDecoration<'_> {
         _renderer: &mut TextRenderer,
         _grapheme: &FormattedGrapheme,
     ) -> usize {
-        let line = self.review.blocks()[self.next_block].anchor_line;
-        self.pending_line = Some(line);
-        self.next_block += self.review.blocks_at(line).len();
-        self.anchor_char(self.next_block)
+        self.pending_line = Some(self.anchors[self.next_anchor]);
+        self.next_anchor += 1;
+        self.anchor_char(self.next_anchor)
     }
 
     fn render_virt_lines(
@@ -213,6 +223,25 @@ impl Decoration for ReviewDecoration<'_> {
             for old_line in block.old.clone() {
                 row += self.draw_old_line(renderer, row, old_line, old);
             }
+        }
+        let width = self.text_fmt.viewport_width as usize;
+        for text in self
+            .review
+            .thread_rows_below(line, self.text.len_lines(), width)
+        {
+            if is_visible(renderer, row) {
+                self.fill_rows(renderer, row, 1, self.thread);
+                renderer.set_string_truncated(
+                    renderer.viewport.x,
+                    row as u16,
+                    &text,
+                    renderer.viewport.width as usize,
+                    |_| self.thread,
+                    true,
+                    false,
+                );
+            }
+            row += 1;
         }
         Position::new(row - first_row, 0)
     }

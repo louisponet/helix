@@ -4,7 +4,9 @@ use std::process::Stdio;
 
 use serde::Deserialize;
 
-use helix_view::review::PullRequest;
+use helix_view::review::{PullRequest, ReviewThread, ThreadComment, ThreadSide};
+
+use crate::job::Job;
 
 use super::review::{changed_files_since, ensure_reviews_saved, pin_review_baseline, plural};
 use super::*;
@@ -131,6 +133,8 @@ pub(super) fn review_pr(
             .take()
             .context("not reviewing a pull request")?;
         cx.editor.review_stepped_from = None;
+        cx.editor.review_pr_threads.clear();
+        cx.editor.share_review_threads();
         cx.editor
             .set_status(format!("Stopped reviewing PR #{}", pr.number));
         return Ok(());
@@ -156,18 +160,99 @@ pub(super) fn review_pr(
         .set_status(format!("Checking out pull request {arg}…"));
     cx.jobs.callback(async move {
         let result = fetch_and_checkout(&arg, &workspace).await;
-        let callback = move |editor: &mut Editor| {
-            if let Err(err) = result.and_then(|pr| start(editor, pr)) {
+        let callback = move |editor: &mut Editor| match result.and_then(|pr| start(editor, pr)) {
+            Ok(pr) => Some(load_threads(pr)),
+            Err(err) => {
                 editor.set_error(format!("{err:#}"));
+                None
             }
         };
-        Ok(Callback::Editor(Box::new(callback)))
+        Ok(Callback::Followup(Box::new(callback)))
     });
     Ok(())
 }
 
+/// A job loading the review comment threads of `pr` and showing them in the reviews.
+pub(super) fn load_threads(pr: PullRequest) -> Job {
+    Job::with_callback(async move {
+        let workspace = helix_loader::find_workspace().0;
+        let threads = fetch_threads(&pr, &workspace).await;
+        let callback = move |editor: &mut Editor| match threads {
+            // A pull request closed or replaced meanwhile keeps its own threads.
+            Ok(threads) if editor.review_pr.as_ref() == Some(&pr) => {
+                editor.review_pr_threads = threads;
+                editor.share_review_threads();
+            }
+            Ok(_) => (),
+            Err(err) => editor.set_error(format!("loading the PR comments failed: {err:#}")),
+        };
+        Ok(Callback::Editor(Box::new(callback)))
+    })
+}
+
+/// The review comment threads of `pr` with paths under `workspace`, oldest first.
+async fn fetch_threads(pr: &PullRequest, workspace: &Path) -> anyhow::Result<Vec<ReviewThread>> {
+    #[derive(Deserialize)]
+    struct User {
+        login: String,
+    }
+    #[derive(Deserialize)]
+    struct Comment {
+        id: u64,
+        in_reply_to_id: Option<u64>,
+        path: String,
+        line: Option<usize>,
+        original_line: Option<usize>,
+        side: Option<String>,
+        body: String,
+        user: User,
+    }
+    let endpoint = format!("repos/{}/pulls/{}/comments", pr.repo, pr.number);
+    let output = run(
+        &gh_program(),
+        &["api", &endpoint, "--paginate"],
+        workspace,
+        None,
+    )
+    .await?;
+    // --paginate prints one JSON array per page.
+    let mut comments = Vec::new();
+    for page in serde_json::Deserializer::from_str(&output).into_iter::<Vec<Comment>>() {
+        comments.extend(page.context("unexpected gh api output")?);
+    }
+    let mut threads: Vec<ReviewThread> = Vec::new();
+    let mut roots = std::collections::HashMap::new();
+    for comment in comments {
+        let entry = ThreadComment {
+            id: comment.id,
+            login: comment.user.login,
+            body: comment.body,
+        };
+        match comment.in_reply_to_id.and_then(|root| roots.get(&root)) {
+            Some(&idx) => {
+                let thread: &mut ReviewThread = &mut threads[idx];
+                thread.comments.push(entry);
+            }
+            None => {
+                roots.insert(comment.id, threads.len());
+                threads.push(ReviewThread {
+                    path: workspace.join(&comment.path),
+                    side: match comment.side.as_deref() {
+                        Some("LEFT") => ThreadSide::Left,
+                        _ => ThreadSide::Right,
+                    },
+                    line: comment.line,
+                    original_line: comment.original_line,
+                    comments: vec![entry],
+                });
+            }
+        }
+    }
+    Ok(threads)
+}
+
 /// Reviews every buffer against the pull request's merge base and enters PR mode.
-fn start(editor: &mut Editor, pr: PullRequest) -> anyhow::Result<()> {
+fn start(editor: &mut Editor, pr: PullRequest) -> anyhow::Result<PullRequest> {
     editor.review_pr = None;
     editor.review_stepped_from = None;
     pin_review_baseline(editor, &pr.merge_base)?;
@@ -180,6 +265,9 @@ fn start(editor: &mut Editor, pr: PullRequest) -> anyhow::Result<()> {
         pr.base_ref,
         &pr.merge_base[..8.min(pr.merge_base.len())]
     ));
-    editor.review_pr = Some(pr);
-    Ok(())
+    editor.review_pr_threads.clear();
+    editor.review_pr_comments.clear();
+    editor.share_review_threads();
+    editor.review_pr = Some(pr.clone());
+    Ok(pr)
 }

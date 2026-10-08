@@ -2308,40 +2308,69 @@ async fn wait_for(
     Ok(())
 }
 
+/// Pull request 7 of `o/r`: branch `feature` changes file.txt from `base` to `head` and adds
+/// new.txt while `main` moves on, served by a fake `gh` with `extra` cases.
+struct PrFixture {
+    repo: Repo,
+    merge_base: String,
+    head: String,
+    gh: FakeGh,
+}
+
+impl PrFixture {
+    fn new(base: &str, head: &str, extra: &str) -> PrFixture {
+        let repo = Repo::new(base, base, base);
+        let dir = repo.dir.path();
+        let merge_base = git_ok(dir, &["rev-parse", "HEAD"]);
+        git_ok(dir, &["branch", "-M", "main"]);
+        // The base branch moves on after the pull request branched off.
+        fs::write(dir.join("base.txt"), "base\n").unwrap();
+        git_ok(dir, &["add", "base.txt"]);
+        git_ok(dir, &["commit", "-m", "base moves on"]);
+        let main = git_ok(dir, &["rev-parse", "HEAD"]);
+        git_ok(dir, &["checkout", "-q", "-b", "feature", &merge_base]);
+        repo.write(head);
+        fs::write(dir.join("new.txt"), "new\n").unwrap();
+        git_ok(dir, &["add", "file.txt", "new.txt"]);
+        git_ok(dir, &["commit", "-m", "feature"]);
+        let head = git_ok(dir, &["rev-parse", "HEAD"]);
+        git_ok(dir, &["checkout", "-q", "main"]);
+        let gh = FakeGh::new(&format!(
+            r#"pr\ view\ 7*) echo '{{"number":7,"title":"Add new","url":"https://github.com/o/r/pull/7","headRefOid":"{head}","baseRefName":"main","baseRefOid":"{main}","isCrossRepository":false,"headRepositoryOwner":{{"login":"o"}}}}';;
+repo\ view*) echo '{{"nameWithOwner":"o/r"}}';;
+pr\ checkout\ 7) git checkout -q feature;;
+{extra}"#
+        ));
+        PrFixture {
+            repo,
+            merge_base,
+            head,
+            gh,
+        }
+    }
+
+    /// An app on file.txt with the review statusline element, in PR mode for pull request 7.
+    async fn open(&self) -> anyhow::Result<Application> {
+        let mut config = test_config();
+        config.editor.statusline.right = vec![StatusLineElement::Review];
+        let mut app = AppBuilder::new()
+            .with_file(&self.repo.file, None)
+            .with_config(config)
+            .build()?;
+        send_keys(&mut app, ":review-pr 7<ret>").await?;
+        wait_for(&mut app, |app| app.editor.review_pr.is_some()).await?;
+        Ok(app)
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn review_pr_checks_out_a_pull_request_and_reviews_it_against_the_merge_base(
 ) -> anyhow::Result<()> {
-    let repo = Repo::new("a\nb\n", "a\nb\n", "a\nb\n");
-    let dir = repo.dir.path();
-    let _cwd = Cwd::enter(dir);
-    let fork = git_ok(dir, &["rev-parse", "HEAD"]);
-    git_ok(dir, &["branch", "-M", "main"]);
-    // The base branch moves on after the pull request branched off.
-    fs::write(dir.join("base.txt"), "base\n")?;
-    git_ok(dir, &["add", "base.txt"]);
-    git_ok(dir, &["commit", "-m", "base moves on"]);
-    let base = git_ok(dir, &["rev-parse", "HEAD"]);
-    git_ok(dir, &["checkout", "-q", "-b", "feature", &fork]);
-    repo.write("a\nB\n");
-    fs::write(dir.join("new.txt"), "new\n")?;
-    git_ok(dir, &["add", "file.txt", "new.txt"]);
-    git_ok(dir, &["commit", "-m", "feature"]);
-    let head = git_ok(dir, &["rev-parse", "HEAD"]);
-    git_ok(dir, &["checkout", "-q", "main"]);
-    let gh = FakeGh::new(&format!(
-        r#"pr\ view\ 7*) echo '{{"number":7,"title":"Add new","url":"https://github.com/o/r/pull/7","headRefOid":"{head}","baseRefName":"main","baseRefOid":"{base}","isCrossRepository":false,"headRepositoryOwner":{{"login":"o"}}}}';;
-repo\ view*) echo '{{"nameWithOwner":"o/r"}}';;
-pr\ checkout\ 7) git checkout -q feature;;"#
-    ));
+    let fixture = PrFixture::new("a\nb\n", "a\nB\n", r#"api\ *) echo '[]';;"#);
+    let (fork, head, gh) = (&fixture.merge_base, &fixture.head, &fixture.gh);
+    let _cwd = Cwd::enter(fixture.repo.dir.path());
 
-    let mut config = test_config();
-    config.editor.statusline.right = vec![StatusLineElement::Review];
-    let mut app = AppBuilder::new()
-        .with_file(&repo.file, None)
-        .with_config(config)
-        .build()?;
-    send_keys(&mut app, ":review-pr 7<ret>").await?;
-    wait_for(&mut app, |app| app.editor.review_pr.is_some()).await?;
+    let mut app = fixture.open().await?;
     let status = app.editor.get_status().unwrap().0.to_string();
     assert_eq!(
         status,
@@ -2351,13 +2380,15 @@ pr\ checkout\ 7) git checkout -q feature;;"#
         )
     );
     assert_eq!(
-        gh.calls(),
+        gh.calls()[..3],
         [
-            format!("pr view 7 --json number,title,url,headRefOid,baseRefName,baseRefOid,isCrossRepository,headRepositoryOwner"),
+            "pr view 7 --json number,title,url,headRefOid,baseRefName,baseRefOid,isCrossRepository,headRepositoryOwner".to_owned(),
             "repo view --json nameWithOwner".to_owned(),
             "pr checkout 7".to_owned(),
         ]
     );
+    wait_for(&mut app, |_| gh.calls().len() == 4).await?;
+    assert_eq!(gh.calls()[3], "api repos/o/r/pulls/7/comments --paginate");
     let pr = app.editor.review_pr.clone().unwrap();
     assert_eq!(
         (pr.repo.as_str(), pr.head_oid.as_str()),
@@ -2389,7 +2420,69 @@ pr\ checkout\ 7) git checkout -q feature;;"#
     send_keys(&mut app, ":review-pr close<ret>").await?;
     assert!(app.editor.review_pr.is_none());
     assert!(!element(&app).contains("#7"), "{}", element(&app));
-    drop(gh);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_pr_shows_comment_threads_and_keeps_pr_comments_out_of_the_mailbox(
+) -> anyhow::Result<()> {
+    // Base line 2 (b) is replaced; line 4 (d) has a thread with a reply; line 5 an outdated one.
+    let threads = r#"[
+{"id":1,"in_reply_to_id":null,"path":"file.txt","line":4,"original_line":4,"start_line":null,"side":"RIGHT","body":"why d?\nreally","user":{"login":"alice"},"created_at":"t","commit_id":"c"},
+{"id":2,"in_reply_to_id":null,"path":"file.txt","line":2,"original_line":2,"start_line":null,"side":"LEFT","body":"keep b","user":{"login":"bob"},"created_at":"t","commit_id":"c"},
+{"id":3,"in_reply_to_id":1,"path":"file.txt","line":4,"original_line":4,"start_line":null,"side":"RIGHT","body":"because","user":{"login":"carol"},"created_at":"t","commit_id":"c"}
+][
+{"id":4,"in_reply_to_id":null,"path":"file.txt","line":null,"original_line":5,"start_line":null,"side":"RIGHT","body":"old note","user":{"login":"dave"},"created_at":"t","commit_id":"c"}
+]"#;
+    let fixture = PrFixture::new(
+        "a\nb\nc\nd\ne\n",
+        "a\nB\nc\nd\ne\n",
+        &format!("api\\ repos/o/r/pulls/7/comments*) cat <<'EOF'\n{threads}\nEOF\n;;"),
+    );
+    let dir = fixture.repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let outbox = dir.join(".pi/helix-review/outbox");
+    fs::create_dir_all(&outbox)?;
+    let mut app = fixture.open().await?;
+    wait_for(&mut app, |app| app.editor.review_pr_threads.len() == 3).await?;
+
+    let rows: Vec<String> = render(&app).into_iter().map(|(_, row)| row).collect();
+    let at = |text: &str| {
+        rows.iter()
+            .position(|row| row == text)
+            .unwrap_or_else(|| panic!("{text:?} not in {rows:#?}"))
+    };
+    // Each thread sits right above its line; the base-side one above the change that replaced
+    // its line, the outdated one at its original line.
+    assert_eq!(at("bob │ keep b (old side)") + 1, at("B"));
+    assert_eq!(at("alice │ why d?") + 3, at("d"));
+    assert_eq!(at("      │ really") + 2, at("d"));
+    assert_eq!(at("  carol │ because") + 1, at("d"));
+    assert_eq!(at("dave │ old note (outdated)") + 1, at("e"));
+
+    // G C lists the threads; picking one jumps to its line.
+    send_keys(&mut app, "GC").await?;
+    send_keys(&mut app, "keep b<ret>").await?;
+    let (view, doc) = current_ref!(app.editor);
+    let text = doc.text().slice(..);
+    assert_eq!(doc.selection(view.id).primary().cursor_line(text), 1);
+
+    // G c on a thread's line replies to it, and PR comments stay out of pi's batches.
+    send_keys(&mut app, "4ggGcsure<ret>gg:review-comment top<ret>").await?;
+    let replies: Vec<_> = app
+        .editor
+        .review_pr_comments
+        .iter()
+        .map(|comment| comment.reply_to)
+        .collect();
+    assert_eq!(replies, [Some(1), None]);
+    assert!(app.editor.review_batch.comments().is_empty());
+    send_keys(&mut app, "ix<esc>:w<ret>").await?;
+    let batches: Vec<_> = fs::read_dir(&outbox)?.collect::<Result<_, _>>()?;
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(batches[0].path())?)?;
+    assert_eq!(json["comments"], serde_json::json!([]));
+    assert_eq!(app.editor.review_pr_comments.len(), 2);
     Ok(())
 }
 

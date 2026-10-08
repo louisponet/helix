@@ -1306,6 +1306,10 @@ pub struct Editor {
     pub review_stepped_from: Option<String>,
     /// The GitHub pull request under review, see `:review-pr`.
     pub review_pr: Option<crate::review::PullRequest>,
+    /// The pull request's comment threads, shown in the reviews of their files.
+    pub review_pr_threads: Vec<crate::review::ReviewThread>,
+    /// Comments pending for the pull request, posted by `:review-submit` rather than handed to pi.
+    pub review_pr_comments: Vec<crate::review::ReviewComment>,
     /// Whether the typed command running came from the command socket (the pi hook), not the user.
     pub socket_command: bool,
     /// The pi session the last handoff was addressed to with `@label`, if it was.
@@ -1486,6 +1490,8 @@ impl Editor {
             review_target: None,
             review_stepped_from: None,
             review_pr: None,
+            review_pr_threads: Vec::new(),
+            review_pr_comments: Vec::new(),
             socket_command: false,
             review_diff: None,
             debug_adapters: dap::registry::Registry::new(),
@@ -2220,8 +2226,28 @@ impl Editor {
         let review = doc.load_review(&self.diff_providers, trust_full, Some(commit))?;
         let status = review.summary();
         doc.set_review(review);
+        self.share_review_threads();
         self.set_status(status);
         Ok(())
+    }
+
+    /// Gives every reviewed document the pull request threads on its file.
+    pub fn share_review_threads(&mut self) {
+        let threads = &self.review_pr_threads;
+        for doc in self.documents.values_mut() {
+            let Some(path) = doc.path().map(Path::to_path_buf) else {
+                continue;
+            };
+            if let Some(review) = doc.review.as_mut() {
+                review.set_threads(
+                    threads
+                        .iter()
+                        .filter(|thread| thread.path == path)
+                        .cloned()
+                        .collect(),
+                );
+            }
+        }
     }
 
     pub fn close(&mut self, id: ViewId) {
