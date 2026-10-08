@@ -1619,6 +1619,18 @@ async fn review_diff_shows_every_change_in_one_scratch_buffer() -> anyhow::Resul
         "{text}"
     );
 
+    // The hook's refresh regenerates the open diff buffer without switching to it.
+    send_keys(&mut app, ":o file.txt<ret>").await?;
+    fs::write(&new, "agent\n")?;
+    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+    assert_eq!(
+        doc!(app.editor).path().unwrap().file_name().unwrap(),
+        "file.txt"
+    );
+    let refreshed = app.editor.documents[&first].text().to_string();
+    assert!(refreshed.contains("\n+agent\n"), "{refreshed}");
+    send_keys(&mut app, ":review-diff<ret>").await?;
+
     // Opening from the diff: the "+B" line is current line 2 of file.txt.
     let opened = |app: &Application| {
         let (view, doc) = current_ref!(app.editor);

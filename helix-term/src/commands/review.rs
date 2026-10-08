@@ -629,6 +629,19 @@ pub(super) fn review_baseline(
         }
     }
 
+    // Keep an open :review-diff buffer in step with the files it shows.
+    if let Some(doc_id) = cx
+        .editor
+        .review_diff
+        .filter(|doc_id| cx.editor.documents.contains_key(doc_id))
+    {
+        if let Err(err) = review_diff_text(cx.editor, &commit)
+            .and_then(|(diff, _)| fill_review_diff(cx.editor, doc_id, diff))
+        {
+            log::info!("not refreshing the review diff: {err:#}");
+        }
+    }
+
     let scrolloff = cx.editor.config().scrolloff;
     let (view, doc) = current!(cx.editor);
     view.ensure_cursor_in_view(doc, scrolloff);
@@ -880,30 +893,59 @@ pub(super) fn review_diff(
         .review_baseline
         .clone()
         .context("no review baseline, use :review-baseline first")?;
-    let workspace = helix_loader::find_workspace().0;
-    let trust_full = cx
-        .editor
-        .workspace_trust
-        .query(&workspace, TrustQuery::Git)
-        .is_trusted();
-    let changes = cx
-        .editor
-        .diff_providers
-        .get_changed_files_since(&workspace, &commit, trust_full)?;
-    if changes.is_empty() {
+    let (diff, files) = review_diff_text(cx.editor, &commit)?;
+    if files == 0 {
         cx.editor
             .set_status(format!("no files changed since {}", &commit[..8]));
         return Ok(());
     }
 
+    // Reuse the scratch buffer of an earlier :review-diff while it is open.
+    let doc_id = match cx
+        .editor
+        .review_diff
+        .filter(|doc_id| cx.editor.documents.contains_key(doc_id))
+    {
+        Some(doc_id) => {
+            cx.editor.switch(doc_id, Action::Replace);
+            doc_id
+        }
+        None => {
+            let doc_id = cx.editor.new_file(Action::Replace);
+            cx.editor.review_diff = Some(doc_id);
+            doc_id
+        }
+    };
+    fill_review_diff(cx.editor, doc_id, diff)?;
+    let scrolloff = cx.editor.config().scrolloff;
+    let (view, doc) = current!(cx.editor);
+    view.ensure_cursor_in_view(doc, scrolloff);
+    cx.editor.set_status(format!(
+        "Diff of {} against {}",
+        plural(files, "changed file"),
+        &commit[..8]
+    ));
+    Ok(())
+}
+
+/// The `:review-diff` text of every workspace file changed since `commit`, and the number of
+/// changed files.
+fn review_diff_text(editor: &Editor, commit: &str) -> anyhow::Result<(String, usize)> {
+    let workspace = helix_loader::find_workspace().0;
+    let trust_full = editor
+        .workspace_trust
+        .query(&workspace, TrustQuery::Git)
+        .is_trusted();
+    let changes = editor
+        .diff_providers
+        .get_changed_files_since(&workspace, commit, trust_full)?;
     let mut diff = String::new();
     for change in &changes {
         let path = change.path();
         let name = path.strip_prefix(&workspace).unwrap_or(path).display();
-        let before = match cx
-            .editor
+        let before = match editor
             .diff_providers
-            .get_commit_base(path, &commit, trust_full)
+            .get_commit_base(path, commit, trust_full)
         {
             Ok(base) => String::from_utf8_lossy(&base.data).into_owned(),
             Err(err) => {
@@ -911,7 +953,7 @@ pub(super) fn review_diff(
                 continue;
             }
         };
-        let after = match cx.editor.document_by_path(path) {
+        let after = match editor.document_by_path(path) {
             Some(doc) if !doc.is_modified() => doc.text().to_string(),
             _ => std::fs::read(path)
                 .map(|data| String::from_utf8_lossy(&data).into_owned())
@@ -932,36 +974,41 @@ pub(super) fn review_diff(
             diff.push_str(&format!("--- {name}\n+++ {name}\n{hunks}"));
         }
     }
+    Ok((diff, changes.len()))
+}
 
-    // Reuse the scratch buffer of an earlier :review-diff while it is open.
-    let doc_id = cx
-        .editor
-        .review_diff
-        .filter(|doc_id| cx.editor.documents.contains_key(doc_id));
-    match doc_id {
-        Some(doc_id) => cx.editor.switch(doc_id, Action::Replace),
-        None => cx.editor.review_diff = Some(cx.editor.new_file(Action::Replace)),
+/// Replaces the text of the `:review-diff` buffer `doc_id` with `diff`, keeping the cursor line
+/// of every view of it within the new text.
+fn fill_review_diff(editor: &mut Editor, doc_id: DocumentId, diff: String) -> anyhow::Result<()> {
+    let loader = editor.syn_loader.load();
+    let current_view = view!(editor).id;
+    let doc = doc_mut!(editor, &doc_id);
+    let mut view_ids: Vec<_> = doc.selections().keys().copied().collect();
+    if view_ids.is_empty() {
+        doc.ensure_view_init(current_view);
+        view_ids.push(current_view);
     }
-    let loader = cx.editor.syn_loader.load();
-    let scrolloff = cx.editor.config().scrolloff;
-    let (view, doc) = current!(cx.editor);
+    let text = doc.text().slice(..);
+    let lines: Vec<_> = view_ids
+        .iter()
+        .map(|&view_id| doc.selection(view_id).primary().cursor_line(text))
+        .collect();
     let transaction = Transaction::change(
         doc.text(),
         [(0, doc.text().len_chars(), Some(diff.into()))].into_iter(),
-    )
-    .with_selection(Selection::point(0));
-    doc.apply(&transaction, view.id);
-    doc.append_changes_to_history(view);
+    );
+    doc.apply(&transaction, view_ids[0]);
+    doc.append_changes_to_history(view_mut!(editor, view_ids[0]));
+    let doc = doc_mut!(editor, &doc_id);
+    for (view_id, line) in view_ids.into_iter().zip(lines) {
+        let text = doc.text().slice(..);
+        let pos = text.line_to_char(line.min(text.len_lines() - 1));
+        doc.set_selection(view_id, Selection::point(pos));
+    }
     // Generated text: nothing to save, so quitting and auto-save leave it alone.
     doc.reset_modified();
     doc.readonly = true;
     doc.set_language_by_language_id("diff", &loader)?;
-    view.ensure_cursor_in_view(doc, scrolloff);
-    cx.editor.set_status(format!(
-        "Diff of {} against {}",
-        plural(changes.len(), "changed file"),
-        &commit[..8]
-    ));
     Ok(())
 }
 

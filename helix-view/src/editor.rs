@@ -1973,6 +1973,8 @@ impl Editor {
                     && doc.path().is_none()
                     // If the buffer we are changing to is not this buffer
                     && id != doc.id
+                    // The :review-diff buffer is unmodified but generated, and kept for refreshes.
+                    && self.review_diff != Some(doc.id)
                     // Ensure the buffer is not displayed in any other splits.
                     && !self
                         .tree
