@@ -965,6 +965,82 @@ pub(super) fn review_diff(
     Ok(())
 }
 
+pub(super) fn review_diff_open(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    let (view, doc) = current_ref!(cx.editor);
+    ensure!(
+        cx.editor.review_diff == Some(doc.id()),
+        "not the :review-diff buffer, use :review-diff first"
+    );
+    let text = doc.text().slice(..);
+    let cursor = doc.selection(view.id).primary().cursor_line(text);
+    let lines: Vec<String> = text
+        .lines()
+        .map(|line| line.to_string().trim_end_matches(['\n', '\r']).to_owned())
+        .collect();
+    let (path, line) =
+        diff_location(&lines, cursor).context("the cursor is not inside a hunk of the diff")?;
+
+    let path = helix_loader::find_workspace().0.join(path);
+    let doc_id = cx.editor.open(&path, Action::Replace)?;
+    let view = view_mut!(cx.editor);
+    let doc = doc_mut!(cx.editor, &doc_id);
+    let text = doc.text().slice(..);
+    let pos = text.line_to_char((line - 1).min(text.len_lines() - 1));
+    doc.set_selection(view.id, Selection::point(pos));
+    align_view(doc, view, Align::Center);
+    Ok(())
+}
+
+/// The file and 1-based current line that line `cursor` of a `:review-diff` buffer shows: the
+/// first line on a file header, else the current line of the enclosing hunk at the cursor (the
+/// next one on a removed line).
+fn diff_location(lines: &[String], cursor: usize) -> Option<(&str, usize)> {
+    let is_file_header = |idx: usize| {
+        lines[idx].starts_with("--- ")
+            && lines
+                .get(idx + 1)
+                .is_some_and(|next| next.starts_with("+++ "))
+    };
+    if is_file_header(cursor) {
+        return Some((&lines[cursor][4..], 1));
+    }
+    if cursor > 0 && is_file_header(cursor - 1) {
+        return Some((&lines[cursor][4..], 1));
+    }
+    let header = (0..=cursor)
+        .rev()
+        .find(|&idx| lines[idx].starts_with("@@ "))?;
+    // Hunk lines start with ' ', '+' or '-'; anything else ends the hunk.
+    let body = &lines[(header + 1).min(cursor)..cursor];
+    if cursor > header && !lines[cursor].starts_with([' ', '+', '-'])
+        || !body.iter().all(|line| line.starts_with([' ', '+', '-']))
+    {
+        return None;
+    }
+    let start: usize = lines[header]
+        .split_whitespace()
+        .nth(2)?
+        .strip_prefix('+')?
+        .split(',')
+        .next()?
+        .parse()
+        .ok()?;
+    let line = start + body.iter().filter(|line| !line.starts_with('-')).count();
+    let path = (0..header)
+        .rev()
+        .find(|&idx| is_file_header(idx))
+        .map(|idx| &lines[idx + 1][4..])?;
+    Some((path, line))
+}
+
 /// Runs the static command `name` on the focused old text. Returns `false` if `name` is not
 /// allowed there; only selection, navigation and yank commands are.
 pub(crate) fn old_focus_command(cx: &mut Context, name: &str) -> bool {

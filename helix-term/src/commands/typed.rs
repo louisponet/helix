@@ -4142,6 +4142,17 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         },
     },
     TypableCommand {
+        name: "review-diff-open",
+        aliases: &[],
+        doc: "In the :review-diff buffer, open the file of the hunk under the cursor at the matching current line.",
+        fun: review::review_diff_open,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
         name: "review-files",
         aliases: &[],
         doc: "Pick a workspace file added (A), modified (M) or deleted (D) since the review baseline commit, and open it at its first change.",

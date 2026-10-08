@@ -1618,6 +1618,21 @@ async fn review_diff_shows_every_change_in_one_scratch_buffer() -> anyhow::Resul
         text.contains("\n+m\n") && !text.contains("\n+n\n"),
         "{text}"
     );
+
+    // Opening from the diff: the "+B" line is current line 2 of file.txt.
+    let opened = |app: &Application| {
+        let (view, doc) = current_ref!(app.editor);
+        let name = doc.path().unwrap().file_name().unwrap().to_owned();
+        let text = doc.text().slice(..);
+        (name, doc.selection(view.id).primary().cursor_line(text))
+    };
+    send_keys(&mut app, "gg5j:review-diff-open<ret>").await?;
+    assert_eq!(opened(&app), ("file.txt".into(), 1));
+    send_keys(&mut app, ":review-diff-open<ret>").await?;
+    assert_error(&app, "not the :review-diff buffer");
+    // A file header opens the file at its first line.
+    send_keys(&mut app, ":review-diff<ret>gg:review-diff-open<ret>").await?;
+    assert_eq!(opened(&app), ("file.txt".into(), 0));
     Ok(())
 }
 

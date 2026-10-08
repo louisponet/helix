@@ -101,6 +101,7 @@
 | `:review-handoff` | On every write of a reviewed buffer, export a review batch to a new file in the given directory; auto-save skips reviewed buffers meanwhile. `clear` stops it. |
 | `:review-send` | Export a review batch to the handoff directory now, as a write would, without writing any file. Refuses while a reviewed buffer has unsaved changes. |
 | `:review-diff` | Show a unified diff of every workspace file changed since the review baseline commit in a scratch buffer. |
+| `:review-diff-open` | In the :review-diff buffer, open the file of the hunk under the cursor at the matching current line. |
 | `:review-files` | Pick a workspace file added (A), modified (M) or deleted (D) since the review baseline commit, and open it at its first change. |
 | `:reset-diff-change`, `:diffget`, `:diffg` | Reset the diff change at the cursor position. |
 | `:clear-register` | Clear given register. If no argument is provided, clear all registers. |
