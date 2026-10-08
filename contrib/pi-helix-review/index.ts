@@ -480,6 +480,19 @@ class Hook {
 		if (this.state.baseline) await helix(this.socket, [`review-baseline ${this.state.baseline.commit_oid}`]);
 	}
 
+	/** Shows `message` in Helix's status line with `:echo`; a failure is ignored like any other. */
+	async echo(message: string): Promise<void> {
+		await helix(this.socket, [`echo ${message}`]);
+	}
+
+	/** Tells the reviewer in Helix that the turn ended and how many files differ from the baseline. */
+	async announceEnd(): Promise<void> {
+		if (!this.state.baseline) return;
+		const count = Object.keys(this.state.snapshots).length;
+		const files = count === 1 ? "1 file" : `${count} files`;
+		await this.echo(`Agent turn done: ${files} changed since ${this.state.baseline.commit_oid.slice(0, 8)} (:review-files)`);
+	}
+
 	async snapshot(): Promise<void> {
 		if (!this.state.baseline) return;
 		const changed = await git(this.repo, ["diff", "--name-only", "-z", this.state.baseline.commit_oid]);
@@ -631,13 +644,17 @@ export default function helixReview(pi: ExtensionAPI): void {
 		const guidelines = hook?.guidelines();
 		if (guidelines) event.systemPromptOptions.promptGuidelines.push(guidelines);
 	});
-	pi.on("agent_start", () => hook?.begin());
+	pi.on("agent_start", async () => {
+		await hook?.begin();
+		await hook?.echo("Agent turn started");
+	});
 	pi.on("tool_result", (event) => {
 		if (event.toolName === "edit" || event.toolName === "write" || event.toolName === "bash") hook?.refreshSoon();
 	});
 	pi.on("agent_end", async () => {
 		await hook?.refresh();
 		await hook?.snapshot();
+		await hook?.announceEnd();
 	});
 
 	pi.registerCommand("helix-review", {

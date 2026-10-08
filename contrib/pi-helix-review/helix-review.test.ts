@@ -662,27 +662,32 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	assert.equal(promptGuidelines.length, 1);
 	assert.match(promptGuidelines[0], /^## Helix review handoff\n.*AGENT:/s);
 
+	// The fake Helix rejects `echo`, which must not fail the hook.
+	const started = "echo Agent turn started";
 	await session.emit("agent_start");
-	assert.deepEqual(lines, [`review-handoff ${outbox}`, `review-baseline ${head}`]);
+	assert.deepEqual(lines, [`review-handoff ${outbox}`, `review-baseline ${head}`, started]);
 	assert.deepEqual(state().baseline, { commit_oid: head, acknowledged: false });
 
 	writeFileSync(file, "fn a() {}\n// AGENT: old request\nfn b() {}\n");
 	for (const toolName of ["edit", "write", "bash", "read"]) await session.emit("tool_result", { toolName, input: {}, content: [], isError: false });
-	await until(() => lines.length === 3, "the coalesced refresh");
+	await until(() => lines.length === 4, "the coalesced refresh");
 	await new Promise((wake) => setTimeout(wake, 300));
-	assert.deepEqual(lines.slice(2), [`review-baseline ${head}`]);
+	assert.deepEqual(lines.slice(3), [`review-baseline ${head}`]);
 
 	w.stage("a.rs", "fn a() {}\n// AGENT: old request\nfn b() {}\n");
 	const next = w.commit();
 	writeFileSync(join(repo, "new.rs"), "fn new() {}\n");
 	await session.emit("agent_end", { messages: [] });
-	assert.deepEqual(lines.slice(3), [`review-baseline ${head}`]);
+	assert.deepEqual(lines.slice(4), [
+		`review-baseline ${head}`,
+		`echo Agent turn done: 2 files changed since ${head.slice(0, 8)} (:review-files)`,
+	]);
 	const snapshots = state().snapshots;
 	assert.deepEqual(Object.keys(snapshots).sort(), [file, join(repo, "new.rs")]);
 	assert.equal(snapshots[file], git(repo, "rev-parse", `${next}:a.rs`));
 
 	await session.emit("agent_start");
-	assert.deepEqual(lines.slice(4), [`review-handoff ${outbox}`, `review-baseline ${head}`], "the baseline is sticky");
+	assert.deepEqual(lines.slice(6), [`review-handoff ${outbox}`, `review-baseline ${head}`, started], "the baseline is sticky");
 
 	writeFileSync(file, "fn a() {}\n// AGENT: old request\nfn b() -> u8 { 1 }\n// AGENT: rename b\n");
 	const blob = git(repo, "rev-parse", `${head}:a.rs`);
@@ -736,12 +741,12 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	assert.equal(state().baseline.acknowledged, true);
 
 	await session.emit("agent_start");
-	assert.deepEqual(lines.slice(6), [`review-handoff ${outbox}`, `review-baseline ${next}`], "an acknowledged baseline moves to HEAD");
+	assert.deepEqual(lines.slice(9), [`review-handoff ${outbox}`, `review-baseline ${next}`, started], "an acknowledged baseline moves to HEAD");
 
 	const restarted = piSession(repo);
 	t.after(() => restarted.emit("session_shutdown"));
 	await restarted.emit("session_start", { reason: "startup" });
-	assert.deepEqual(lines.slice(8), [`review-handoff ${outbox}`, `review-baseline ${next}`], "session_start restores the baseline");
+	assert.deepEqual(lines.slice(12), [`review-handoff ${outbox}`, `review-baseline ${next}`], "session_start restores the baseline");
 });
 
 test("an unreachable Helix never fails the hook, and an empty handoff is dropped but acknowledged", async (t) => {
