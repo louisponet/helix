@@ -376,6 +376,14 @@ impl Review {
             .map_or(HunkStage::Unstaged, |hunk| self.stage(hunk))
     }
 
+    /// The first document line of every unstaged hunk, removals included, in order.
+    pub fn unstaged_hunk_lines(&self) -> Vec<usize> {
+        (0..self.hunks.len())
+            .filter(|&idx| self.stage(idx) == HunkStage::Unstaged)
+            .map(|idx| self.hunks[idx].after.start as usize)
+            .collect()
+    }
+
     /// Like [`Self::changed_lines`], with whether `HEAD` or the git index already holds each range.
     pub fn changed_lines_stage(&self) -> impl Iterator<Item = (ops::Range<usize>, HunkStage)> + '_ {
         self.hunks

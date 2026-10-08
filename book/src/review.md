@@ -199,7 +199,9 @@ like this:
    unstages it if it is already staged, in any order; with a selection over
    several hunks (or several selections) it stages every unstaged one, or
    unstages them all when all are staged (`Staged 3 hunks; 5 of 7 staged in
-   file.rs`), from a reviewed buffer,
+   file.rs`); the cursor then moves on to the next unstaged hunk, in this file
+   or the next changed one (`; next: b.rs hunk 1 of 2`), and stays when none
+   is left, from a reviewed buffer,
    focused old text or the `:review-diff` buffer, where staged hunks are marked
    `(staged)`. In the buffer a staged hunk's lines turn blue and its old lines
    grey (`diff.plus.review.staged`, `diff.minus.review.staged`) until the next

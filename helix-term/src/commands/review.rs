@@ -1690,7 +1690,7 @@ pub(super) fn review_stage(
         return Ok(());
     }
     ensure_review(cx)?;
-    change_staging(cx.editor, Staging::Stage)
+    stage_and_move_on(cx, Staging::Stage)
 }
 
 pub(super) fn review_unstage(
@@ -1702,7 +1702,7 @@ pub(super) fn review_unstage(
         return Ok(());
     }
     ensure_review(cx)?;
-    change_staging(cx.editor, Staging::Unstage)
+    stage_and_move_on(cx, Staging::Unstage)
 }
 
 pub(super) fn review_toggle_stage(
@@ -1714,7 +1714,143 @@ pub(super) fn review_toggle_stage(
         return Ok(());
     }
     ensure_review(cx)?;
-    change_staging(cx.editor, Staging::Toggle)
+    stage_and_move_on(cx, Staging::Toggle)
+}
+
+/// Stages or unstages like [`change_staging`], then, in a reviewed buffer, moves the cursor on to
+/// the next unstaged hunk after the selections, in this file or the next changed one (wrapping
+/// around); with none left anywhere the cursor stays.
+fn stage_and_move_on(cx: &mut compositor::Context, staging: Staging) -> anyhow::Result<()> {
+    let (view, doc) = current_ref!(cx.editor);
+    let past = doc
+        .selection(view.id)
+        .iter()
+        .map(|range| range.line_range(doc.text().slice(..)).1 + 1)
+        .max()
+        .unwrap_or(0);
+    // The diff buffer has its own cursor to keep, and focused old text marks one block.
+    let move_on = doc.review.is_some() && cx.editor.review_diff != Some(doc.id());
+    change_staging(cx.editor, staging)?;
+    if !move_on {
+        return Ok(());
+    }
+    let status = cx.editor.get_status().map(|(status, _)| status.to_string());
+    let from = doc!(cx.editor).path().map(Path::to_path_buf);
+    match next_unstaged_hunk(cx, past) {
+        Ok(true) => {
+            let to = doc!(cx.editor).path().map(Path::to_path_buf);
+            let target = cx.editor.get_status().map(|(status, _)| status.to_string());
+            match (status, target) {
+                (Some(status), Some(target)) if to != from => cx
+                    .editor
+                    .set_status(format!("{status}; next: {}", target.replacen(": ", " ", 1))),
+                (Some(status), _) => cx.editor.set_status(status),
+                _ => (),
+            }
+        }
+        Ok(false) => {
+            if let Some(status) = status {
+                cx.editor.set_status(status);
+            }
+        }
+        Err(err) => log::info!("not moving on after staging: {err:#}"),
+    }
+    Ok(())
+}
+
+/// Lands on the first unstaged hunk of the current buffer starting at or after line `past`, else
+/// on the first unstaged hunk of the next changed file with any, wrapping around to the start of
+/// the current buffer. Returns whether there was one.
+fn next_unstaged_hunk(cx: &mut compositor::Context, past: usize) -> anyhow::Result<bool> {
+    let unstaged = |doc: &Document| -> Vec<usize> {
+        doc.review
+            .as_ref()
+            .map(Review::unstaged_hunk_lines)
+            .unwrap_or_default()
+    };
+    let here: Vec<usize> = unstaged(doc!(cx.editor));
+    if let Some(&line) = here.iter().filter(|&&line| line >= past).min() {
+        land_on_hunk(cx.editor, line);
+        announce_hunk(cx.editor);
+        return Ok(true);
+    }
+    let (_, changes) = changed_files(cx)?;
+    let trust_full = doc_trust_full(cx.editor);
+    let files: Vec<PathBuf> = changes
+        .iter()
+        .filter(|change| matches!(change, FileChange::Modified { .. }))
+        .map(|change| change.path().to_path_buf())
+        .collect();
+    let current = doc!(cx.editor).path().map(Path::to_path_buf);
+    let start = current
+        .as_ref()
+        .and_then(|path| files.iter().position(|file| file == path));
+    let order = match start {
+        Some(idx) => files[idx + 1..]
+            .iter()
+            .chain(&files[..=idx])
+            .collect::<Vec<_>>(),
+        None => files.iter().collect(),
+    };
+    for file in order {
+        if Some(file) == current.as_ref() {
+            if let Some(&line) = here.iter().min() {
+                land_on_hunk(cx.editor, line);
+                announce_hunk(cx.editor);
+                return Ok(true);
+            }
+            continue;
+        }
+        // Only a file whose worktree differs from the index has anything left to stage.
+        let pending = cx
+            .editor
+            .diff_providers
+            .get_index_base(file, trust_full)
+            .ok()
+            .zip(std::fs::read(file).ok())
+            .is_some_and(|((index, _), worktree)| {
+                !helix_vcs::line_hunks(&index, &worktree).is_empty()
+            });
+        if !pending {
+            continue;
+        }
+        cx.editor.open(file, Action::Replace)?;
+        if let Err(err) = ensure_review(cx) {
+            log::info!("not enabling review: {err:#}");
+        }
+        if let Some(&line) = unstaged(doc!(cx.editor)).iter().min() {
+            land_on_hunk(cx.editor, line);
+            announce_hunk(cx.editor);
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Shows `<file>: hunk 2 of 5` for the hunk the cursor is on.
+fn announce_hunk(editor: &mut Editor) {
+    let (view, doc) = current_ref!(editor);
+    let cursor = doc
+        .selection(view.id)
+        .primary()
+        .cursor_line(doc.text().slice(..));
+    let hunks = doc
+        .review
+        .as_ref()
+        .map(Review::hunk_lines)
+        .unwrap_or_default();
+    let name = doc
+        .path()
+        .map(|path| {
+            path.strip_prefix(helix_loader::find_workspace().0)
+                .unwrap_or(path)
+                .display()
+                .to_string()
+        })
+        .unwrap_or_else(|| doc.display_name().into_owned());
+    if let Some(idx) = hunks.iter().position(|lines| lines.start == cursor) {
+        editor.set_status(format!("{name}: hunk {} of {}", idx + 1, hunks.len()));
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2025,7 +2161,12 @@ pub(crate) fn review_stage_hunk(cx: &mut Context) {
             return;
         }
     }
-    if let Err(err) = change_staging(cx.editor, Staging::Toggle) {
+    let mut cx = compositor::Context {
+        editor: cx.editor,
+        jobs: cx.jobs,
+        scroll: None,
+    };
+    if let Err(err) = stage_and_move_on(&mut cx, Staging::Toggle) {
         cx.editor.set_error(format!("{err:#}"));
     }
 }
