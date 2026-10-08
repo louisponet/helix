@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use super::macros::keymap;
 use super::{KeyTrie, Mode};
 use helix_core::hashmap;
+use helix_view::input::KeyEvent;
 
 pub fn default() -> HashMap<Mode, KeyTrie> {
     let normal = keymap!({ "Normal mode"
@@ -361,6 +362,15 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         "C-a" => increment,
         "C-x" => decrement,
     });
+    // The Review menu is also reachable as Space A.
+    let mut normal = normal;
+    let review = normal.search(&["G".parse().unwrap()]).unwrap().clone();
+    let space: KeyEvent = "space".parse().unwrap();
+    let space = normal.node_mut().unwrap().get_mut(&space);
+    match space {
+        Some(KeyTrie::Node(space)) => space.insert("A".parse().unwrap(), review),
+        _ => unreachable!("space is a menu"),
+    };
     let mut select = normal.clone();
     select.merge_nodes(keymap!({ "Select mode"
         "h" | "left" => extend_char_left,

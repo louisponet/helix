@@ -297,6 +297,7 @@ This layer is a kludge of mappings, mostly pickers.
 | -----   | -----------                                                             | -------                                    |
 | `f`     | Open file picker at LSP workspace root                                  | `file_picker`                              |
 | `F`     | Open file picker at current working directory                           | `file_picker_in_current_directory`         |
+| `A`     | Enter [review mode](#review-mode)                                       | N/A                                        |
 | `e`     | Open file explorer at workspace root                                     | `file_explorer`                            |
 | `.`     | Open file explorer at current buffer's directory                        | `file_explorer_in_current_buffer_directory`|
 | `b`     | Open buffer picker                                                      | `buffer_picker`                            |
@@ -359,7 +360,7 @@ Displays the signature of the selected completion item. Remapping currently not 
 
 #### Review mode
 
-Accessed by typing `G` in [normal mode](#normal-mode). The commands work on
+Accessed by typing `G` or `Space A` in [normal mode](#normal-mode). The commands work on
 the [inline review](./review.md) and start one against `HEAD` when needed. `G`
 used to go to a line; use `<n>gg` for that.
 

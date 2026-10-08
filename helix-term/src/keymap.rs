@@ -399,6 +399,16 @@ mod tests {
     }
 
     #[test]
+    fn space_a_is_the_review_menu() {
+        let normal = &default::default()[&Mode::Normal];
+        let key = |s: &str| s.parse::<KeyEvent>().unwrap();
+        assert_eq!(
+            normal.search(&[key("space"), key("A")]),
+            normal.search(&[key("G")])
+        );
+    }
+
+    #[test]
     fn merge_partial_keys() {
         let keymap = hashmap! {
             Mode::Normal => keymap!({ "Normal mode"
