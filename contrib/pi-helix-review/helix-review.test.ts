@@ -1164,6 +1164,80 @@ test("a Helix restarted on the same socket is attached again without waiting for
 	assert.equal(first.lines.length, 2);
 });
 
+test("baselines follow the branch through a rebase onto a newer base", async (t) => {
+	const log = t.mock.method(console, "info", () => {});
+	// main: c0, then m1 after the topic branched; topic: c0, c1, c2.
+	const scenario = async (label: string, rebase: string[]) => {
+		const w = workspace(t);
+		const socket = join(w.root, `${label}.sock`);
+		withEnv(t, { HELIX_COMMAND_SOCKET: socket, HELIX_GH: "false" });
+		const { lines } = await fakeHelix(t, socket);
+		const repo = realpathSync(w.repo);
+		const commit = (name: string, text: string) => {
+			w.stage(name, text);
+			return w.commit();
+		};
+		git(repo, "checkout", "-q", "-B", "main");
+		const c0 = commit("a.txt", "a\n");
+		git(repo, "checkout", "-q", "-b", "topic");
+		const c1 = commit("t1.txt", "1\n");
+		const c2 = commit("t2.txt", "2\n");
+		git(repo, "checkout", "-q", "main");
+		const m1 = commit("m.txt", "m\n");
+		git(repo, "checkout", "-q", "topic");
+		git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "rebase", "-q", ...rebase);
+		const head = git(repo, "rev-parse", "HEAD");
+		const stateDir = join(repo, ".pi", "helix-review", "state");
+		mkdirSync(stateDir, { recursive: true });
+		const pin = (id: string, oid: string, pid?: number, acknowledged = false) =>
+			writeFileSync(join(stateDir, `${id}.json`), JSON.stringify({ snapshots: {}, baseline: { commit_oid: oid, acknowledged }, pid }));
+		const sent = () => lines.find((line) => line.startsWith("review-baseline "))?.slice("review-baseline ".length);
+		// Starts a session and returns the baseline its first turn sends to Helix.
+		const turn = async (id: string) => {
+			const session = piSession(repo, id);
+			t.after(() => session.emit("session_shutdown"));
+			await session.emit("session_start", { reason: "startup" });
+			lines.splice(0);
+			await session.emit("agent_start");
+			return sent();
+		};
+		// Starts a session and returns the baseline it restores in Helix on attaching.
+		const attach = async (id: string) => {
+			const session = piSession(repo, id);
+			t.after(() => session.emit("session_shutdown"));
+			lines.splice(0);
+			await session.emit("session_start", { reason: "startup" });
+			return sent();
+		};
+		const state = (id: string) => JSON.parse(readFileSync(join(stateDir, `${id}.json`), "utf8"));
+		return { c0, c1, c2, m1, head, pin, turn, attach, state };
+	};
+
+	// (a) The branch tip before the rebase becomes the rewritten tip, persisted, still unacknowledged.
+	const a = await scenario("a", ["main"]);
+	a.pin("session-1", a.c2);
+	assert.equal(await a.turn("session-1"), a.head);
+	assert.deepEqual(a.state("session-1").baseline, { commit_oid: a.head, acknowledged: false });
+	assert.ok(log.mock.calls.some((call) => call.arguments[0] === `helix-review: baseline ${a.c2.slice(0, 8)} rewritten as ${a.head.slice(0, 8)} by a rebase`));
+
+	// (b) The branch's old base becomes the new merge base.
+	const b = await scenario("b", ["main"]);
+	b.pin("session-1", b.c0);
+	assert.equal(await b.turn("session-1"), b.m1);
+
+	// (c) A commit the rebase dropped falls back to the merge base.
+	const c = await scenario("c", ["--onto", "main", "HEAD~1"]);
+	c.pin("session-1", c.c1);
+	assert.equal(await c.turn("session-1"), c.m1);
+
+	// (d) Another live session's stale baseline is remapped for Helix, but its file is left alone.
+	const d = await scenario("d", ["main"]);
+	d.pin("session-1", d.c2, process.pid);
+	d.pin("session-2", d.c0, undefined, true);
+	assert.equal(await d.attach("session-2"), d.head, "session-1's only unacknowledged baseline, remapped");
+	assert.equal(d.state("session-1").baseline.commit_oid, d.c2);
+});
+
 test("an unreachable Helix never fails the hook, and an empty handoff is dropped but acknowledged", async (t) => {
 	const w = workspace(t);
 	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });

@@ -484,6 +484,10 @@ class Hook {
 	private timer?: NodeJS.Timeout;
 	private poller?: NodeJS.Timeout;
 	private attaching = false;
+	/** Remapped baselines by `<baseline>@<HEAD>`. */
+	private remapped = new Map<string, string>();
+	/** The base branch, `null` when there is none; unset until looked up. */
+	private base?: string | null;
 	/**
 	 * The identity (inode and change time, as an inode number can be reused) of the Helix socket
 	 * last attached to; unset while no Helix is known to listen.
@@ -539,14 +543,107 @@ class Hook {
 	 * so no session's unreviewed work drops out of the review, else this session's.
 	 */
 	private async reviewBaseline(): Promise<string | undefined> {
-		const pending = (await this.liveSessions())
-			.map((s) => s.state.baseline)
-			.filter((b) => b && !b.acknowledged)
-			.map((b) => b!.commit_oid);
+		await this.remapOwnBaseline();
+		// Other sessions' baselines are remapped here only; each session persists its own.
+		const pending = await Promise.all(
+			(await this.liveSessions())
+				.map((s) => s.state.baseline)
+				.filter((b) => b && !b.acknowledged)
+				.map((b) => this.remap(b!.commit_oid)),
+		);
 		const unique = [...new Set(pending)];
 		if (unique.length <= 1) return unique[0] ?? this.state.baseline?.commit_oid;
 		const newestFirst = await git(this.repo, ["log", "--no-walk=sorted", "--format=%H", ...unique]).catch(() => "");
 		return newestFirst.trim().split("\n").at(-1) || this.state.baseline?.commit_oid;
+	}
+
+	/** Moves this session's baseline to the commit a rebase made of it, and persists that. */
+	private async remapOwnBaseline(): Promise<void> {
+		const baseline = this.state.baseline;
+		if (!baseline) return;
+		const remapped = await this.remap(baseline.commit_oid);
+		if (remapped === baseline.commit_oid) return;
+		baseline.commit_oid = remapped;
+		await this.save();
+	}
+
+	/**
+	 * The commit baseline `oid` stands for in the current history: after the base branch moved
+	 * under a branch that started at `oid`, the new merge base; after a rebase rewrote `oid`, the
+	 * commit with the same patch-id on the branch, or the merge base when it was dropped or
+	 * squashed; else `oid` itself.
+	 */
+	private async remap(oid: string): Promise<string> {
+		const head = await git(this.repo, ["rev-parse", "HEAD"]).then((out) => out.trim(), () => "");
+		const key = `${oid}@${head}`;
+		let remapped = this.remapped.get(key);
+		if (remapped === undefined) {
+			remapped = (await this.findRewritten(oid, head).catch(() => undefined)) ?? oid;
+			this.remapped.set(key, remapped);
+			if (remapped !== oid) {
+				console.info(`helix-review: baseline ${oid.slice(0, 8)} rewritten as ${remapped.slice(0, 8)} by a rebase`);
+			}
+		}
+		return remapped;
+	}
+
+	private async findRewritten(oid: string, head: string): Promise<string | undefined> {
+		if (!head || oid === head) return undefined;
+		const succeeds = (args: string[]) => git(this.repo, args).then(() => true, () => false);
+		const base = await this.baseBranch();
+		const mergeBase = base
+			? await git(this.repo, ["merge-base", base, "HEAD"]).then((out) => out.trim(), () => undefined)
+			: undefined;
+		if (await succeeds(["merge-base", "--is-ancestor", oid, "HEAD"])) {
+			// The branch's old base: follow the base branch when it moved on under the branch.
+			if (!base || !mergeBase || mergeBase === oid || mergeBase === head) return undefined;
+			const onBase = await succeeds(["merge-base", "--is-ancestor", oid, base]);
+			const moved = await succeeds(["merge-base", "--is-ancestor", oid, mergeBase]);
+			return onBase && moved ? mergeBase : undefined;
+		}
+		// Rewritten by a rebase: the branch commit with the same change.
+		const patchId = async (patches: string) =>
+			(await git(this.repo, ["patch-id", "--stable"], patches)).split("\n").filter(Boolean).map((line) => line.split(" "));
+		const own = await git(this.repo, ["show", oid])
+			.then(patchId)
+			.catch(() => []);
+		if (own.length > 0) {
+			const range = base ? `${base}..HEAD` : "HEAD";
+			const log = await git(this.repo, ["log", "-p", "--first-parent", "--max-count=500", range]);
+			const match = (await patchId(log)).find(([id]) => id === own[0][0]);
+			if (match) return match[1];
+		}
+		return mergeBase;
+	}
+
+	/**
+	 * The branch the current branch is based on: its pull request's base (looked up once with
+	 * `gh`), else `origin/HEAD`, else the first of the usual names that exists. Cached.
+	 */
+	private async baseBranch(): Promise<string | undefined> {
+		if (this.base !== undefined) return this.base ?? undefined;
+		const exists = (ref: string) =>
+			git(this.repo, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).then(() => true, () => false);
+		const gh = process.env.HELIX_GH || "gh";
+		const pr = await run(gh, ["pr", "view", "--json", "baseRefName"], { cwd: this.repo, timeout: 10_000 })
+			.then(({ stdout }) => (JSON.parse(stdout) as { baseRefName?: string }).baseRefName)
+			.catch(() => undefined);
+		const remoteHead = await git(this.repo, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
+			.then((out) => out.trim().replace(/^refs\/remotes\//, ""))
+			.catch(() => undefined);
+		const candidates = [
+			...(pr ? [`origin/${pr}`, pr] : []),
+			...(remoteHead ? [remoteHead] : []),
+			...["origin/develop", "origin/main", "origin/master", "develop", "main", "master"],
+		];
+		this.base = null;
+		for (const ref of candidates) {
+			if (await exists(ref)) {
+				this.base = ref;
+				break;
+			}
+		}
+		return this.base ?? undefined;
 	}
 
 	/** Marks this session live and active now. */
@@ -631,6 +728,7 @@ class Hook {
 	}
 
 	async begin(): Promise<void> {
+		await this.remapOwnBaseline();
 		if (!this.state.baseline || this.state.baseline.acknowledged) {
 			const head = (await git(this.repo, ["rev-parse", "HEAD"])).trim();
 			this.state.baseline = { commit_oid: head, acknowledged: false };
@@ -706,6 +804,7 @@ class Hook {
 		if (!this.state.commit_requested) return undefined;
 		this.state.commit_requested = false;
 		await this.save();
+		await this.remapOwnBaseline();
 		if (!this.state.baseline) return undefined;
 		const head = (await git(this.repo, ["rev-parse", "HEAD"])).trim();
 		if (head === this.state.baseline.commit_oid) return undefined;

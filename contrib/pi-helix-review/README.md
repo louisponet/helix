@@ -175,6 +175,18 @@ oldest unacknowledged baseline of the live sessions (by commit date), else the
 session's own, so no session's unreviewed work drops out of the review; a
 `:review-commit` handoff moves only the baseline of the session that took it.
 
+Every baseline is checked against the current history before it is used
+(turn start, refreshes, attaching, the oldest-unacknowledged choice and the
+move after a commit request): after the branch was rebased onto a newer base,
+a baseline that was the branch's old base moves to the new merge base, and one
+the rebase rewrote moves to the branch commit with the same `git patch-id`
+(or to the merge base when the rebase dropped or squashed it). The base branch
+is the pull request's base (`gh pr view`, once per session), else
+`origin/HEAD`, else the first of `origin/develop`, `origin/main`,
+`origin/master`, `develop`, `main`, `master`. A session saves only its own
+remapped baseline and logs `helix-review: baseline <old> rewritten as <new> by
+a rebase`.
+
 Each batch goes to one live session: the one
 its `target` names (a session id or label such as `pi-2`), else the one that last changed one of its
 files during a turn, else the most recently active one. Only that session
