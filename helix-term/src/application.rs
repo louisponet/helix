@@ -391,18 +391,20 @@ impl Application {
             scroll: None,
         };
         cx.editor.clear_status();
-        let reply =
-            match commands::typed::execute_command_line(&mut cx, line, PromptEvent::Validate) {
-                Err(err) => {
-                    cx.editor.set_error(err.to_string());
-                    format!("error {err}")
-                }
-                Ok(()) => match cx.editor.get_status() {
-                    Some((status, Severity::Error)) => format!("error {status}"),
-                    Some((status, _)) => format!("ok {status}"),
-                    None => "ok".to_owned(),
-                },
-            };
+        cx.editor.socket_command = true;
+        let result = commands::typed::execute_command_line(&mut cx, line, PromptEvent::Validate);
+        cx.editor.socket_command = false;
+        let reply = match result {
+            Err(err) => {
+                cx.editor.set_error(err.to_string());
+                format!("error {err}")
+            }
+            Ok(()) => match cx.editor.get_status() {
+                Some((status, Severity::Error)) => format!("error {status}"),
+                Some((status, _)) => format!("ok {status}"),
+                None => "ok".to_owned(),
+            },
+        };
         reply.replace('\n', " ")
     }
 

@@ -122,6 +122,20 @@ pub struct OldFocus {
     pub extend: bool,
 }
 
+/// The GitHub pull request under review (`:review-pr`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequest {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    /// The base repository as `owner/name`.
+    pub repo: String,
+    pub head_oid: String,
+    pub base_ref: String,
+    /// The merge base of the base branch and the pull request, the review baseline.
+    pub merge_base: String,
+}
+
 /// How far a review hunk has got towards a commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HunkStage {

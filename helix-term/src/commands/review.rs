@@ -112,17 +112,26 @@ pub(super) fn review_prev(
 /// `HEAD` as the baseline when none is set. Returns the baseline too.
 fn changed_files(cx: &mut compositor::Context) -> anyhow::Result<(String, Vec<FileChange>)> {
     let commit = review_baseline_or_head(cx)?;
+    let changes = changed_files_since(cx.editor, &commit)?;
+    Ok((commit, changes))
+}
+
+/// The workspace files changed since `revision`, in `:review-files` order.
+pub(super) fn changed_files_since(
+    editor: &Editor,
+    revision: &str,
+) -> anyhow::Result<Vec<FileChange>> {
     let workspace = helix_loader::find_workspace().0;
-    let trust_full = cx
-        .editor
+    let trust_full = editor
         .workspace_trust
         .query(&workspace, TrustQuery::Git)
         .is_trusted();
-    let changes = cx
-        .editor
+    let commit = editor
         .diff_providers
-        .get_changed_files_since(&workspace, &commit, trust_full)?;
-    Ok((commit, changes))
+        .resolve_commit(&workspace, revision, trust_full)?;
+    editor
+        .diff_providers
+        .get_changed_files_since(&workspace, &commit, trust_full)
 }
 
 /// Moves to the next (or previous) changed block `count` times: within the current buffer, then
@@ -235,7 +244,7 @@ pub(super) fn typable_allowed(editor: &Editor, name: &str) -> bool {
 }
 
 /// Formats `count` followed by `noun`, pluralized with a trailing "s" unless `count` is 1.
-fn plural(count: usize, noun: &str) -> String {
+pub(super) fn plural(count: usize, noun: &str) -> String {
     let suffix = if count == 1 { "" } else { "s" };
     format!("{count} {noun}{suffix}")
 }
@@ -850,9 +859,24 @@ pub(super) fn review_baseline(
         return Ok(());
     }
 
+    if cx.editor.review_pr.is_some() && &args[0] != "clear" {
+        if cx.editor.socket_command {
+            // The hook re-sending its baseline only refreshes the pull request's (or a stepped one).
+            let current = cx
+                .editor
+                .review_baseline
+                .clone()
+                .context("no review baseline")?;
+            return pin_review_baseline(cx.editor, &current);
+        }
+        // A baseline the user picks ends the pull request review.
+        cx.editor.review_pr = None;
+        cx.editor.review_stepped_from = None;
+    }
     if &args[0] == "clear" {
         cx.editor.review_baseline = None;
         cx.editor.review_stepped_from = None;
+        cx.editor.review_pr = None;
         let doc_ids: Vec<_> = cx.editor.documents().map(Document::id).collect();
         for doc_id in doc_ids {
             let doc = doc_mut!(cx.editor, &doc_id);
@@ -885,11 +909,11 @@ pub(super) fn review_baseline(
             .resolve_commit(&workspace, &args[0], trust_full)?;
         if commit == from {
             let stepped = cx.editor.review_baseline.clone().unwrap_or(from);
-            return pin_review_baseline(cx, &stepped);
+            return pin_review_baseline(cx.editor, &stepped);
         }
         cx.editor.review_stepped_from = None;
     }
-    pin_review_baseline(cx, &args[0])
+    pin_review_baseline(cx.editor, &args[0])
 }
 
 pub(super) fn review_older(
@@ -938,7 +962,7 @@ fn step_baseline(cx: &mut compositor::Context, base: &str, older: bool) -> anyho
         .review_stepped_from
         .take()
         .unwrap_or_else(|| base.to_owned());
-    pin_review_baseline(cx, &commit.id)?;
+    pin_review_baseline(cx.editor, &commit.id)?;
     cx.editor.review_stepped_from = Some(from).filter(|from| *from != commit.id);
     cx.editor.set_status(format!(
         "Baseline {} {} ({behind} behind HEAD)",
@@ -972,29 +996,26 @@ fn ensure_review(cx: &mut compositor::Context) -> anyhow::Result<()> {
 /// The editor-wide review baseline, pinning `HEAD` like `:review-baseline HEAD` when none is set.
 fn review_baseline_or_head(cx: &mut compositor::Context) -> anyhow::Result<String> {
     if cx.editor.review_baseline.is_none() {
-        pin_review_baseline(cx, "HEAD")
+        pin_review_baseline(cx.editor, "HEAD")
             .context("no review baseline, and HEAD cannot be resolved")?;
     }
     Ok(cx.editor.review_baseline.clone().unwrap())
 }
 
 /// Pins `revision` as the editor-wide review baseline and reviews the workspace buffers against it.
-fn pin_review_baseline(cx: &mut compositor::Context, revision: &str) -> anyhow::Result<()> {
+pub(super) fn pin_review_baseline(editor: &mut Editor, revision: &str) -> anyhow::Result<()> {
     let workspace = helix_loader::find_workspace().0;
-    let trust_full = cx
-        .editor
+    let trust_full = editor
         .workspace_trust
         .query(&workspace, TrustQuery::Git)
         .is_trusted();
-    let commit = cx
-        .editor
+    let commit = editor
         .diff_providers
         .resolve_commit(&workspace, revision, trust_full)?;
-    let refresh = cx.editor.review_baseline.as_ref() == Some(&commit);
-    cx.editor.review_baseline = Some(commit.clone());
+    let refresh = editor.review_baseline.as_ref() == Some(&commit);
+    editor.review_baseline = Some(commit.clone());
 
-    let doc_ids: Vec<_> = cx
-        .editor
+    let doc_ids: Vec<_> = editor
         .documents()
         .filter(|doc| doc.path().is_some_and(|path| path.starts_with(&workspace)))
         .map(Document::id)
@@ -1002,7 +1023,7 @@ fn pin_review_baseline(cx: &mut compositor::Context, revision: &str) -> anyhow::
     let (mut reviewed, mut unchanged, mut unsaved, mut failed, mut closed) = (0, 0, 0, 0, 0);
     let mut conflicts = Vec::new();
     for doc_id in doc_ids {
-        let doc = doc!(cx.editor, &doc_id);
+        let doc = doc!(editor, &doc_id);
         if doc.review_opt_out.as_ref() == Some(&commit) {
             closed += 1;
             continue;
@@ -1027,15 +1048,14 @@ fn pin_review_baseline(cx: &mut compositor::Context, revision: &str) -> anyhow::
             Some(review) if refresh => review.baseline().revision().map(str::to_owned),
             _ => Some(commit.clone()),
         };
-        let result = reload_document(cx.editor, doc_id).and_then(|()| {
-            let doc = doc_mut!(cx.editor, &doc_id);
-            let trust_full = cx
-                .editor
+        let result = reload_document(editor, doc_id).and_then(|()| {
+            let doc = doc_mut!(editor, &doc_id);
+            let trust_full = editor
                 .workspace_trust
                 .query(doc.workspace_root(), TrustQuery::Git)
                 .is_trusted();
             let review =
-                doc.load_review(&cx.editor.diff_providers, trust_full, revision.as_deref())?;
+                doc.load_review(&editor.diff_providers, trust_full, revision.as_deref())?;
             doc.set_review(review);
             Ok(())
         });
@@ -1049,10 +1069,10 @@ fn pin_review_baseline(cx: &mut compositor::Context, revision: &str) -> anyhow::
     }
 
     // Keep an open :review-diff buffer in step with the files it shows.
-    refresh_review_diff(cx.editor);
+    refresh_review_diff(editor);
 
-    let scrolloff = cx.editor.config().scrolloff;
-    let (view, doc) = current!(cx.editor);
+    let scrolloff = editor.config().scrolloff;
+    let (view, doc) = current!(editor);
     view.ensure_cursor_in_view(doc, scrolloff);
     let mut status =
         if reviewed == 0 && unsaved == 0 && failed == 0 && conflicts.is_empty() && unchanged > 0 {
@@ -1089,7 +1109,7 @@ fn pin_review_baseline(cx: &mut compositor::Context, revision: &str) -> anyhow::
             conflicts.join(", ")
         ));
     }
-    cx.editor.set_status(status);
+    editor.set_status(status);
     Ok(())
 }
 
@@ -1193,7 +1213,7 @@ pub(super) fn review_commit(
 }
 
 /// Refuses `command` while a reviewed buffer has unsaved changes.
-fn ensure_reviews_saved(editor: &Editor, command: &str) -> anyhow::Result<()> {
+pub(super) fn ensure_reviews_saved(editor: &Editor, command: &str) -> anyhow::Result<()> {
     let unsaved: Vec<_> = editor
         .documents()
         .filter(|doc| doc.review.is_some() && doc.is_modified())

@@ -4145,6 +4145,17 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         },
     },
     TypableCommand {
+        name: "review-pr",
+        aliases: &[],
+        doc: "Review a GitHub pull request (number or URL) with gh: check it out and review every buffer against its merge base with the base branch. `close` leaves the pull request review.",
+        fun: review_pr::review_pr,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (1, Some(1)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
         name: "review-commit-all",
         aliases: &[],
         doc: "Stage every file changed since the review baseline (modified, deleted and untracked, like git add -A limited to them), then hand back like :review-commit with an optional subject and a leading @label to address a pi session.",

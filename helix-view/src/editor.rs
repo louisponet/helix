@@ -1304,6 +1304,10 @@ pub struct Editor {
     /// The baseline the reviewer stepped away from with `:review-older` or `:review-newer`; while
     /// set, `:review-baseline` with this commit only refreshes the stepped baseline.
     pub review_stepped_from: Option<String>,
+    /// The GitHub pull request under review, see `:review-pr`.
+    pub review_pr: Option<crate::review::PullRequest>,
+    /// Whether the typed command running came from the command socket (the pi hook), not the user.
+    pub socket_command: bool,
     /// The pi session the last handoff was addressed to with `@label`, if it was.
     pub review_target: Option<String>,
     /// The scratch buffer `:review-diff` writes to.
@@ -1481,6 +1485,8 @@ impl Editor {
             review_handoff: None,
             review_target: None,
             review_stepped_from: None,
+            review_pr: None,
+            socket_command: false,
             review_diff: None,
             debug_adapters: dap::registry::Registry::new(),
             breakpoints: HashMap::new(),

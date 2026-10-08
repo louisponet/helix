@@ -613,6 +613,10 @@ where
     let Some(review) = &context.doc.review else {
         return;
     };
+    let pr = match &context.editor.review_pr {
+        Some(pr) => format!(" #{}", pr.number),
+        None => String::new(),
+    };
     let mut text = match review.baseline().revision() {
         Some(commit) => {
             let stepped = if context.editor.review_stepped_from.is_some() {
@@ -620,9 +624,9 @@ where
             } else {
                 ""
             };
-            format!(" review {}{stepped}", &commit[..8])
+            format!(" review{pr} {}{stepped}", &commit[..8])
         }
-        None => " review index".to_owned(),
+        None => format!(" review{pr} index"),
     };
     let hunks = review.hunk_count();
     if hunks > 0 {

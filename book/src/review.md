@@ -51,6 +51,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `Enter` | In normal mode, runs `:review-toggle-stage` while the buffer is reviewed or is the `:review-diff` buffer, and does nothing otherwise. |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept. Under a `:review-baseline`, the buffer is not reviewed again until a different baseline, `:review-baseline clear`, or an explicit `:review` on it. |
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. `clear` closes all reviews. |
+| `:review-pr <number\|url>` | Review a GitHub pull request: check it out with `gh pr checkout` and review every buffer against its merge base with the base branch. Refuses uncommitted changes and unsaved reviewed buffers. `close` leaves the pull request review and keeps the checkout. See [Reviewing pull requests](#reviewing-pull-requests). |
 | `:review-commit-all [subject]` | Stage every file changed since the baseline (modified, deleted and untracked, like `git add -A` limited to them), then hand back like `:review-commit`. Refuses unsaved reviewed buffers, and says `no changes since <commit>` when there is nothing. `G M` in the default keymap. |
 | `:review-next` | Go to the next changed block; after the last one, open the next file changed since the baseline (`:review-files` order, wrapping around) at its first block. Shows `<file>: hunk 2 of 5`. `G n` in the default keymap, which takes a count. |
 | `:review-prev` | Like `:review-next` backwards, landing on the previous file's last block. `G N` in the default keymap. |
@@ -275,6 +276,25 @@ when zero, as in `9 hunks 3 committed 2 staged`), the pending comment count and
 `@<label>` when the last handoff was addressed to a session; add it with, for example,
 `right = ["review", "diagnostics", "selections", "position"]` under
 `[editor.statusline]`.
+
+### Reviewing pull requests
+
+`:review-pr <number|url>` reviews a GitHub pull request with the review mode.
+It talks to GitHub through the [`gh`](https://cli.github.com) CLI (`$HELIX_GH`
+when set, else `gh` on `PATH`), in the background: it looks the pull request
+up, runs `gh pr checkout` (which also works for forks), and pins the merge base
+of the base branch and the checked-out head as the review baseline, so every
+buffer, `:review-files`, `:review-diff` and `G n` show exactly the pull
+request's changes. The status reads `Reviewing PR #123 <title>: N files
+against <base branch> at <merge base>`, and the `review` statusline element
+starts with `#123`. It refuses while the worktree has uncommitted changes.
+
+The pull request's baseline stays pinned: the pi hook re-sending its own
+baseline only refreshes the reviews. `G -` / `G +` still step through history
+(`G +` from the merge base walks the pull request's commits). Running
+`:review-baseline` yourself leaves the pull request review, and so does
+`:review-pr close`, which keeps the checkout. `:review-pr` also works over the
+command socket, so other tools can open a pull request in Helix.
 
 ### Troubleshooting
 

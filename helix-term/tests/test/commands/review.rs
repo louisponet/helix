@@ -2250,6 +2250,149 @@ async fn enter_stages_and_unstages_every_hunk_the_selections_touch() -> anyhow::
     Ok(())
 }
 
+/// A fake `gh` (through `$HELIX_GH`) that appends its arguments to `log` and answers from
+/// `script`, a shell `case "$*"` body; unset again when dropped.
+struct FakeGh {
+    log: PathBuf,
+    _dir: TempDir,
+}
+
+impl FakeGh {
+    fn new(script: &str) -> FakeGh {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("argv.log");
+        let path = dir.path().join("gh");
+        fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n{script}\n*) echo \"unexpected: $*\" >&2; exit 1;;\nesac\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("HELIX_GH", &path);
+        FakeGh { log, _dir: dir }
+    }
+
+    fn calls(&self) -> Vec<String> {
+        fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+impl Drop for FakeGh {
+    fn drop(&mut self) {
+        std::env::remove_var("HELIX_GH");
+    }
+}
+
+/// Runs the event loop until `done` holds, for jobs such as `gh` calls.
+async fn wait_for(
+    app: &mut Application,
+    done: impl Fn(&Application) -> bool,
+) -> anyhow::Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !done(app) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out: {:?}",
+            app.editor.get_status()
+        );
+        send_keys(app, "").await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_pr_checks_out_a_pull_request_and_reviews_it_against_the_merge_base(
+) -> anyhow::Result<()> {
+    let repo = Repo::new("a\nb\n", "a\nb\n", "a\nb\n");
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let fork = git_ok(dir, &["rev-parse", "HEAD"]);
+    git_ok(dir, &["branch", "-M", "main"]);
+    // The base branch moves on after the pull request branched off.
+    fs::write(dir.join("base.txt"), "base\n")?;
+    git_ok(dir, &["add", "base.txt"]);
+    git_ok(dir, &["commit", "-m", "base moves on"]);
+    let base = git_ok(dir, &["rev-parse", "HEAD"]);
+    git_ok(dir, &["checkout", "-q", "-b", "feature", &fork]);
+    repo.write("a\nB\n");
+    fs::write(dir.join("new.txt"), "new\n")?;
+    git_ok(dir, &["add", "file.txt", "new.txt"]);
+    git_ok(dir, &["commit", "-m", "feature"]);
+    let head = git_ok(dir, &["rev-parse", "HEAD"]);
+    git_ok(dir, &["checkout", "-q", "main"]);
+    let gh = FakeGh::new(&format!(
+        r#"pr\ view\ 7*) echo '{{"number":7,"title":"Add new","url":"https://github.com/o/r/pull/7","headRefOid":"{head}","baseRefName":"main","baseRefOid":"{base}","isCrossRepository":false,"headRepositoryOwner":{{"login":"o"}}}}';;
+repo\ view*) echo '{{"nameWithOwner":"o/r"}}';;
+pr\ checkout\ 7) git checkout -q feature;;"#
+    ));
+
+    let mut config = test_config();
+    config.editor.statusline.right = vec![StatusLineElement::Review];
+    let mut app = AppBuilder::new()
+        .with_file(&repo.file, None)
+        .with_config(config)
+        .build()?;
+    send_keys(&mut app, ":review-pr 7<ret>").await?;
+    wait_for(&mut app, |app| app.editor.review_pr.is_some()).await?;
+    let status = app.editor.get_status().unwrap().0.to_string();
+    assert_eq!(
+        status,
+        format!(
+            "Reviewing PR #7 Add new: 2 files against main at {}",
+            &fork[..8]
+        )
+    );
+    assert_eq!(
+        gh.calls(),
+        [
+            format!("pr view 7 --json number,title,url,headRefOid,baseRefName,baseRefOid,isCrossRepository,headRepositoryOwner"),
+            "repo view --json nameWithOwner".to_owned(),
+            "pr checkout 7".to_owned(),
+        ]
+    );
+    let pr = app.editor.review_pr.clone().unwrap();
+    assert_eq!(
+        (pr.repo.as_str(), pr.head_oid.as_str()),
+        ("o/r", head.as_str())
+    );
+    assert_eq!(app.editor.review_baseline.as_deref(), Some(fork.as_str()));
+    assert_eq!(doc!(app.editor).text().to_string(), "a\nB\n");
+    let element = |app: &Application| statusline(app);
+    assert!(
+        element(&app).contains(&format!(" review #7 {} ", &fork[..8])),
+        "{}",
+        element(&app)
+    );
+
+    send_keys(&mut app, ":review-files<ret>").await?;
+    send_keys(&mut app, "<esc>").await?;
+    assert_eq!(
+        app.editor.get_status().unwrap().0,
+        "2 files, +2 -1, 0/2 hunks staged, 2 committed"
+    );
+
+    // The hook re-sending its baseline over the socket keeps the merge base.
+    app.editor.socket_command = true;
+    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+    app.editor.socket_command = false;
+    assert_eq!(app.editor.review_baseline.as_deref(), Some(fork.as_str()));
+    assert!(app.editor.review_pr.is_some());
+
+    send_keys(&mut app, ":review-pr close<ret>").await?;
+    assert!(app.editor.review_pr.is_none());
+    assert!(!element(&app).contains("#7"), "{}", element(&app));
+    drop(gh);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_g_menu_runs_review_commands_next_to_user_keys() -> anyhow::Result<()> {
     let repo = Repo::new("one\ntwo\n", "one\ntwo\n", "one\nTWO\n");
