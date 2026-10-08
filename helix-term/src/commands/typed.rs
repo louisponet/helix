@@ -4055,6 +4055,28 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         },
     },
     TypableCommand {
+        name: "review-reply",
+        aliases: &[],
+        doc: "Show the agent's reply from a JSON file {path, current_line, text} inline in that reviewed buffer, above the change closest to current_line.",
+        fun: review::review_reply,
+        completer: CommandCompleter::positional(&[completers::filename]),
+        signature: Signature {
+            positionals: (1, Some(1)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-dismiss",
+        aliases: &[],
+        doc: "Hide the latest question placeholders and reply of the buffer, or the given number of latest ones.",
+        fun: review::review_dismiss,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(1)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
         name: "review-comments",
         aliases: &[],
         doc: "Pick a pending review comment and jump to its line.",

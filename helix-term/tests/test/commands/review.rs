@@ -2053,6 +2053,80 @@ async fn review_ask_writes_the_buffer_and_hands_off_every_selection_once() -> an
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn asked_questions_show_placeholders_until_the_reply_and_dismiss_hides_them(
+) -> anyhow::Result<()> {
+    let repo = Repo::new(
+        "a\nb\nc\nd\ne\nf\n",
+        "a\nb\nc\nd\ne\nf\n",
+        "a\nb\nc\nd\nE\nf\n",
+    );
+    let _cwd = Cwd::enter(repo.dir.path());
+    let outbox = tempfile::tempdir()?;
+    let mut config = test_config();
+    config.editor.statusline.right = vec![StatusLineElement::Review];
+    let mut app = AppBuilder::new()
+        .with_config(config)
+        .with_file(&repo.file, None)
+        .build()?;
+    let notes = |app: &Application| -> Vec<String> {
+        render(app)
+            .into_iter()
+            .map(|(_, text)| text)
+            .filter(|text| text.contains(" │ "))
+            .collect()
+    };
+    let line_of = |app: &Application, text: &str| -> usize {
+        render(app).iter().position(|(_, row)| row == text).unwrap()
+    };
+
+    // Lines 1 and 2 selected; the copy on line 2 is the primary selection.
+    let keys = format!(
+        ":review-handoff {}<ret>ggxC:review-ask why?<ret>",
+        outbox.path().display()
+    );
+    send_keys(&mut app, &keys).await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(fs::read_dir(outbox.path())?.count(), 1);
+    // Both placeholders sit above the change closest to them, line 5.
+    assert_eq!(notes(&app), ["you │ why?", "you │ why?"]);
+    assert_eq!(line_of(&app, "E"), line_of(&app, "d") + 4);
+
+    let reply = repo.dir.path().join("reply.json");
+    let json = serde_json::json!({
+        "path": repo.file,
+        "current_line": 2,
+        "text": "Because the\nchange needs it.",
+    });
+    fs::write(&reply, json.to_string())?;
+    send_keys(&mut app, &format!(":review-reply {}<ret>", reply.display())).await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(
+        notes(&app),
+        [
+            "you │ why?",
+            "agent │ Because the",
+            "      │ change needs it."
+        ]
+    );
+    assert!(statusline(&app).contains("1 reply"));
+    // Rows follow the old line and precede the line they are shown above.
+    let rows = render(&app);
+    let e = line_of(&app, "E");
+    assert_eq!(rows[e - 1].1, "      │ change needs it.");
+    assert_eq!(rows[e - 4].1, "e");
+
+    // The reply survives a refresh, and dismissing drops it with its placeholders.
+    send_keys(&mut app, ":review-refresh<ret>").await?;
+    assert_eq!(notes(&app).len(), 3);
+    send_keys(&mut app, ":review-dismiss<ret>").await?;
+    assert!(notes(&app).is_empty());
+    assert!(!statusline(&app).contains("reply"));
+    send_keys(&mut app, ":review-dismiss<ret>").await?;
+    assert_error(&app, "no questions or replies to dismiss");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn repeating_the_baseline_only_reviews_buffers_changed_on_disk() -> anyhow::Result<()> {
     let repo = Repo::new("a\nb\n", "a\nb\n", "a\nB\n");
     let dir = repo.dir.path();

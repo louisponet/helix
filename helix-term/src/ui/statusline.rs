@@ -631,6 +631,11 @@ where
         let suffix = if comments == 1 { "" } else { "s" };
         text.push_str(&format!(" {comments} comment{suffix}"));
     }
+    let replies = review.reply_count();
+    if replies > 0 {
+        let noun = if replies == 1 { "reply" } else { "replies" };
+        text.push_str(&format!(" {replies} {noun}"));
+    }
     if review.is_suspended() {
         text.push_str(" suspended");
     }

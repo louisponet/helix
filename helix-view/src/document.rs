@@ -2044,7 +2044,10 @@ impl Document {
 
     /// Starts or replaces the review. The differ compares against its snapshot until the review
     /// is closed or suspended.
-    pub fn set_review(&mut self, review: Review) {
+    pub fn set_review(&mut self, mut review: Review) {
+        if let Some(previous) = self.review.take() {
+            review.keep_asks(previous);
+        }
         self.review = Some(review);
         self.review_opt_out = None;
         self.update_differ();

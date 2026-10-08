@@ -42,6 +42,7 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "o" => review_old_text,
             "m" => review_comment_prompt,
             "a" => review_ask_prompt,
+            "D" => review_dismiss_latest,
             "c" => review_comments_picker,
             "u" => review_uncomment_latest,
             "s" => review_toggle_stage,

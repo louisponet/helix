@@ -135,6 +135,8 @@ pub struct Review {
     index: Option<Vec<u8>>,
     /// Per hunk, whether `index` already holds it; recomputed on every edit.
     staged: Vec<bool>,
+    /// Questions asked with `:review-ask` and their replies, oldest first.
+    asks: Vec<ReviewAsk>,
 }
 
 impl Review {
@@ -163,6 +165,7 @@ impl Review {
             suspended: false,
             index: None,
             staged: Vec::new(),
+            asks: Vec::new(),
         };
         review.update_blocks();
         Ok(review)
@@ -220,6 +223,103 @@ impl Review {
             .filter(|block| block.old.start < block.old.end)
             .collect();
         self.blocks.sort_by_key(|block| block.anchor_line);
+    }
+
+    /// Keeps the questions and replies of `previous`, the review this one replaces.
+    pub fn keep_asks(&mut self, previous: Review) {
+        self.asks = previous.asks;
+    }
+
+    /// Shows a placeholder for `ask` until its reply arrives.
+    pub fn add_ask(&mut self, ask: ReviewAsk) {
+        self.asks.push(ask);
+    }
+
+    /// Shows the agent's reply `text` to the latest unanswered question asked at document line
+    /// `line`, or on its own if there is none.
+    pub fn add_reply(&mut self, line: usize, text: String) {
+        match (self.asks.iter_mut())
+            .rev()
+            .find(|ask| ask.reply.is_none() && ask.lines.first() == Some(&line))
+        {
+            Some(ask) => ask.reply = Some(text),
+            None => self.asks.push(ReviewAsk {
+                message: String::new(),
+                lines: vec![line],
+                reply: Some(text),
+            }),
+        }
+    }
+
+    /// Drops up to `count` of the latest questions with their replies and returns how many.
+    pub fn dismiss_asks(&mut self, count: usize) -> usize {
+        let removed = count.min(self.asks.len());
+        self.asks.truncate(self.asks.len() - removed);
+        removed
+    }
+
+    pub fn asks(&self) -> &[ReviewAsk] {
+        &self.asks
+    }
+
+    /// How many replies are shown.
+    pub fn reply_count(&self) -> usize {
+        self.asks.iter().filter(|ask| ask.reply.is_some()).count()
+    }
+
+    /// The document line a note for document line `line` is shown below: above the first line of
+    /// the change closest to `line`, or above `line` itself without changes. Notes for the first
+    /// line are shown below it.
+    fn note_anchor(&self, line: usize, len_lines: usize) -> usize {
+        let distance = |hunk: &Hunk| {
+            let (start, end) = (hunk.after.start as usize, hunk.after.end as usize);
+            if line < start {
+                start - line
+            } else if line >= end {
+                line + 1 - end.max(start + 1)
+            } else {
+                0
+            }
+        };
+        let target = self
+            .hunks
+            .iter()
+            .min_by_key(|hunk| distance(hunk))
+            .map_or(line, |hunk| hunk.after.start as usize);
+        target.min(len_lines.saturating_sub(1)).saturating_sub(1)
+    }
+
+    /// The notes shown below document line `line` of a document with `len_lines` lines, ordered
+    /// by the line they were asked at.
+    pub fn notes_below(&self, line: usize, len_lines: usize) -> Vec<ReviewNote<'_>> {
+        let mut notes: Vec<_> = self
+            .asks
+            .iter()
+            .flat_map(|ask| {
+                (ask.lines.iter().enumerate())
+                    .filter(move |&(_, &asked)| self.note_anchor(asked, len_lines) == line)
+                    .map(move |(idx, &asked)| {
+                        let note = match &ask.reply {
+                            Some(reply) if idx == 0 => ReviewNote::Reply(reply),
+                            _ => ReviewNote::Ask(&ask.message),
+                        };
+                        (asked, note)
+                    })
+            })
+            .collect();
+        notes.sort_by_key(|&(asked, _)| asked);
+        notes.into_iter().map(|(_, note)| note).collect()
+    }
+
+    /// The document lines notes are shown below, ascending and without repeats.
+    pub fn note_lines(&self, len_lines: usize) -> Vec<usize> {
+        let mut lines: Vec<_> = (self.asks.iter())
+            .flat_map(|ask| ask.lines.iter())
+            .map(|&line| self.note_anchor(line, len_lines))
+            .collect();
+        lines.sort_unstable();
+        lines.dedup();
+        lines
     }
 
     /// The historical content the document is compared against.
@@ -497,6 +597,78 @@ fn clamp_range(range: Range, text: RopeSlice, span: ops::Range<usize>) -> Range 
     }
 }
 
+/// A question asked with `:review-ask` in a reviewed buffer, and the agent's reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewAsk {
+    /// The question.
+    pub message: String,
+    /// The 0-based document line of each selection when asked, the primary selection's first.
+    pub lines: Vec<usize>,
+    /// The agent's reply, shown instead of the primary selection's placeholder.
+    pub reply: Option<String>,
+}
+
+/// A line shown between document lines for a [`ReviewAsk`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewNote<'a> {
+    /// A placeholder with the question, while waiting or for the other selections.
+    Ask(&'a str),
+    /// The agent's reply.
+    Reply(&'a str),
+}
+
+impl ReviewNote<'_> {
+    pub const MAX_REPLY_ROWS: usize = 20;
+
+    /// The rows of the note at text width `width`: one row with the question, or the reply
+    /// wrapped at `width` and cut at [`Self::MAX_REPLY_ROWS`] rows.
+    pub fn rows(&self, width: usize) -> Vec<String> {
+        match self {
+            ReviewNote::Ask(message) => {
+                let line = message.lines().next().unwrap_or_default();
+                let row = format!("you │ {}", line.replace('\t', "    "));
+                vec![wrap_columns(&row, width.max(1)).swap_remove(0)]
+            }
+            ReviewNote::Reply(reply) => {
+                const FIRST: &str = "agent │ ";
+                const NEXT: &str = "      │ ";
+                let text_width = width.saturating_sub(FIRST.chars().count()).max(1);
+                let mut rows: Vec<String> = reply
+                    .lines()
+                    .flat_map(|line| wrap_columns(&line.replace('\t', "    "), text_width))
+                    .enumerate()
+                    .map(|(idx, row)| format!("{}{row}", if idx == 0 { FIRST } else { NEXT }))
+                    .collect();
+                if rows.is_empty() {
+                    rows.push(FIRST.to_owned());
+                }
+                if rows.len() > Self::MAX_REPLY_ROWS {
+                    rows.truncate(Self::MAX_REPLY_ROWS - 1);
+                    rows.push(format!("{NEXT}…"));
+                }
+                rows
+            }
+        }
+    }
+}
+
+/// Splits `line` into pieces at most `width` columns wide; an empty line gives one empty piece.
+fn wrap_columns(line: &str, width: usize) -> Vec<String> {
+    use helix_core::unicode::width::UnicodeWidthChar;
+    let mut rows = vec![String::new()];
+    let mut columns = 0;
+    for ch in line.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if columns + ch_width > width && columns > 0 {
+            rows.push(String::new());
+            columns = 0;
+        }
+        rows.last_mut().unwrap().push(ch);
+        columns += ch_width;
+    }
+    rows
+}
+
 /// Reserves virtual rows for the old lines shown below document lines.
 pub(crate) struct ReviewLines<'a> {
     review: &'a Review,
@@ -532,13 +704,18 @@ impl LineAnnotation for ReviewLines<'_> {
         {
             return Position::new(0, 0);
         }
-        let rows = self
+        let rows: usize = self
             .review
             .blocks_at(doc_line)
             .iter()
             .map(|block| self.review.block_height(block, &self.text_fmt))
             .sum();
-        Position::new(rows, 0)
+        let width = self.text_fmt.viewport_width as usize;
+        let notes: usize = (self.review.notes_below(doc_line, self.text.len_lines()))
+            .iter()
+            .map(|note| note.rows(width).len())
+            .sum();
+        Position::new(rows + notes, 0)
     }
 }
 

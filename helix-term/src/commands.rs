@@ -500,6 +500,7 @@ impl MappableCommand {
         review_send_handoff, "Hand the review back now",
         review_comment_prompt, "Comment on the selection for the review",
         review_ask_prompt, "Ask the agent about the selections",
+        review_dismiss_latest, "Hide the latest question and reply of the review",
         redo, "Redo change",
         earlier, "Move backward in history",
         later, "Move forward in history",
@@ -4857,6 +4858,10 @@ fn review_send_handoff(cx: &mut Context) {
 
 fn review_comment_prompt(cx: &mut Context) {
     typed::command_mode_with_line(cx, "review-comment ")
+}
+
+fn review_dismiss_latest(cx: &mut Context) {
+    review::run_typed(cx, review::review_dismiss)
 }
 
 fn review_ask_prompt(cx: &mut Context) {

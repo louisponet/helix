@@ -41,6 +41,8 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-refresh` | Reload the buffer from disk; reread the index in index mode, or retain the selected commit in commit mode. Refuses unsaved changes. |
 | `:review-comment <text>` | Add a pending comment on the primary selection, or on the selected old text while it is focused. Use `%%` for a literal `%`. |
 | `:review-ask <text>` | Ask the agent about every selection, or the selected old text while it is focused: one comment per selection with the text, then hands the review off at once (writing the buffer first if it is modified). Needs `:review-handoff`. Use `%%` for a literal `%`. |
+| `:review-reply <file>` | Show the agent's reply from a JSON file `{path, current_line, text}` (written by the pi extension) inline in that buffer's review. Ignored when the buffer is not open or not reviewed. |
+| `:review-dismiss [count]` | Hide the latest question with its placeholders and reply, or the `count` latest ones. `:review-close` hides them all. |
 | `:review-comments` | Pick a pending comment by file, lines or text and jump to its line in the current text. |
 | `:review-uncomment [count]` | Drop the latest pending comment, or the `count` latest ones, and show how many remain. |
 | `:review-export <path>` | Write all pending comments and reviewed files to a new JSON file. |
@@ -201,8 +203,14 @@ like this:
    comments and jumps to one; `:review-uncomment [count]` drops the latest.
    To get an answer right away, select the code (several selections are
    fine) and use `:review-ask <text>` (`G a`): it hands the selections and the
-   question to the agent at once, writing the buffer first if needed. You
-   watch the agent's edits arrive, and its short answer is shown inline.
+   question to the agent at once, writing the buffer first if needed. Each
+   selection shows a grey `you │ <question>` line (`ui.review.ask`) above the
+   change closest to it, or above the selection when the buffer has no
+   changes. You watch the agent's edits arrive; its short answer then replaces
+   the primary selection's line as an `agent │` block (`ui.review.reply`, at
+   most 20 rows) above the change closest to where you asked. Answers stay
+   through refreshes until `:review-dismiss` (`G D`) or `:review-close`, and the
+   statusline counts them.
 8. For a request that belongs in the code, write a line containing
    `AGENT: <request>` (for example `// AGENT: handle the empty case`); the
    agent is told to address it and delete the marker.

@@ -365,6 +365,8 @@ These scopes are used for theming the editor interface:
 | `ui.selection`                    | For selections in the editing area                                                             |
 | `ui.selection.primary`            |                                                                                                |
 | `ui.highlight`                    | Highlighted lines in the picker preview                                                        |
+| `ui.review.ask`                   | Placeholder lines of questions asked with [`:review-ask`](./review.md)                         |
+| `ui.review.reply`                 | The agent's replies shown inline during [`:review`](./review.md)                               |
 | `ui.highlight.frameline`          | Line at which debugging execution is paused at                                                 |
 | `ui.cursorline.primary`           | The line of the primary cursor ([if cursorline is enabled][editor-section])                    |
 | `ui.cursorline.secondary`         | The lines of any other cursors ([if cursorline is enabled][editor-section])                    |
