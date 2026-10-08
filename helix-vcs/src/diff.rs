@@ -122,6 +122,25 @@ pub fn compute_hunks(diff_base: Rope, doc: Rope) -> Option<Vec<Hunk>> {
     Some(diff.hunks().collect())
 }
 
+/// Formats the changes from `before` to `after` as unified diff hunks with three lines of
+/// context, without file headers.
+pub fn unified_diff(before: &str, after: &str) -> String {
+    use imara_diff::{BasicLineDiffPrinter, InternedInput, UnifiedDiffConfig};
+
+    let input = InternedInput::new(
+        imara_diff::sources::lines(before),
+        imara_diff::sources::lines(after),
+    );
+    let mut diff = imara_diff::Diff::compute(ALGORITHM, &input);
+    diff.postprocess_lines(&input);
+    diff.unified_diff(
+        &BasicLineDiffPrinter(&input.interner),
+        UnifiedDiffConfig::default(),
+        &input,
+    )
+    .to_string()
+}
+
 /// synchronous debounce value should be low
 /// so we can update synchronously most of the time
 const DIFF_DEBOUNCE_TIME_SYNC: u64 = 1;

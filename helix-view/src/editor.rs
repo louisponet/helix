@@ -1301,6 +1301,8 @@ pub struct Editor {
     pub review_baseline: Option<String>,
     /// Directory that writes of reviewed documents export review batches to.
     pub review_handoff: Option<PathBuf>,
+    /// The scratch buffer `:review-diff` writes to.
+    pub review_diff: Option<DocumentId>,
 
     pub debug_adapters: dap::registry::Registry,
     pub breakpoints: HashMap<PathBuf, Vec<Breakpoint>>,
@@ -1454,6 +1456,7 @@ impl Editor {
             review_batch: ReviewBatch::default(),
             review_baseline: None,
             review_handoff: None,
+            review_diff: None,
             debug_adapters: dap::registry::Registry::new(),
             breakpoints: HashMap::new(),
             syn_loader,

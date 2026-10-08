@@ -41,6 +41,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. `clear` closes all reviews. |
 | `:review-handoff <dir>` | Export a batch to `<dir>` on every write of a reviewed buffer. `clear` stops it. |
 | `:review-send` | Export the handoff batch now without writing any file, for example to acknowledge a review without edits. |
+| `:review-diff` | Show one unified diff of every file changed since the review baseline in a scratch buffer; running it again refreshes that buffer. |
 | `:review-files` | Pick a file added (`A`), modified (`M`) or deleted (`D`) since the review baseline, and open it at its first change. |
 
 ### Choosing a commit range
@@ -152,7 +153,8 @@ a review of an agent's turn goes like this:
    (:review-files)`. Unmodified open buffers in the workspace are already
    reviewed against the baseline commit.
 2. `:review-files` picks a file changed since the baseline and opens it with
-   the cursor on its first change. It shows the review summary, for example
+   the cursor on its first change (or read the whole change as one diff first
+   with `:review-diff`). It shows the review summary, for example
    `Reviewing against the git commit 1a2b3c4d: 2 blocks of old text,
    :review-old to inspect them`.
 3. `]g` / `[g` move between changed hunks of the current text; the diff gutter
@@ -185,6 +187,7 @@ the default `Space r` (rename symbol); pick another key to keep it.
 ```toml
 [keys.normal.space.r]
 f = ":review-files"
+d = ":review-diff"
 o = ":review-old"
 c = ":review-comments"
 u = ":review-uncomment"

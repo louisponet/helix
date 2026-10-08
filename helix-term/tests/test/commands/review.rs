@@ -1580,6 +1580,47 @@ async fn review_files_reports_when_nothing_changed() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn review_diff_shows_every_change_in_one_scratch_buffer() -> anyhow::Result<()> {
+    let repo = Repo::new("a\nb\nc\n", "a\nb\nc\n", "a\nB\nc\n");
+    let dir = repo.dir.path();
+    let new = dir.join("new.txt");
+    fs::write(&new, "n\n")?;
+    let _cwd = Cwd::enter(dir);
+    let mut app = repo.app()?;
+    let diff_buffer = |app: &Application| {
+        let doc = doc!(app.editor);
+        assert_eq!(doc.path(), None);
+        assert_eq!(doc.language_name(), Some("diff"));
+        (doc.id(), doc.text().to_string())
+    };
+
+    send_keys(&mut app, ":review-diff<ret>").await?;
+    assert_error(&app, "no review baseline");
+
+    send_keys(&mut app, ":review-baseline HEAD<ret>:review-diff<ret>").await?;
+    let (first, text) = diff_buffer(&app);
+    assert!(
+        text.contains("--- a/file.txt\n+++ b/file.txt\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"),
+        "{text}"
+    );
+    assert!(text.contains("--- a/new.txt\n+++ b/new.txt\n"), "{text}");
+    assert!(text.contains("\n+n\n"), "{text}");
+    let documents = app.editor.documents().count();
+
+    // Running it again refreshes the same scratch buffer.
+    fs::write(&new, "m\n")?;
+    send_keys(&mut app, ":review-diff<ret>").await?;
+    let (second, text) = diff_buffer(&app);
+    assert_eq!(second, first);
+    assert_eq!(app.editor.documents().count(), documents);
+    assert!(
+        text.contains("\n+m\n") && !text.contains("\n+n\n"),
+        "{text}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn repeating_the_baseline_only_reviews_buffers_changed_on_disk() -> anyhow::Result<()> {
     let repo = Repo::new("a\nb\n", "a\nb\n", "a\nB\n");
     let dir = repo.dir.path();

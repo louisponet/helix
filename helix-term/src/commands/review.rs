@@ -866,6 +866,101 @@ pub(super) fn review_files(
     Ok(())
 }
 
+pub(super) fn review_diff(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    let commit = cx
+        .editor
+        .review_baseline
+        .clone()
+        .context("no review baseline, use :review-baseline first")?;
+    let workspace = helix_loader::find_workspace().0;
+    let trust_full = cx
+        .editor
+        .workspace_trust
+        .query(&workspace, TrustQuery::Git)
+        .is_trusted();
+    let changes = cx
+        .editor
+        .diff_providers
+        .get_changed_files_since(&workspace, &commit, trust_full)?;
+    if changes.is_empty() {
+        cx.editor
+            .set_status(format!("no files changed since {}", &commit[..8]));
+        return Ok(());
+    }
+
+    let mut diff = String::new();
+    for change in &changes {
+        let path = change.path();
+        let name = path.strip_prefix(&workspace).unwrap_or(path).display();
+        let before = match cx
+            .editor
+            .diff_providers
+            .get_commit_base(path, &commit, trust_full)
+        {
+            Ok(base) => String::from_utf8_lossy(&base.data).into_owned(),
+            Err(err) => {
+                diff.push_str(&format!("{name}: not diffed: {err:#}\n"));
+                continue;
+            }
+        };
+        let after = match cx.editor.document_by_path(path) {
+            Some(doc) if !doc.is_modified() => doc.text().to_string(),
+            _ => std::fs::read(path)
+                .map(|data| String::from_utf8_lossy(&data).into_owned())
+                .unwrap_or_default(),
+        };
+        if [&before, &after]
+            .iter()
+            .any(|text| text.len() > Review::MAX_BYTES || text.lines().count() > Review::MAX_LINES)
+        {
+            diff.push_str(&format!(
+                "{name}: over the review size limits, not diffed\n"
+            ));
+            continue;
+        }
+        let hunks = helix_vcs::unified_diff(&before, &after);
+        if !hunks.is_empty() {
+            diff.push_str(&format!("--- a/{name}\n+++ b/{name}\n{hunks}"));
+        }
+    }
+
+    // Reuse the scratch buffer of an earlier :review-diff while it is open.
+    let doc_id = cx
+        .editor
+        .review_diff
+        .filter(|doc_id| cx.editor.documents.contains_key(doc_id));
+    match doc_id {
+        Some(doc_id) => cx.editor.switch(doc_id, Action::Replace),
+        None => cx.editor.review_diff = Some(cx.editor.new_file(Action::Replace)),
+    }
+    let loader = cx.editor.syn_loader.load();
+    let scrolloff = cx.editor.config().scrolloff;
+    let (view, doc) = current!(cx.editor);
+    let transaction = Transaction::change(
+        doc.text(),
+        [(0, doc.text().len_chars(), Some(diff.into()))].into_iter(),
+    )
+    .with_selection(Selection::point(0));
+    doc.apply(&transaction, view.id);
+    doc.append_changes_to_history(view);
+    doc.set_language_by_language_id("diff", &loader)?;
+    view.ensure_cursor_in_view(doc, scrolloff);
+    cx.editor.set_status(format!(
+        "Diff of {} against {}",
+        plural(changes.len(), "changed file"),
+        &commit[..8]
+    ));
+    Ok(())
+}
+
 /// Runs the static command `name` on the focused old text. Returns `false` if `name` is not
 /// allowed there; only selection, navigation and yank commands are.
 pub(crate) fn old_focus_command(cx: &mut Context, name: &str) -> bool {
