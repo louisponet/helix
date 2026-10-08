@@ -114,12 +114,12 @@ The mailbox is `<repo>/.pi/helix-review/` with an `outbox/` directory and
   at the end of the turn pi sends `review-baseline <commit>` again, which
   refreshes Helix's review.
 - At the end of the turn pi stores a snapshot (`git hash-object -w`) of every
-  file changed since the baseline, including untracked files, and then echoes
-  a summary such as `Agent turn done: 3 files changed since 1a832de9
-  (:review-files)` to Helix's status line. A failing echo is ignored like
+  file changed since the baseline, including untracked files but not pi's own
+  state under `<repo>/.pi/`, and then echoes a summary such as `Agent turn
+  done: 3 files changed since 1a832de9 (:review-files)` to Helix's status line. A failing echo is ignored like
   every other socket command.
-- Each batch in the outbox becomes one `helix-review:handoff` message: your
-  edits as unified-diff hunks against the turn snapshot (or the batch's
+- Each batch in the outbox becomes one `helix-review:handoff` message (entries
+  under `<repo>/.pi/` are skipped): your edits as unified-diff hunks against the turn snapshot (or the batch's
   baseline blob when there is none; at most 200 hunk lines per file, the rest
   summarized with `truncated: true`), every `AGENT: <request>` line in the
   saved file (marked `new` when you added it in this review), and the review

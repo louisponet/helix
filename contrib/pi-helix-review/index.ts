@@ -4,7 +4,7 @@ import { existsSync, type FSWatcher, watch } from "node:fs";
 import { mkdir, readdir, readFile, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
@@ -508,11 +508,16 @@ class Hook {
 		const paths: string[] = [];
 		for (const name of new Set(`${changed}${untracked}`.split("\0").filter(Boolean))) {
 			const path = join(this.repo, name);
-			if (!path.startsWith(this.dir) && (await stat(path).catch(() => undefined))?.isFile()) paths.push(path);
+			if (!this.isPiState(path) && (await stat(path).catch(() => undefined))?.isFile()) paths.push(path);
 		}
 		const oids = paths.length ? (await git(this.repo, ["hash-object", "-w", "--no-filters", "--", ...paths])).split("\n") : [];
 		this.state.snapshots = Object.fromEntries(paths.map((path, i) => [path, oids[i]]));
 		await this.save();
+	}
+
+	/** Whether `path` is under `<repo>/.pi/`, pi's own state rather than the agent's work. */
+	private isPiState(path: string): boolean {
+		return path.startsWith(join(this.repo, ".pi") + sep);
 	}
 
 	guidelines(): string | undefined {
@@ -534,7 +539,9 @@ class Hook {
 			throw error;
 		}
 		const baselines = new Map<string, Baseline>();
-		for (const { path, baseline } of [...batch.files, ...batch.comments]) if (!baselines.has(path)) baselines.set(path, baseline);
+		for (const { path, baseline } of [...batch.files, ...batch.comments]) {
+			if (!baselines.has(path) && !this.isPiState(path)) baselines.set(path, baseline);
+		}
 		const files = [];
 		for (const [file, baseline] of baselines) {
 			const current = (await readCurrent(file)).text ?? "";

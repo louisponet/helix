@@ -16,7 +16,7 @@ import {
 } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { type TestContext, test } from "node:test";
 import helixReview from "./index.ts";
 
@@ -678,6 +678,10 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	w.stage("a.rs", "fn a() {}\n// AGENT: old request\nfn b() {}\n");
 	const next = w.commit();
 	writeFileSync(join(repo, "new.rs"), "fn new() {}\n");
+	// pi's own state is neither snapshotted nor counted as a changed file.
+	const piState = join(repo, ".pi", "fabric", "state.json");
+	mkdirSync(dirname(piState), { recursive: true });
+	writeFileSync(piState, "{}\n");
 	await session.emit("agent_end", { messages: [] });
 	assert.deepEqual(lines.slice(4), [
 		`review-baseline ${head}`,
@@ -698,7 +702,11 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 		JSON.stringify({
 			format: "helix-review-batch",
 			version: 2,
-			files: [{ path: file, baseline: commitBase(head, blob) }],
+			// pi's own state in a batch is skipped rather than diffed.
+			files: [
+				{ path: file, baseline: commitBase(head, blob) },
+				{ path: piState, baseline: commitBase(head, null) },
+			],
 			comments: [
 				{
 					path: file,
