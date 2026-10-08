@@ -697,6 +697,7 @@ pub(super) fn review_baseline(
 
     if &args[0] == "clear" {
         cx.editor.review_baseline = None;
+        cx.editor.review_stepped_from = None;
         let doc_ids: Vec<_> = cx.editor.documents().map(Document::id).collect();
         for doc_id in doc_ids {
             let doc = doc_mut!(cx.editor, &doc_id);
@@ -714,7 +715,82 @@ pub(super) fn review_baseline(
         cx.editor.set_status("Review baseline cleared");
         return Ok(());
     }
+    if let Some(from) = cx.editor.review_stepped_from.clone() {
+        // The hook re-sending the baseline the reviewer stepped away from only refreshes the
+        // stepped one; any other commit is adopted.
+        let workspace = helix_loader::find_workspace().0;
+        let trust_full = cx
+            .editor
+            .workspace_trust
+            .query(&workspace, TrustQuery::Git)
+            .is_trusted();
+        let commit = cx
+            .editor
+            .diff_providers
+            .resolve_commit(&workspace, &args[0], trust_full)?;
+        if commit == from {
+            let stepped = cx.editor.review_baseline.clone().unwrap_or(from);
+            return pin_review_baseline(cx, &stepped);
+        }
+        cx.editor.review_stepped_from = None;
+    }
     pin_review_baseline(cx, &args[0])
+}
+
+pub(super) fn review_older(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    let base = review_baseline_or_head(cx)?;
+    step_baseline(cx, &base, true)
+}
+
+pub(super) fn review_newer(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    let base = cx
+        .editor
+        .review_baseline
+        .clone()
+        .context("no review baseline set")?;
+    step_baseline(cx, &base, false)
+}
+
+/// Moves the editor-wide baseline one commit older or newer than `base`, remembering the
+/// baseline the reviewer stepped away from until it is reached again.
+fn step_baseline(cx: &mut compositor::Context, base: &str, older: bool) -> anyhow::Result<()> {
+    let workspace = helix_loader::find_workspace().0;
+    let trust_full = cx
+        .editor
+        .workspace_trust
+        .query(&workspace, TrustQuery::Git)
+        .is_trusted();
+    let (commit, behind) = cx
+        .editor
+        .diff_providers
+        .step_commit(&workspace, base, older, trust_full)?;
+    let from = cx
+        .editor
+        .review_stepped_from
+        .take()
+        .unwrap_or_else(|| base.to_owned());
+    pin_review_baseline(cx, &commit.id)?;
+    cx.editor.review_stepped_from = Some(from).filter(|from| *from != commit.id);
+    cx.editor.set_status(format!(
+        "Baseline {} {} ({behind} behind HEAD)",
+        &commit.id[..8],
+        commit.summary
+    ));
+    Ok(())
 }
 
 /// Enables review mode for a review command: pins `HEAD` as the editor-wide baseline when none is

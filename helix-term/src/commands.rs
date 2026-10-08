@@ -498,6 +498,8 @@ impl MappableCommand {
         review_refresh_buffer, "Refresh the review of the buffer",
         review_commit_staged, "Hand the review back asking to commit the staged hunks",
         review_send_handoff, "Hand the review back now",
+        review_baseline_older, "Move the review baseline one commit older",
+        review_baseline_newer, "Move the review baseline one commit newer",
         review_comment_prompt, "Comment on the selection for the review",
         review_ask_prompt, "Ask the agent about the selections",
         redo, "Redo change",
@@ -4853,6 +4855,14 @@ fn review_commit_staged(cx: &mut Context) {
 
 fn review_send_handoff(cx: &mut Context) {
     review::run_typed(cx, review::review_send)
+}
+
+fn review_baseline_older(cx: &mut Context) {
+    review::run_typed(cx, review::review_older)
+}
+
+fn review_baseline_newer(cx: &mut Context) {
+    review::run_typed(cx, review::review_newer)
 }
 
 fn review_comment_prompt(cx: &mut Context) {

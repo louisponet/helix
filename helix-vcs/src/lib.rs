@@ -138,6 +138,27 @@ impl DiffProviderRegistry {
         Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
     }
 
+    /// The commit one step older or newer than `commit` towards `HEAD`, with how many commits it is
+    /// behind `HEAD`.
+    pub fn step_commit(
+        &self,
+        cwd: &Path,
+        commit: &str,
+        older: bool,
+        trust_full: bool,
+    ) -> Result<(CommitInfo, usize)> {
+        let mut first_err = None;
+        for provider in &self.providers {
+            match provider.step_commit(cwd, commit, older, trust_full) {
+                Ok(step) => return Ok(step),
+                Err(err) => {
+                    first_err.get_or_insert(err);
+                }
+            }
+        }
+        Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
+    }
+
     /// Resolves `revision` in the repository containing `cwd` to the hex id of a commit.
     pub fn resolve_commit(&self, cwd: &Path, revision: &str, trust_full: bool) -> Result<String> {
         let mut first_err = None;
@@ -288,6 +309,20 @@ impl DiffProvider {
         match self {
             #[cfg(feature = "git")]
             Self::Git => git::get_commit_history(file, trust_full),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn step_commit(
+        &self,
+        cwd: &Path,
+        commit: &str,
+        older: bool,
+        trust_full: bool,
+    ) -> Result<(CommitInfo, usize)> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::step_commit(cwd, commit, older, trust_full),
             Self::None => bail!("No diff support compiled in"),
         }
     }

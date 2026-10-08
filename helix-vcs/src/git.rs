@@ -301,6 +301,48 @@ pub fn resolve_commit(cwd: &Path, revision: &str, trust_full: bool) -> Result<St
     Ok(commit.id.to_hex().to_string())
 }
 
+/// The commit one step older (the first parent) or newer (the next commit on the ancestry path
+/// to `HEAD`) than `commit`, and how many commits it is behind `HEAD`.
+pub fn step_commit(
+    cwd: &Path,
+    commit: &str,
+    older: bool,
+    trust_full: bool,
+) -> Result<(CommitInfo, usize)> {
+    let repo = open_repo(cwd, trust_full)?.to_thread_local();
+    let base = ObjectId::from_hex(commit.as_bytes())?;
+    let head = repo.head_id()?.detach();
+    let target = if older {
+        repo.find_commit(base)?
+            .parent_ids()
+            .next()
+            .with_context(|| format!("{} has no parent", &commit[..8]))?
+            .detach()
+    } else {
+        if base == head {
+            bail!("already at HEAD");
+        }
+        // The commits after `base` up to HEAD, newest first; the last child of `base` is next.
+        let mut next = None;
+        for info in repo.rev_walk([head]).with_hidden([base]).all()? {
+            let info = info?;
+            if info.parent_ids().any(|parent| parent == base) {
+                next = Some(info.id);
+            }
+        }
+        next.with_context(|| format!("{} is not an ancestor of HEAD", &commit[..8]))?
+    };
+    let behind = repo.rev_walk([head]).with_hidden([target]).all()?.count();
+    let summary = repo.find_commit(target)?.message()?.summary().to_string();
+    Ok((
+        CommitInfo {
+            id: target.to_hex().to_string(),
+            summary,
+        },
+        behind,
+    ))
+}
+
 /// Whether the git index of the repository at `cwd` differs from `HEAD` for any path.
 pub fn has_staged_changes(cwd: &Path, trust_full: bool) -> Result<bool> {
     let repo = open_repo(cwd, trust_full)?.to_thread_local();

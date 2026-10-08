@@ -614,7 +614,14 @@ where
         return;
     };
     let mut text = match review.baseline().revision() {
-        Some(commit) => format!(" review {}", &commit[..8]),
+        Some(commit) => {
+            let stepped = if context.editor.review_stepped_from.is_some() {
+                "*"
+            } else {
+                ""
+            };
+            format!(" review {}{stepped}", &commit[..8])
+        }
         None => " review index".to_owned(),
     };
     let hunks = review.hunk_count();

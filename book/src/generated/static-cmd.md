@@ -194,6 +194,8 @@
 | `review_refresh_buffer` | Refresh the review of the buffer | normal: `` Gb ``, select: `` Gb `` |
 | `review_commit_staged` | Hand the review back asking to commit the staged hunks | normal: `` GC ``, select: `` GC `` |
 | `review_send_handoff` | Hand the review back now | normal: `` GS ``, select: `` GS `` |
+| `review_baseline_older` | Move the review baseline one commit older | normal: `` G<minus> ``, select: `` G<minus> `` |
+| `review_baseline_newer` | Move the review baseline one commit newer | normal: `` G+ ``, select: `` G+ `` |
 | `review_comment_prompt` | Comment on the selection for the review | normal: `` Gm ``, select: `` Gm `` |
 | `review_ask_prompt` | Ask the agent about the selections | normal: `` Ga ``, select: `` Ga `` |
 | `redo` | Redo change | normal: `` U ``, select: `` U `` |

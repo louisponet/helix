@@ -2026,6 +2026,94 @@ async fn hunks_committed_after_the_baseline_are_neither_staged_nor_stageable() -
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_baseline_steps_through_history_and_survives_the_hooks_refresh() -> anyhow::Result<()> {
+    let repo = Repo::new("a\nb\nc\nd\ne\n", "a\nb\nc\nd\ne\n", "a\nb\nc\nd\ne\n");
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let commit = |content: &str, subject: &str| {
+        repo.write(content);
+        repo.stage();
+        git_ok(dir, &["commit", "-m", subject]);
+        git_ok(dir, &["rev-parse", "HEAD"])
+    };
+    let first = git_ok(dir, &["rev-parse", "HEAD"]);
+    let second = commit("A\nb\nc\nd\ne\n", "second");
+    let third = commit("A\nb\nC\nd\ne\n", "third");
+    repo.write("A\nb\nC\nd\nE\n");
+    let mut config = test_config();
+    config.editor.statusline.right = vec![StatusLineElement::Review];
+    let mut app = AppBuilder::new()
+        .with_file(&repo.file, None)
+        .with_config(config)
+        .build()?;
+    let review = |app: &Application| {
+        let line = statusline(app);
+        line.split_once(" review ")
+            .map(|(_, element)| element.trim_end().to_owned())
+            .unwrap_or_default()
+    };
+    let status = |app: &Application| app.editor.get_status().unwrap().0.to_string();
+
+    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+    assert_eq!(review(&app), format!("{} 1 hunk", &third[..8]));
+    send_keys(&mut app, ":review-older<ret>").await?;
+    assert_eq!(
+        status(&app),
+        format!("Baseline {} second (1 behind HEAD)", &second[..8])
+    );
+    assert_eq!(
+        review(&app),
+        format!("{}* 2 hunks 1 committed", &second[..8])
+    );
+    send_keys(&mut app, "G-").await?;
+    assert_eq!(
+        status(&app),
+        format!("Baseline {} head (2 behind HEAD)", &first[..8])
+    );
+    assert_eq!(
+        review(&app),
+        format!("{}* 3 hunks 2 committed", &first[..8])
+    );
+    send_keys(&mut app, ":review-older<ret>").await?;
+    assert_error(&app, "has no parent");
+
+    // The hook re-sending its baseline (the one stepped away from) keeps the stepped one.
+    let refresh = format!(":review-baseline {third}<ret>");
+    send_keys(&mut app, &refresh).await?;
+    assert_eq!(
+        review(&app),
+        format!("{}* 3 hunks 2 committed", &first[..8])
+    );
+
+    send_keys(&mut app, ":review-newer<ret>").await?;
+    assert_eq!(
+        review(&app),
+        format!("{}* 2 hunks 1 committed", &second[..8])
+    );
+    send_keys(&mut app, "G+").await?;
+    assert_eq!(
+        status(&app),
+        format!("Baseline {} third (0 behind HEAD)", &third[..8])
+    );
+    assert_eq!(review(&app), format!("{} 1 hunk", &third[..8]));
+    send_keys(&mut app, ":review-newer<ret>").await?;
+    assert_error(&app, "already at HEAD");
+
+    // A baseline the hook moved on to is adopted.
+    send_keys(&mut app, ":review-older<ret>").await?;
+    let fourth = commit("A\nb\nC\nd\nE\n", "fourth");
+    send_keys(&mut app, &format!(":review-baseline {fourth}<ret>")).await?;
+    assert!(app.editor.review_stepped_from.is_none());
+    assert_eq!(app.editor.review_baseline.as_deref(), Some(fourth.as_str()));
+    assert_eq!(
+        review(&app),
+        &fourth[..8],
+        "no changes since it, and no longer stepped"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_g_menu_runs_review_commands_next_to_user_keys() -> anyhow::Result<()> {
     let repo = Repo::new("one\ntwo\n", "one\ntwo\n", "one\nTWO\n");
     let _cwd = Cwd::enter(repo.dir.path());

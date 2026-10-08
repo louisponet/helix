@@ -379,6 +379,8 @@ used to go to a line; use `<n>gg` for that.
 | `b` | Refresh the review of the buffer                             | `review_refresh_buffer`  |
 | `C` | Hand the review back asking to commit the staged hunks       | `review_commit_staged`   |
 | `S` | Hand the review back now                                     | `review_send_handoff`    |
+| `-` | Move the review baseline one commit older                    | `review_baseline_older`  |
+| `+` | Move the review baseline one commit newer                    | `review_baseline_newer`  |
 | `n` | Go to the next change                                        | `goto_next_change`       |
 | `N` | Go to the previous change                                    | `goto_prev_change`       |
 

@@ -4145,6 +4145,28 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         },
     },
     TypableCommand {
+        name: "review-older",
+        aliases: &[],
+        doc: "Move the review baseline one commit older (its first parent), pinning HEAD first when none is set, and refresh every review.",
+        fun: review::review_older,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-newer",
+        aliases: &[],
+        doc: "Move the review baseline one commit newer, towards HEAD on its ancestry path, and refresh every review.",
+        fun: review::review_newer,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
         name: "review-baseline",
         aliases: &[],
         doc: "Review every unmodified buffer in the workspace, and buffers opened later, against a commit revision such as HEAD. Repeating the same commit refreshes the reviews; `clear` closes them.",

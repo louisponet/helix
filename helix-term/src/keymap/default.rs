@@ -50,6 +50,8 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "b" => review_refresh_buffer,
             "C" => review_commit_staged,
             "S" => review_send_handoff,
+            "-" => review_baseline_older,
+            "+" => review_baseline_newer,
             "n" => goto_next_change,
             "N" => goto_prev_change,
         },

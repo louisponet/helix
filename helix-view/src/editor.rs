@@ -1301,6 +1301,9 @@ pub struct Editor {
     pub review_baseline: Option<String>,
     /// Directory that writes of reviewed documents export review batches to.
     pub review_handoff: Option<PathBuf>,
+    /// The baseline the reviewer stepped away from with `:review-older` or `:review-newer`; while
+    /// set, `:review-baseline` with this commit only refreshes the stepped baseline.
+    pub review_stepped_from: Option<String>,
     /// The pi session the last handoff was addressed to with `@label`, if it was.
     pub review_target: Option<String>,
     /// The scratch buffer `:review-diff` writes to.
@@ -1477,6 +1480,7 @@ impl Editor {
             review_baseline: None,
             review_handoff: None,
             review_target: None,
+            review_stepped_from: None,
             review_diff: None,
             debug_adapters: dap::registry::Registry::new(),
             breakpoints: HashMap::new(),
