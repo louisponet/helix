@@ -379,6 +379,8 @@ impl MappableCommand {
         rsearch, "Reverse search for regex pattern",
         search_next, "Select next search match",
         search_prev, "Select previous search match",
+        search_next_or_review_next, "Search next; without a search, go to the next review change (across files)",
+        search_prev_or_review_prev, "Search previous; without a search, go to the previous review change (across files)",
         extend_search_next, "Add next search match to selection",
         extend_search_prev, "Add previous search match to selection",
         search_selection, "Use current selection as search pattern",
@@ -2474,6 +2476,31 @@ fn search_next(cx: &mut Context) {
 
 fn search_prev(cx: &mut Context) {
     search_next_or_prev_impl(cx, Movement::Move, Direction::Backward);
+}
+
+/// Whether the search register `n` would use holds a non-empty search.
+fn has_search(cx: &Context) -> bool {
+    let register = cx.register.unwrap_or('/');
+    cx.editor
+        .registers
+        .first(register, cx.editor)
+        .is_some_and(|query| !query.is_empty())
+}
+
+fn search_next_or_review_next(cx: &mut Context) {
+    if has_search(cx) {
+        search_next(cx)
+    } else {
+        review_next_change(cx)
+    }
+}
+
+fn search_prev_or_review_prev(cx: &mut Context) {
+    if has_search(cx) {
+        search_prev(cx)
+    } else {
+        review_prev_change(cx)
+    }
 }
 fn extend_search_next(cx: &mut Context) {
     search_next_or_prev_impl(cx, Movement::Extend, Direction::Forward);

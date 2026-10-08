@@ -2394,6 +2394,51 @@ pr\ checkout\ 7) git checkout -q feature;;"#
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn n_mapped_to_search_or_review_follows_the_search_once_there_is_one() -> anyhow::Result<()> {
+    let lines = (1..=20).map(|n| format!("line {n}\n")).collect::<String>();
+    let changed = lines
+        .replace("line 4\n", "word 4\n")
+        .replace("line 16\n", "word 16\n");
+    let repo = Repo::new(&lines, &lines, &changed);
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    fs::write(dir.join("other.txt"), "x\n")?;
+    git_ok(dir, &["add", "other.txt"]);
+    git_ok(dir, &["commit", "-m", "other"]);
+    fs::write(dir.join("other.txt"), "X\n")?;
+    let mut config = Config::load(
+        Ok(&"[keys.normal]\nn = \"search_next_or_review_next\"\n".to_owned()),
+        Err(ConfigLoadError::default()),
+    )
+    .map_err(|err| anyhow::anyhow!("{err}"))?;
+    config.editor = test_editor_config();
+    let mut app = AppBuilder::new()
+        .with_config(config)
+        .with_file(&repo.file, None)
+        .build()?;
+    let line = |app: &Application| {
+        let (view, doc) = current_ref!(app.editor);
+        doc.selection(view.id)
+            .primary()
+            .cursor_line(doc.text().slice(..))
+    };
+
+    // No search: n walks the review hunks.
+    send_keys(&mut app, ":clear-register /<ret>n").await?;
+    assert_eq!(line(&app), 3);
+    // With a search, n finds the next match instead of the next hunk.
+    // Searching from the top skips the match under the cursor: "line 10" is the first.
+    send_keys(&mut app, "gg/line 1<ret>").await?;
+    assert_eq!(line(&app), 9);
+    send_keys(&mut app, "n").await?;
+    assert_eq!(line(&app), 10);
+    // Once the search is cleared, n is back on the hunks.
+    send_keys(&mut app, ":clear-register /<ret>n").await?;
+    assert_eq!(line(&app), 15);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_g_menu_runs_review_commands_next_to_user_keys() -> anyhow::Result<()> {
     let repo = Repo::new("one\ntwo\n", "one\ntwo\n", "one\nTWO\n");
     let _cwd = Cwd::enter(repo.dir.path());
