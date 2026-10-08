@@ -889,24 +889,27 @@ fn move_old_selection(
             &text_fmt,
             &mut annotations,
         ),
-        "line_up" | "visual_line_up" => movement::move_vertically(
-            text,
-            range,
-            Direction::Backward,
-            count,
-            behaviour,
-            &text_fmt,
-            &mut annotations,
-        ),
-        "line_down" | "visual_line_down" => movement::move_vertically(
-            text,
-            range,
-            Direction::Forward,
-            count,
-            behaviour,
-            &text_fmt,
-            &mut annotations,
-        ),
+        "line_up" | "visual_line_up" | "line_down" | "visual_line_down" => {
+            let direction = match motion {
+                "line_up" | "visual_line_up" => Direction::Backward,
+                _ => Direction::Forward,
+            };
+            let moved = movement::move_vertically(
+                text,
+                range,
+                direction,
+                count,
+                behaviour,
+                &text_fmt,
+                &mut annotations,
+            );
+            // Clamping a motion past the block would only slide the cursor along its edge line.
+            if block.contains(&moved.cursor(text)) {
+                moved
+            } else {
+                range
+            }
+        }
         "next_word_start" => word(movement::move_next_word_start),
         "prev_word_start" => word(movement::move_prev_word_start),
         "next_word_end" => word(movement::move_next_word_end),

@@ -484,6 +484,19 @@ async fn old_focus_keymaps_and_exit_keep_the_correct_cursor_visible() -> anyhow:
             .cursor_line(doc.text().slice(..))
     };
     let shows = |app: &Application, line: &str| render(app).iter().any(|(_, text)| text == line);
+    // Vertical motions that would leave the block keep the cursor where it is.
+    let at_old = |position: &'static str| {
+        move |app: &Application| {
+            let status = statusline(app);
+            assert!(status.contains(&format!(" old {position} ")), "{status}");
+        }
+    };
+    let (first_line, last_line, one_line, back) = (
+        at_old("151:1"),
+        at_old("250:1"),
+        at_old("281:2"),
+        at_old("151:1"),
+    );
     let mut config = Config::load(
         Ok(&"[keys.normal]\nF9 = ':review-old'\n".to_owned()),
         Err(ConfigLoadError::default()),
@@ -509,6 +522,10 @@ async fn old_focus_keymaps_and_exit_keep_the_correct_cursor_visible() -> anyhow:
                     );
                 }),
             ),
+            (Some("k"), Some(&first_line)),
+            (Some("gej"), Some(&last_line)),
+            (Some("]glj3jk"), Some(&one_line)),
+            (Some("[gk"), Some(&back)),
             (
                 // Esc puts the cursor on the line the removed block hangs under.
                 Some("geZ<esc>j"),
