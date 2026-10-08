@@ -40,7 +40,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. `clear` closes all reviews. |
 | `:review-handoff <dir>` | Export a batch to `<dir>` on every write of a reviewed buffer. `clear` stops it. |
 | `:review-send` | Export the handoff batch now without writing any file, for example to acknowledge a review without edits. |
-| `:review-files` | Pick a file added (`A`), modified (`M`) or deleted (`D`) since the review baseline. |
+| `:review-files` | Pick a file added (`A`), modified (`M`) or deleted (`D`) since the review baseline, and open it at its first change. |
 
 ### Choosing a commit range
 
@@ -149,9 +149,10 @@ a review of an agent's turn goes like this:
    end of the turn `Agent turn done: 3 files changed since 1a2b3c4d
    (:review-files)`. Unmodified open buffers in the workspace are already
    reviewed against the baseline commit.
-2. `:review-files` picks a file changed since the baseline. Opening it shows
-   the review summary, for example `Reviewing against the git commit 1a2b3c4d:
-   2 blocks of old text, :review-old to inspect them`.
+2. `:review-files` picks a file changed since the baseline and opens it with
+   the cursor on its first change. It shows the review summary, for example
+   `Reviewing against the git commit 1a2b3c4d: 2 blocks of old text,
+   :review-old to inspect them`.
 3. `]g` / `[g` move between changed hunks of the current text; the diff gutter
    and these motions follow the baseline while the review is active.
 4. `:review-old` focuses the nearest old lines. Inside them, `]g` / `[g` move to

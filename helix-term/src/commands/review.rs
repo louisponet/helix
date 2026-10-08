@@ -745,9 +745,23 @@ pub(super) fn review_files(
                     changes,
                     workspace,
                     |cx, change: &FileChange, action| {
-                        if let Err(err) = cx.editor.open(change.path(), action) {
-                            cx.editor.set_error(format!("{err:#}"));
-                        }
+                        let doc_id = match cx.editor.open(change.path(), action) {
+                            Ok(doc_id) => doc_id,
+                            Err(err) => {
+                                cx.editor.set_error(format!("{err:#}"));
+                                return;
+                            }
+                        };
+                        let view = view_mut!(cx.editor);
+                        let doc = doc_mut!(cx.editor, &doc_id);
+                        let Some(line) = doc.review.as_ref().and_then(Review::first_change_line)
+                        else {
+                            return;
+                        };
+                        let text = doc.text().slice(..);
+                        let pos = text.line_to_char(line.min(text.len_lines() - 1));
+                        doc.set_selection(view.id, Selection::point(pos));
+                        align_view(doc, view, Align::Center);
                     },
                 )
                 .with_preview(|_editor, change| Some((change.path().into(), None)));

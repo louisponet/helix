@@ -1835,7 +1835,7 @@ async fn handoff_exports_unmodified_reviews_on_write_and_suspends_auto_save() ->
 
 #[tokio::test(flavor = "multi_thread")]
 async fn review_files_picks_files_changed_since_the_baseline() -> anyhow::Result<()> {
-    let repo = Repo::new("old\n", "old\n", "old\n");
+    let repo = Repo::new("1\n2\n3\n4\n5\n", "1\n2\n3\n4\n5\n", "1\n2\n3\n4\n5\n");
     let dir = repo.dir.path();
     for name in ["same.txt", "gone.txt"] {
         fs::write(dir.join(name), "content\n")?;
@@ -1846,21 +1846,24 @@ async fn review_files_picks_files_changed_since_the_baseline() -> anyhow::Result
     fs::write(dir.join("staged.txt"), "staged\n")?;
     git_ok(dir, &["add", "staged.txt"]);
     fs::write(dir.join("added.txt"), "added\n")?;
-    repo.write("new\n");
+    repo.write("1\n2\n3\nfour\n5\n");
     let _cwd = Cwd::enter(dir);
-    let opened = |name: &'static str| {
+    // The cursor starts on the first changed line.
+    let opened = |name: &'static str, line: usize| {
         move |app: &Application| {
             assert_status_not_error(&app.editor);
-            let doc = doc!(app.editor);
+            let (view, doc) = current_ref!(app.editor);
             assert_eq!(doc.path().unwrap().file_name().unwrap(), name);
             assert!(doc.review.is_some());
+            let text = doc.text().slice(..);
+            assert_eq!(doc.selection(view.id).primary().cursor_line(text), line);
         }
     };
     let (added, staged, gone, file) = (
-        opened("added.txt"),
-        opened("staged.txt"),
-        opened("gone.txt"),
-        opened("file.txt"),
+        opened("added.txt", 0),
+        opened("staged.txt", 0),
+        opened("gone.txt", 0),
+        opened("file.txt", 3),
     );
 
     test_key_sequences(

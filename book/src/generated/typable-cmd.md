@@ -99,7 +99,7 @@
 | `:review-baseline` | Review every unmodified buffer in the workspace, and buffers opened later, against a commit revision such as HEAD. Repeating the same commit refreshes the reviews; `clear` closes them. |
 | `:review-handoff` | On every write of a reviewed buffer, export a review batch to a new file in the given directory; auto-save skips reviewed buffers meanwhile. `clear` stops it. |
 | `:review-send` | Export a review batch to the handoff directory now, as a write would, without writing any file. Refuses while a reviewed buffer has unsaved changes. |
-| `:review-files` | Pick a workspace file added (A), modified (M) or deleted (D) since the review baseline commit. |
+| `:review-files` | Pick a workspace file added (A), modified (M) or deleted (D) since the review baseline commit, and open it at its first change. |
 | `:reset-diff-change`, `:diffget`, `:diffg` | Reset the diff change at the cursor position. |
 | `:clear-register` | Clear given register. If no argument is provided, clear all registers. |
 | `:set-register` | Set contents of the given register. |

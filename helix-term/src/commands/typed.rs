@@ -4122,7 +4122,7 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "review-files",
         aliases: &[],
-        doc: "Pick a workspace file added (A), modified (M) or deleted (D) since the review baseline commit.",
+        doc: "Pick a workspace file added (A), modified (M) or deleted (D) since the review baseline commit, and open it at its first change.",
         fun: review::review_files,
         completer: CommandCompleter::none(),
         signature: Signature {

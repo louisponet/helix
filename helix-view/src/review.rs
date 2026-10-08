@@ -260,6 +260,11 @@ impl Review {
         &self.blocks[start..start + len]
     }
 
+    /// The document line where the first hunk starts, where `]g` from the top of the file lands.
+    pub fn first_change_line(&self) -> Option<usize> {
+        self.hunks.first().map(|hunk| hunk.after.start as usize)
+    }
+
     /// Line ranges of the document that differ from the baseline.
     pub fn changed_lines(&self) -> impl Iterator<Item = ops::Range<usize>> + '_ {
         self.hunks
