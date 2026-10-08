@@ -33,6 +33,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-old` | Focus the old text nearest the cursor. |
 | `:review-refresh` | Reload the buffer from disk; reread the index in index mode, or retain the selected commit in commit mode. Refuses unsaved changes. |
 | `:review-comment <text>` | Add a pending comment on the primary selection, or on the selected old text while it is focused. Use `%%` for a literal `%`. |
+| `:review-comments` | Pick a pending comment by file, lines or text and jump to its line in the current text. |
 | `:review-export <path>` | Write all pending comments and reviewed files to a new JSON file. |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept. |
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. `clear` closes all reviews. |
@@ -75,8 +76,8 @@ rejected with an error and nothing is changed:
   Like `:review-old`, they center the block and the lines that replaced it
   unless both are already fully visible.
 - `y`, `Space y`, `Space Y`: yank the old selection.
-- `:` with only `:review-comment`, `:review-export`, `:review-close` and
-  `:review-old`.
+- `:` with only `:review-comment`, `:review-comments`, `:review-export`,
+  `:review-send`, `:review-close` and `:review-old`.
 - `Esc` returns to the current text with the cursor on the first line that
   replaced the focused block, or on the line it is shown below if nothing
   replaced it.

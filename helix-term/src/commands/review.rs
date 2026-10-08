@@ -22,6 +22,7 @@ const OLD_FOCUS_HELP: &str = "Old text (read-only): move, select, y yank, ]g/[g 
 /// Typable commands allowed while old text is focused. None of them modify a document.
 const OLD_FOCUS_TYPABLE: &[&str] = &[
     "review-comment",
+    "review-comments",
     "review-export",
     "review-send",
     "review-close",
@@ -266,6 +267,86 @@ pub(super) fn review_comment(
     cx.editor.set_status(format!(
         "{pending} pending review comment(s), :review-export <path> writes them"
     ));
+    Ok(())
+}
+
+pub(super) fn review_comments(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    let comments = cx.editor.review_batch.comments().to_vec();
+    ensure!(!comments.is_empty(), "no pending review comments");
+    let workspace = helix_loader::find_workspace().0;
+    cx.jobs.callback(async move {
+        let callback: job::Callback =
+            Callback::EditorCompositor(Box::new(move |_editor, compositor| {
+                let columns = [
+                    ui::PickerColumn::new(
+                        "file",
+                        |comment: &ReviewComment, workspace: &PathBuf| {
+                            let path = &comment.path;
+                            path.strip_prefix(workspace)
+                                .unwrap_or(path)
+                                .display()
+                                .to_string()
+                                .into()
+                        },
+                    ),
+                    ui::PickerColumn::new("lines", |comment: &ReviewComment, _| {
+                        let side = match comment.side {
+                            ReviewSide::Old => "old",
+                            ReviewSide::Current => "current",
+                        };
+                        match comment.start_line == comment.end_line {
+                            true => format!("{side} {}", comment.start_line),
+                            false => format!("{side} {}-{}", comment.start_line, comment.end_line),
+                        }
+                        .into()
+                    }),
+                    ui::PickerColumn::new("comment", |comment: &ReviewComment, _| {
+                        comment.comment.as_str().into()
+                    }),
+                ];
+                let picker =
+                    ui::Picker::new(columns, 2, comments, workspace, |cx, comment, action| {
+                        let doc_id = match cx.editor.open(&comment.path, action) {
+                            Ok(id) => id,
+                            Err(err) => {
+                                cx.editor.set_error(format!(
+                                    "failed to open {}: {err}",
+                                    comment.path.display()
+                                ));
+                                return;
+                            }
+                        };
+                        let view = view_mut!(cx.editor);
+                        let doc = doc_mut!(cx.editor, &doc_id);
+                        if let Some(review) = doc.review.as_mut() {
+                            review.clear_focus(view.id);
+                        }
+                        let text = doc.text().slice(..);
+                        let line = (comment.current_line - 1).min(text.len_lines() - 1);
+                        doc.set_selection(view.id, Selection::point(text.line_to_char(line)));
+                        if action.align_view(view, doc_id) {
+                            align_view(doc, view, Align::Center);
+                        }
+                    })
+                    .with_preview(|_editor, comment| {
+                        let lines = match comment.side {
+                            ReviewSide::Current => (comment.start_line - 1, comment.end_line - 1),
+                            ReviewSide::Old => (comment.current_line - 1, comment.current_line - 1),
+                        };
+                        Some((comment.path.as_path().into(), Some(lines)))
+                    });
+                compositor.push(Box::new(overlaid(picker)));
+            }));
+        Ok(callback)
+    });
     Ok(())
 }
 

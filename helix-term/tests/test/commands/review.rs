@@ -1235,6 +1235,54 @@ async fn commit_picker_selects_history_and_cancellation_preserves_edits() -> any
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn comment_picker_jumps_to_pending_comments() -> anyhow::Result<()> {
+    let repo = Repo::new("a\nb\nc\nd\ne\n", "a\nb\nc\nd\ne\n", "a\nb\nC\nd\ne\n");
+    let dir = repo.dir.path();
+    fs::write(dir.join("other.txt"), "other\n")?;
+    git_ok(dir, &["add", "other.txt"]);
+    let _cwd = Cwd::enter(dir);
+    let at = |name: &'static str, line: usize| {
+        move |app: &Application| {
+            if let Some((status, severity)) = app.editor.get_status() {
+                assert_ne!(*severity, Severity::Error, "{status}");
+            }
+            assert_eq!(old_focus(app), None);
+            let (view, doc) = current_ref!(app.editor);
+            assert_eq!(doc.path().unwrap().file_name().unwrap(), name);
+            let text = doc.text().slice(..);
+            assert_eq!(doc.selection(view.id).primary().cursor_line(text), line);
+        }
+    };
+    let (on_d, on_old_c) = (at("file.txt", 3), at("file.txt", 2));
+
+    test_key_sequences(
+        &mut repo.app()?,
+        vec![
+            (
+                Some(":review-comments<ret>"),
+                Some(&|app| assert_error(app, "no pending review comments")),
+            ),
+            (
+                Some(concat!(
+                    ":review<ret>3j:review-comment on d<ret>",
+                    ":review-old<ret>:review-comment old c<ret><esc>",
+                    ":o other.txt<ret>:review<ret>:review-comment elsewhere<ret>",
+                    ":review-comments<ret>",
+                )),
+                None,
+            ),
+            (Some("on d<ret>"), Some(&on_d)),
+            // From old-text focus, the picker leaves it and jumps to the adjacent current line.
+            (Some("gg:review-old<ret>:review-comments<ret>"), None),
+            (Some("old c<ret>"), Some(&on_old_c)),
+        ],
+        false,
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn commit_review_handles_a_file_introduced_after_the_baseline() -> anyhow::Result<()> {
     let repo = Repo::new("initial\n", "initial\n", "initial\n");
     git_ok(repo.dir.path(), &["rm", "file.txt"]);
