@@ -135,6 +135,10 @@ pub struct Review {
     index: Option<Vec<u8>>,
     /// Per hunk, whether `index` already holds it; recomputed on every edit.
     staged: Vec<bool>,
+    /// The `HEAD` content last given to [`Self::set_index`], in its worktree form.
+    head: Option<Vec<u8>>,
+    /// Per hunk, whether `head` already holds it, i.e. it was committed after the baseline.
+    committed: Vec<bool>,
 }
 
 impl Review {
@@ -163,6 +167,8 @@ impl Review {
             suspended: false,
             index: None,
             staged: Vec::new(),
+            head: None,
+            committed: Vec::new(),
         };
         review.update_blocks();
         Ok(review)
@@ -179,6 +185,7 @@ impl Review {
         let Some(hunks) = Self::compute_hunks(&self.snapshot, doc) else {
             self.suspended = true;
             self.staged.clear();
+            self.committed.clear();
             self.hunks.clear();
             self.blocks.clear();
             self.focus.clear();
@@ -273,39 +280,58 @@ impl Review {
         self.hunks.len()
     }
 
-    /// How many hunks the git index already holds, as given to [`Self::set_index`].
+    /// How many hunks the git index holds but `HEAD` does not, as given to [`Self::set_index`].
     pub fn staged_hunks(&self) -> usize {
-        self.staged.iter().filter(|&&staged| staged).count()
+        (0..self.hunks.len())
+            .filter(|&hunk| self.is_staged(hunk) && !self.is_committed(hunk))
+            .count()
+    }
+
+    /// How many hunks `HEAD` already holds: committed after the baseline.
+    pub fn committed_hunks(&self) -> usize {
+        self.committed
+            .iter()
+            .filter(|&&committed| committed)
+            .count()
     }
 
     fn is_staged(&self, hunk: usize) -> bool {
         self.staged.get(hunk).copied().unwrap_or(false)
     }
 
-    /// Records the git index content `index` (in its worktree form) and marks the hunks it already
-    /// holds in full for the document text `doc`. Edits keep the marks up to date against it.
-    pub fn set_index(&mut self, index: &[u8], doc: &Rope) {
+    fn is_committed(&self, hunk: usize) -> bool {
+        self.committed.get(hunk).copied().unwrap_or(false)
+    }
+
+    /// Records the git index content `index` and the `HEAD` content `head` (in their worktree
+    /// forms) and marks the hunks each already holds in full for the document text `doc`. Edits
+    /// keep the marks up to date against them.
+    pub fn set_index(&mut self, index: &[u8], head: Option<&[u8]>, doc: &Rope) {
         self.index = Some(index.to_vec());
+        self.head = head.map(<[u8]>::to_vec);
         self.update_staged(doc);
     }
 
     fn update_staged(&mut self, doc: &Rope) {
-        let Some(index) = &self.index else {
-            self.staged.clear();
-            return;
+        let doc = doc.to_string();
+        let held = |base: &Option<Vec<u8>>| -> Vec<bool> {
+            let Some(base) = base else {
+                return Vec::new();
+            };
+            let rest = helix_vcs::line_hunks(base, doc.as_bytes());
+            self.hunks
+                .iter()
+                .map(|hunk| {
+                    let lines = hunk.after.start as usize..hunk.after.end as usize;
+                    helix_vcs::find_hunk(&rest, &lines).is_none()
+                })
+                .collect()
         };
-        let unstaged = helix_vcs::line_hunks(index, doc.to_string().as_bytes());
-        self.staged = self
-            .hunks
-            .iter()
-            .map(|hunk| {
-                let lines = hunk.after.start as usize..hunk.after.end as usize;
-                helix_vcs::find_hunk(&unstaged, &lines).is_none()
-            })
-            .collect();
+        self.staged = held(&self.index);
+        self.committed = held(&self.head);
     }
 
-    /// Whether the git index already holds the hunk `block` comes from.
+    /// Whether the git index or `HEAD` already holds the hunk `block` comes from.
     pub fn is_block_staged(&self, block: &OldBlock) -> bool {
         self.hunks
             .iter()
@@ -313,10 +339,10 @@ impl Review {
                 let current = hunk.after.start as usize..hunk.after.end as usize;
                 hunk.before.start as usize == block.old.start && current == block.current
             })
-            .is_some_and(|hunk| self.is_staged(hunk))
+            .is_some_and(|hunk| self.is_staged(hunk) || self.is_committed(hunk))
     }
 
-    /// Like [`Self::changed_lines`], with whether the git index already holds each range.
+    /// Like [`Self::changed_lines`], with whether the git index or `HEAD` already holds each range.
     pub fn changed_lines_staged(&self) -> impl Iterator<Item = (ops::Range<usize>, bool)> + '_ {
         self.hunks
             .iter()
@@ -324,7 +350,7 @@ impl Review {
             .map(|(idx, hunk)| {
                 (
                     hunk.after.start as usize..hunk.after.end as usize,
-                    self.is_staged(idx),
+                    self.is_staged(idx) || self.is_committed(idx),
                 )
             })
             .filter(|(lines, _)| !lines.is_empty())

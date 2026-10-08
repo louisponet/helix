@@ -46,17 +46,17 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-export <path>` | Write all pending comments and reviewed files to a new JSON file. |
 | `:review-revert` | Replace the change under the cursor, or the focused old text's change, with the baseline's lines (added lines are deleted; removed lines shown below the cursor line are restored). One undoable edit; the file on disk is not touched. |
 | `:review-stage` | Stage the unstaged hunk (index to worktree) under the cursor in the git index, like `git add -p`: in a reviewed buffer the hunk on the cursor line or of the focused old text, in the `:review-diff` buffer the hunk under the cursor. Refuses buffers with unsaved changes, a locked index (`index.lock`), and files git converts (filters, line endings). |
-| `:review-unstage` | Unstage the staged hunk under the cursor (same places as `:review-stage`): the index gets the review baseline's lines back for it, even when that hunk was already committed. |
+| `:review-unstage` | Unstage the staged hunk under the cursor (same places as `:review-stage`): the index gets the review baseline's lines back for it. |
 | `:review-toggle-stage` | Stage the hunk under the cursor, or unstage it if it is already staged, so hunks can be toggled in any order. |
 | `Enter` | In normal mode, runs `:review-toggle-stage` while the buffer is reviewed or is the `:review-diff` buffer, and does nothing otherwise. |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept. Under a `:review-baseline`, the buffer is not reviewed again until a different baseline, `:review-baseline clear`, or an explicit `:review` on it. |
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. `clear` closes all reviews. |
 | `:review-handoff <dir>` | Export a batch to `<dir>` on every write of a reviewed buffer. Without it, the default is `<workspace>/.pi/helix-review/outbox` when that directory exists (the pi extension creates it) and every reviewed file and pending comment is in the workspace. `clear` returns to that default. |
 | `:review-send [text]` | Export the handoff batch now without writing any file, for example to acknowledge a review without edits; optional text goes to the agent as an instruction (the batch's `request`). |
-| `:review-commit [subject]` | Hand back like `:review-send`, asking the agent to commit exactly what is staged in the git index (optionally with that subject). Refuses when nothing is staged. |
+| `:review-commit [subject]` | Hand back like `:review-send`, asking the agent to commit exactly what is staged in the git index (optionally with that subject). Refuses when nothing is staged, naming how many of the buffer's hunks are already committed in `HEAD` if any. |
 | `:review-diff` | Show one unified diff of every file changed since the review baseline (with none set, `HEAD` is pinned as it, like `:review-baseline HEAD`) in a read-only scratch buffer; running it again, or `:review-baseline` (as the pi hook does after each edit), refreshes that buffer in place. File headers are workspace-relative paths (`--- <path>`), so `gf` opens a file. |
 | `:review-diff-open` | In the `:review-diff` buffer, open the file of the hunk under the cursor at the current line it shows (the next current line on a removed line). |
-| `:review-files` | Pick a file added (`A`), modified (`M`) or deleted (`D`) since the review baseline, and open it at its first change. The `+/-` and `hunks` columns show added and removed lines and staged/total hunks (`?` over the size limits), and the status line the totals. With no baseline set, it first pins `HEAD` like `:review-baseline HEAD`. |
+| `:review-files` | Pick a file added (`A`), modified (`M`) or deleted (`D`) since the review baseline, and open it at its first change. The `+/-` and `hunks` columns show added and removed lines and staged/total hunks plus the hunks already committed since the baseline (`?` over the size limits), and the status line the totals. With no baseline set, it first pins `HEAD` like `:review-baseline HEAD`. |
 
 ### Choosing a commit range
 
@@ -194,7 +194,10 @@ like this:
    focused old text or the `:review-diff` buffer, where staged hunks are marked
    `(staged)`. In the buffer a staged hunk's lines turn blue and its old lines
    grey (`diff.plus.review.staged`, `diff.minus.review.staged`) until the next
-   edit. Save first: only what is on disk is staged. While reviewing, `Enter` in
+   edit. Save first: only what is on disk is staged. A hunk `HEAD` already
+   holds was committed after the baseline (by the agent, say): it is shown like
+   a staged one but counted as committed, and staging or unstaging it fails
+   with `already committed in <commit>`. While reviewing, `Enter` in
    normal mode is taken by this; elsewhere it does nothing.
 7. `:review-comment <text>` comments on the current selection, or on the
    selected old text while it is focused. `:review-comments` lists pending
@@ -245,7 +248,8 @@ x = ":review-close"
 
 `:review-comment` takes the comment text, so type it at the `:` prompt. The
 `review` statusline element shows the baseline, the hunk count, how many hunks
-are staged and the pending comment count; add it with, for example,
+are already committed since the baseline and how many are staged (each omitted
+when zero, as in `9 hunks 3 committed 2 staged`) and the pending comment count; add it with, for example,
 `right = ["review", "diagnostics", "selections", "position"]` under
 `[editor.statusline]`.
 

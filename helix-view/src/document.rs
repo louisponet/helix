@@ -2104,10 +2104,13 @@ impl Document {
         };
         let (snapshot, ..) = from_reader(&mut data.as_slice(), Some(self.encoding))?;
         let mut review = Review::new(snapshot, baseline, &self.text)?;
-        // Against a commit, part of the change may already be in the index.
+        // Against a commit, part of the change may already be in the index, or even committed.
         if revision.is_some() {
             if let Ok((index, _)) = provider_registry.get_index_base(path, trust_full) {
-                review.set_index(&index, &self.text);
+                let head = provider_registry
+                    .get_commit_base(path, "HEAD", trust_full)
+                    .ok();
+                review.set_index(&index, head.as_ref().map(|head| &head.data[..]), &self.text);
             }
         }
         Ok(review)

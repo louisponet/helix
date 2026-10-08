@@ -922,12 +922,26 @@ pub(super) fn review_commit(
         .workspace_trust
         .query(&workspace, TrustQuery::Git)
         .is_trusted();
-    ensure!(
-        cx.editor
+    if !cx
+        .editor
+        .diff_providers
+        .has_staged_changes(&workspace, trust_full)?
+    {
+        let committed = doc!(cx.editor)
+            .review
+            .as_ref()
+            .map_or(0, |review| review.committed_hunks());
+        ensure!(committed > 0, "nothing is staged");
+        let head = cx
+            .editor
             .diff_providers
-            .has_staged_changes(&workspace, trust_full)?,
-        "nothing is staged"
-    );
+            .resolve_commit(&workspace, "HEAD", trust_full)?;
+        bail!(
+            "nothing is staged; {} already committed in {}",
+            plural(committed, "hunk"),
+            &head[..8]
+        );
+    }
     let subject = args.first().map(str::to_owned);
     hand_off(
         cx.editor,
@@ -1043,16 +1057,21 @@ pub(super) fn review_files(
         })
         .collect();
     let counted = files.iter().filter_map(|(_, stats)| *stats);
-    let (added, removed, staged, total) = counted.fold((0, 0, 0, 0), |sum, stats| {
+    let (added, removed, staged, committed, total) = counted.fold((0, 0, 0, 0, 0), |sum, stats| {
         (
             sum.0 + stats.added,
             sum.1 + stats.removed,
             sum.2 + stats.staged,
-            sum.3 + stats.hunks,
+            sum.3 + stats.committed,
+            sum.4 + stats.hunks,
         )
     });
+    let committed = match committed {
+        0 => String::new(),
+        n => format!(", {n} committed"),
+    };
     let status = format!(
-        "{}, +{added} -{removed}, {staged}/{total} hunks staged",
+        "{}, +{added} -{removed}, {staged}/{total} hunks staged{committed}",
         plural(files.len(), "file")
     );
     cx.jobs.callback(async move {
@@ -1089,6 +1108,10 @@ pub(super) fn review_files(
                     }),
                     ui::PickerColumn::new("hunks", |(_, stats): &Item, _| {
                         match stats {
+                            Some(stats) if stats.committed > 0 => format!(
+                                "{}/{} {} committed",
+                                stats.staged, stats.hunks, stats.committed
+                            ),
                             Some(stats) => format!("{}/{}", stats.staged, stats.hunks),
                             None => "?".to_owned(),
                         }
@@ -1364,6 +1387,20 @@ fn change_staging(editor: &mut Editor, staging: Staging) -> anyhow::Result<()> {
     let (index, expected) = editor.diff_providers.get_index_base(&path, trust_full)?;
     let worktree = std::fs::read(&path)?;
     let base = staging_base(editor, &path, &index, trust_full);
+    let head = editor
+        .diff_providers
+        .get_commit_base(&path, "HEAD", trust_full)
+        .ok();
+    if let Some(head) = &head {
+        // A hunk HEAD already holds was committed after the baseline: there is nothing to toggle.
+        let committed = helix_vcs::find_hunk(&helix_vcs::line_hunks(&base, &worktree), &target)
+            .is_some_and(|hunk| {
+                let lines = hunk.after.start as usize..hunk.after.end as usize;
+                helix_vcs::find_hunk(&helix_vcs::line_hunks(&head.data, &worktree), &lines)
+                    .is_none()
+            });
+        ensure!(!committed, "already committed in {}", &head.commit_id[..8]);
+    }
     let unstaged = helix_vcs::line_hunks(&index, &worktree);
 
     let (content, verb) = match helix_vcs::find_hunk(&unstaged, &target) {
@@ -1396,7 +1433,7 @@ fn change_staging(editor: &mut Editor, staging: Staging) -> anyhow::Result<()> {
     if let Some(doc) = editor.document_by_path_mut(&path) {
         let text = doc.text().clone();
         if let Some(review) = doc.review.as_mut() {
-            review.set_index(&content, &text);
+            review.set_index(&content, head.as_ref().map(|head| &head.data[..]), &text);
         }
     }
     refresh_review_diff(editor);
@@ -1452,8 +1489,10 @@ fn worktree_to_index_lines(
 struct FileStats {
     added: usize,
     removed: usize,
-    /// Hunks the git index already holds in full.
+    /// Hunks the git index already holds in full, but `HEAD` does not.
     staged: usize,
+    /// Hunks `HEAD` already holds: committed after the review baseline.
+    committed: usize,
     hunks: usize,
 }
 
@@ -1482,10 +1521,19 @@ fn file_stats(editor: &Editor, path: &Path, commit: &str, trust_full: bool) -> O
         Ok((index, _)) => helix_vcs::staged_hunk_count(&before, &index, &after).0,
         Err(_) => 0,
     };
+    let committed = match editor
+        .diff_providers
+        .get_commit_base(path, "HEAD", trust_full)
+    {
+        Ok(head) => helix_vcs::staged_hunk_count(&before, &head.data, &after).0,
+        Err(_) => 0,
+    };
     Some(FileStats {
         added: hunks.iter().map(|hunk| hunk.after.len()).sum(),
         removed: hunks.iter().map(|hunk| hunk.before.len()).sum(),
-        staged,
+        // Counts, not per-hunk sets: a committed hunk that the index reverts is miscounted.
+        staged: staged.saturating_sub(committed),
+        committed,
         hunks: hunks.len(),
     })
 }

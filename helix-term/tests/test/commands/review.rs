@@ -1968,6 +1968,45 @@ async fn one_enter_stages_without_or_right_after_a_review() -> anyhow::Result<()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn hunks_committed_after_the_baseline_are_neither_staged_nor_stageable() -> anyhow::Result<()>
+{
+    let repo = Repo::new("a\nb\nc\n", "a\nb\nc\n", "a\nb\nc\n");
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let baseline = git_ok(dir, &["rev-parse", "HEAD"]);
+    let mut config = test_config();
+    config.editor.statusline.right = vec![StatusLineElement::Review];
+    let mut app = AppBuilder::new()
+        .with_file(&repo.file, None)
+        .with_config(config)
+        .build()?;
+    let pin = format!(":review-baseline {baseline}<ret>");
+    send_keys(&mut app, &pin).await?;
+
+    // The agent commits a change on its own; the refresh keeps the pinned baseline.
+    repo.write("a\nB\nc\n");
+    repo.stage();
+    git_ok(dir, &["commit", "-m", "agent"]);
+    let head = git_ok(dir, &["rev-parse", "HEAD"]);
+    send_keys(&mut app, &pin).await?;
+    let status = statusline(&app);
+    assert!(status.contains(" 1 hunk 1 committed "), "{status}");
+
+    send_keys(&mut app, "j<ret>").await?;
+    assert_error(&app, &format!("already committed in {}", &head[..8]));
+    assert_eq!(git_ok(dir, &["diff", "--cached"]), "");
+    send_keys(&mut app, ":review-commit<ret>").await?;
+    assert_error(
+        &app,
+        &format!(
+            "nothing is staged; 1 hunk already committed in {}",
+            &head[..8]
+        ),
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_g_menu_runs_review_commands_next_to_user_keys() -> anyhow::Result<()> {
     let repo = Repo::new("one\ntwo\n", "one\ntwo\n", "one\nTWO\n");
     let _cwd = Cwd::enter(repo.dir.path());

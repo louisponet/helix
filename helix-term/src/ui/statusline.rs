@@ -622,6 +622,10 @@ where
         let suffix = if hunks == 1 { "" } else { "s" };
         text.push_str(&format!(" {hunks} hunk{suffix}"));
     }
+    let committed = review.committed_hunks();
+    if committed > 0 {
+        text.push_str(&format!(" {committed} committed"));
+    }
     let staged = review.staged_hunks();
     if staged > 0 {
         text.push_str(&format!(" {staged} staged"));
