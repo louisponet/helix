@@ -4076,6 +4076,17 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         },
     },
     TypableCommand {
+        name: "review-revert",
+        aliases: &[],
+        doc: "Replace the changed lines under the cursor, or the focused old text's change, with the review baseline's lines.",
+        fun: review::review_revert,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
         name: "review-close",
         aliases: &[],
         doc: "Stop reviewing the buffer. Pending comments are kept for :review-export.",

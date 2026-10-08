@@ -36,6 +36,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-comments` | Pick a pending comment by file, lines or text and jump to its line in the current text. |
 | `:review-uncomment [count]` | Drop the latest pending comment, or the `count` latest ones, and show how many remain. |
 | `:review-export <path>` | Write all pending comments and reviewed files to a new JSON file. |
+| `:review-revert` | Replace the change under the cursor, or the focused old text's change, with the baseline's lines (added lines are deleted). One undoable edit; the file on disk is not touched. |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept. Under a `:review-baseline`, the buffer is not reviewed again until a different baseline, `:review-baseline clear`, or an explicit `:review` on it. |
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. `clear` closes all reviews. |
 | `:review-handoff <dir>` | Export a batch to `<dir>` on every write of a reviewed buffer. `clear` stops it. |
@@ -78,7 +79,8 @@ rejected with an error and nothing is changed:
   unless both are already fully visible.
 - `y`, `Space y`, `Space Y`: yank the old selection.
 - `:` with only `:review-comment`, `:review-comments`, `:review-uncomment`,
-  `:review-export`, `:review-send`, `:review-close` and `:review-old`.
+  `:review-export`, `:review-send`, `:review-close`, `:review-old` and
+  `:review-revert`, which returns to the current text.
 - `Esc` returns to the current text with the cursor on the first line that
   replaced the focused block, or on the line it is shown below if nothing
   replaced it.
@@ -158,7 +160,10 @@ a review of an agent's turn goes like this:
 4. `:review-old` focuses the nearest old lines. Inside them, `]g` / `[g` move to
    the next or previous block of old lines, and `Esc` returns to the current
    text next to the block you were reading.
-5. Edit the current text as usual. Old lines are read-only.
+5. Edit the current text as usual. Old lines are read-only. `:review-revert`
+   rejects the change under the cursor (or the focused old text's change) by
+   restoring the baseline's lines as one edit; `u` brings the agent's version
+   back.
 6. `:review-comment <text>` comments on the current selection, or on the
    selected old text while it is focused. `:review-comments` lists pending
    comments and jumps to one; `:review-uncomment [count]` drops the latest.
@@ -184,7 +189,8 @@ o = ":review-old"
 c = ":review-comments"
 u = ":review-uncomment"
 s = ":review-send"
-r = ":review-refresh"
+r = ":review-revert"
+R = ":review-refresh"
 x = ":review-close"
 ```
 

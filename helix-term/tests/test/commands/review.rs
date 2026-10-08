@@ -1482,6 +1482,70 @@ async fn closing_a_review_survives_refreshes_of_the_same_baseline() -> anyhow::R
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn revert_restores_baseline_lines_as_one_undoable_edit() -> anyhow::Result<()> {
+    let disk = "a\nB\nc\ne\nX\nY\n";
+    let repo = Repo::new("a\nb\nc\nd\ne\n", "a\nb\nc\nd\ne\n", disk);
+    let state = |app: &Application| {
+        let (view, doc) = current_ref!(app.editor);
+        let text = doc.text().slice(..);
+        (
+            doc.text().to_string(),
+            doc.selection(view.id).primary().cursor_line(text),
+            app.editor.get_status().unwrap().0.to_string(),
+        )
+    };
+    let reverted = |lines: &str| format!("Reverted {lines} to the baseline");
+
+    test_key_sequences(
+        &mut repo.app()?,
+        vec![
+            (
+                Some(":review<ret>:review-revert<ret>"),
+                Some(&|app| {
+                    assert_error(app, "no changed lines here");
+                    assert_eq!(doc!(app.editor).text(), disk);
+                }),
+            ),
+            (
+                Some("j:review-revert<ret>"),
+                Some(&|app| {
+                    let text = "a\nb\nc\ne\nX\nY\n".to_owned();
+                    assert_eq!(state(app), (text, 1, reverted("1 line")));
+                    let review = doc!(app.editor).review.as_ref().unwrap();
+                    assert_eq!(review.changed_lines().collect::<Vec<_>>(), [4..6]);
+                }),
+            ),
+            (
+                Some("u"),
+                Some(&|app| assert_eq!(doc!(app.editor).text(), disk)),
+            ),
+            (
+                // A pure addition is reverted by deleting the added lines.
+                Some("gg4j:review-revert<ret>"),
+                Some(&|app| {
+                    assert_eq!(doc!(app.editor).text(), "a\nB\nc\ne\n");
+                    assert_eq!(state(app).2, reverted("2 lines"));
+                }),
+            ),
+            (
+                // From old-text focus, the focused removal is restored and focus is left.
+                Some("gg:review-old<ret>]g:review-revert<ret>"),
+                Some(&|app| {
+                    assert_eq!(old_focus(app), None);
+                    let text = "a\nB\nc\nd\ne\n".to_owned();
+                    assert_eq!(state(app), (text, 3, reverted("1 line")));
+                    assert!(doc!(app.editor).is_modified());
+                    assert_eq!(repo.disk(), disk);
+                }),
+            ),
+        ],
+        false,
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn repeating_the_baseline_only_reviews_buffers_changed_on_disk() -> anyhow::Result<()> {
     let repo = Repo::new("a\nb\n", "a\nb\n", "a\nB\n");
     let dir = repo.dir.path();

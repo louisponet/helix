@@ -19,8 +19,10 @@ use super::*;
 
 const OLD_FOCUS_HELP: &str = "Old text (read-only): move, select, y yank, ]g/[g next/prev block, :review-comment <text>, Esc returns";
 
-/// Typable commands allowed while old text is focused. None of them modify a document.
+/// Typable commands allowed while old text is focused. Only `review-revert` modifies a document,
+/// and it leaves the old text first.
 const OLD_FOCUS_TYPABLE: &[&str] = &[
+    "review-revert",
     "review-comment",
     "review-comments",
     "review-uncomment",
@@ -224,6 +226,60 @@ pub(super) fn review_refresh(
     let baseline = doc!(cx.editor).review.as_ref().unwrap().baseline();
     cx.editor
         .set_status(format!("Review refreshed from disk and the {baseline}"));
+    Ok(())
+}
+
+pub(super) fn review_revert(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    let (view, doc) = current!(cx.editor);
+    let line = doc
+        .selection(view.id)
+        .primary()
+        .cursor_line(doc.text().slice(..));
+    let review = doc
+        .review
+        .as_mut()
+        .context("not reviewing this buffer, use :review first")?;
+    ensure!(!review.is_suspended(), Review::LIMIT_MESSAGE);
+    let (old, current) = match review.focused_block_index(view.id) {
+        Some(idx) => {
+            let block = &review.blocks()[idx];
+            (block.old.clone(), block.current.clone())
+        }
+        None => review.hunk_at_line(line).context("no changed lines here")?,
+    };
+    review.clear_focus(view.id);
+    let snapshot = review.snapshot().slice(..);
+    let restored: Tendril = snapshot
+        .slice(snapshot.line_to_char(old.start)..snapshot.line_to_char(old.end))
+        .to_string()
+        .into();
+    let text = doc.text().slice(..);
+    let start = text.line_to_char(current.start);
+    let end = text.line_to_char(current.end);
+    let transaction = Transaction::change(doc.text(), [(start, end, Some(restored))].into_iter())
+        .with_selection(Selection::point(start));
+    doc.apply(&transaction, view.id);
+    doc.append_changes_to_history(view);
+    let scrolloff = cx.editor.config().scrolloff;
+    let (view, doc) = current!(cx.editor);
+    view.ensure_cursor_in_view(doc, scrolloff);
+    let lines = if old.is_empty() {
+        current.len()
+    } else {
+        old.len()
+    };
+    cx.editor.set_status(format!(
+        "Reverted {} to the baseline",
+        plural(lines, "line")
+    ));
     Ok(())
 }
 

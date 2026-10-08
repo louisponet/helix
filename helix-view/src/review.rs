@@ -260,6 +260,19 @@ impl Review {
         &self.blocks[start..start + len]
     }
 
+    /// The baseline and document line ranges of the hunk whose document lines contain `line`.
+    pub fn hunk_at_line(&self, line: usize) -> Option<(ops::Range<usize>, ops::Range<usize>)> {
+        self.hunks
+            .iter()
+            .map(|hunk| {
+                (
+                    hunk.before.start as usize..hunk.before.end as usize,
+                    hunk.after.start as usize..hunk.after.end as usize,
+                )
+            })
+            .find(|(_, current)| current.contains(&line))
+    }
+
     /// The document line where the first hunk starts, where `]g` from the top of the file lands.
     pub fn first_change_line(&self) -> Option<usize> {
         self.hunks.first().map(|hunk| hunk.after.start as usize)
