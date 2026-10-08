@@ -1283,6 +1283,65 @@ async fn comment_picker_jumps_to_pending_comments() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn uncomment_drops_the_latest_pending_comments() -> anyhow::Result<()> {
+    let repo = Repo::new(INDEX, INDEX, DISK);
+    let comments = |app: &Application| -> Vec<String> {
+        app.editor
+            .review_batch
+            .comments()
+            .iter()
+            .map(|comment| comment.comment.clone())
+            .collect()
+    };
+    let status = |app: &Application| app.editor.get_status().unwrap().0.to_string();
+
+    test_key_sequences(
+        &mut repo.app()?,
+        vec![
+            (
+                Some(":review-uncomment<ret>"),
+                Some(&|app| assert_error(app, "no pending review comments")),
+            ),
+            (
+                Some(concat!(
+                    ":review<ret>:review-comment one<ret>:review-comment two<ret>",
+                    ":review-old<ret>:review-comment three<ret>:review-comment four<ret>",
+                    ":review-uncomment<ret>",
+                )),
+                Some(&|app| {
+                    assert_eq!(comments(app), ["one", "two", "three"]);
+                    assert_eq!(status(app), "Dropped 1 review comment, 3 pending");
+                }),
+            ),
+            (
+                Some("<esc>:review-uncomment 2<ret>"),
+                Some(&|app| {
+                    assert_eq!(comments(app), ["one"]);
+                    assert_eq!(status(app), "Dropped 2 review comments, 1 pending");
+                }),
+            ),
+            (
+                Some(":review-uncomment 0<ret>"),
+                Some(&|app| {
+                    assert_error(app, "positive number");
+                    assert_eq!(comments(app), ["one"]);
+                }),
+            ),
+            (
+                Some(":review-uncomment 5<ret>:review-uncomment<ret>"),
+                Some(&|app| {
+                    assert!(comments(app).is_empty());
+                    assert_error(app, "no pending review comments");
+                }),
+            ),
+        ],
+        false,
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn commit_review_handles_a_file_introduced_after_the_baseline() -> anyhow::Result<()> {
     let repo = Repo::new("initial\n", "initial\n", "initial\n");
     git_ok(repo.dir.path(), &["rm", "file.txt"]);

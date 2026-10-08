@@ -540,6 +540,13 @@ impl ReviewBatch {
         &self.comments
     }
 
+    /// Removes up to `count` of the most recently added comments and returns how many it removed.
+    pub fn remove_latest_comments(&mut self, count: usize) -> usize {
+        let removed = count.min(self.comments.len());
+        self.comments.truncate(self.comments.len() - removed);
+        removed
+    }
+
     pub fn is_empty(&self) -> bool {
         self.files.is_empty() && self.comments.is_empty()
     }

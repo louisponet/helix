@@ -4054,6 +4054,17 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         },
     },
     TypableCommand {
+        name: "review-uncomment",
+        aliases: &[],
+        doc: "Drop the most recently added pending review comment, or the given number of latest ones.",
+        fun: review::review_uncomment,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(1)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
         name: "review-export",
         aliases: &[],
         doc: "Write pending review comments and reviewed files as JSON to a new file. Reviewed buffers must be written first.",

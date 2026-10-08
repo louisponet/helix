@@ -23,6 +23,7 @@ const OLD_FOCUS_HELP: &str = "Old text (read-only): move, select, y yank, ]g/[g 
 const OLD_FOCUS_TYPABLE: &[&str] = &[
     "review-comment",
     "review-comments",
+    "review-uncomment",
     "review-export",
     "review-send",
     "review-close",
@@ -347,6 +348,34 @@ pub(super) fn review_comments(
             }));
         Ok(callback)
     });
+    Ok(())
+}
+
+pub(super) fn review_uncomment(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    let count = match args.first() {
+        Some(count) => count
+            .parse::<usize>()
+            .ok()
+            .filter(|&count| count > 0)
+            .context("count must be a positive number")?,
+        None => 1,
+    };
+    let batch = &mut cx.editor.review_batch;
+    ensure!(!batch.comments().is_empty(), "no pending review comments");
+    let removed = batch.remove_latest_comments(count);
+    let pending = batch.comments().len();
+    cx.editor.set_status(format!(
+        "Dropped {}, {pending} pending",
+        plural(removed, "review comment")
+    ));
     Ok(())
 }
 
