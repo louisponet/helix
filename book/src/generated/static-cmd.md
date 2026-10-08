@@ -74,8 +74,8 @@
 | `rsearch` | Reverse search for regex pattern | normal: `` ? ``, `` Z? ``, `` z? ``, select: `` ? ``, `` Z? ``, `` z? `` |
 | `search_next` | Select next search match | normal: `` n ``, `` Zn ``, `` zn ``, select: `` Zn ``, `` zn `` |
 | `search_prev` | Select previous search match | normal: `` N ``, `` ZN ``, `` zN ``, select: `` ZN ``, `` zN `` |
-| `search_next_or_review_next` | Search next; without a search, go to the next review change (across files) |  |
-| `search_prev_or_review_prev` | Search previous; without a search, go to the previous review change (across files) |  |
+| `search_next_or_review_next` | Search next after a search, the next review change (across files) after a review jump or staging |  |
+| `search_prev_or_review_prev` | Search previous after a search, the previous review change (across files) after a review jump or staging |  |
 | `extend_search_next` | Add next search match to selection | select: `` n `` |
 | `extend_search_prev` | Add previous search match to selection | select: `` N `` |
 | `search_selection` | Use current selection as search pattern | normal: `` <A-*> ``, select: `` <A-*> `` |

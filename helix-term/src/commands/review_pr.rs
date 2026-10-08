@@ -461,6 +461,7 @@ async fn fetch_threads(pr: &PullRequest, workspace: &Path) -> anyhow::Result<Vec
 
 /// Reviews every buffer against the pull request's merge base and enters PR mode.
 fn start(editor: &mut Editor, pr: PullRequest) -> anyhow::Result<PullRequest> {
+    editor.nav_mode = helix_view::editor::NavMode::Review;
     editor.review_pr = None;
     editor.review_stepped_from = None;
     pin_review_baseline(editor, &pr.merge_base)?;

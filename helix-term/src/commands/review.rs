@@ -137,6 +137,7 @@ pub(super) fn changed_files_since(
 /// Moves to the next (or previous) changed block `count` times: within the current buffer, then
 /// on to the first (or last) block of the next (or previous) changed file, wrapping around.
 fn jump_change(cx: &mut compositor::Context, forward: bool, count: usize) -> anyhow::Result<()> {
+    cx.editor.nav_mode = helix_view::editor::NavMode::Review;
     let (commit, changes) = changed_files(cx)?;
     // Deleted files have nothing to land on.
     let files: Vec<PathBuf> = changes
@@ -1603,6 +1604,7 @@ pub(super) fn review_files(
                     files,
                     workspace,
                     |cx, (change, ..): &Item, action| {
+                        cx.editor.nav_mode = helix_view::editor::NavMode::Review;
                         let doc_id = match cx.editor.open(change.path(), action) {
                             Ok(doc_id) => doc_id,
                             Err(err) => {
@@ -1840,6 +1842,7 @@ pub(super) fn review_toggle_stage(
 /// the next unstaged hunk after the selections, in this file or the next changed one (wrapping
 /// around); with none left anywhere the cursor stays.
 fn stage_and_move_on(cx: &mut compositor::Context, staging: Staging) -> anyhow::Result<()> {
+    cx.editor.nav_mode = helix_view::editor::NavMode::Review;
     let (view, doc) = current_ref!(cx.editor);
     let past = doc
         .selection(view.id)

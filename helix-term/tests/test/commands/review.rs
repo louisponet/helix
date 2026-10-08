@@ -2487,7 +2487,7 @@ async fn review_pr_shows_comment_threads_and_keeps_pr_comments_out_of_the_mailbo
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn n_mapped_to_search_or_review_follows_the_search_once_there_is_one() -> anyhow::Result<()> {
+async fn n_mapped_to_search_or_review_follows_whichever_was_used_last() -> anyhow::Result<()> {
     let lines = (1..=20).map(|n| format!("line {n}\n")).collect::<String>();
     let changed = lines
         .replace("line 4\n", "word 4\n")
@@ -2516,8 +2516,8 @@ async fn n_mapped_to_search_or_review_follows_the_search_once_there_is_one() -> 
             .cursor_line(doc.text().slice(..))
     };
 
-    // No search: n walks the review hunks.
-    send_keys(&mut app, ":clear-register /<ret>n").await?;
+    // Nothing used yet: n walks the review hunks.
+    send_keys(&mut app, "n").await?;
     assert_eq!(line(&app), 3);
     // With a search, n finds the next match instead of the next hunk.
     // Searching from the top skips the match under the cursor: "line 10" is the first.
@@ -2525,9 +2525,14 @@ async fn n_mapped_to_search_or_review_follows_the_search_once_there_is_one() -> 
     assert_eq!(line(&app), 9);
     send_keys(&mut app, "n").await?;
     assert_eq!(line(&app), 10);
-    // Once the search is cleared, n is back on the hunks.
-    send_keys(&mut app, ":clear-register /<ret>n").await?;
+    // A review jump (the search is still set) makes n walk the hunks again.
+    send_keys(&mut app, "Gn").await?;
     assert_eq!(line(&app), 15);
+    send_keys(&mut app, "ggn").await?;
+    assert_eq!(line(&app), 3);
+    // And a new search makes it follow the matches again.
+    send_keys(&mut app, "/line 1<ret>n").await?;
+    assert_eq!(line(&app), 10);
     Ok(())
 }
 

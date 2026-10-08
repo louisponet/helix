@@ -1304,6 +1304,9 @@ pub struct Editor {
     /// The baseline the reviewer stepped away from with `:review-older` or `:review-newer`; while
     /// set, `:review-baseline` with this commit only refreshes the stepped baseline.
     pub review_stepped_from: Option<String>,
+    /// What `search_next_or_review_next` and `search_prev_or_review_prev` move between: the last
+    /// used of searching and walking review changes.
+    pub nav_mode: NavMode,
     /// The GitHub pull request under review, see `:review-pr`.
     pub review_pr: Option<crate::review::PullRequest>,
     /// The pull request's comment threads, shown in the reviews of their files.
@@ -1434,6 +1437,14 @@ pub enum CloseError {
     SaveError(anyhow::Error),
 }
 
+/// What `n`/`N` mapped to `search_next_or_review_next`/`search_prev_or_review_prev` move between.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NavMode {
+    #[default]
+    Review,
+    Search,
+}
+
 impl Editor {
     /// The directory review batches are exported to: the `:review-handoff` one, else the pi
     /// extension's `<workspace>/.pi/helix-review/outbox` mailbox when it exists and every
@@ -1489,6 +1500,7 @@ impl Editor {
             review_handoff: None,
             review_target: None,
             review_stepped_from: None,
+            nav_mode: NavMode::Review,
             review_pr: None,
             review_pr_threads: Vec::new(),
             review_pr_comments: Vec::new(),

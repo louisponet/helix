@@ -48,7 +48,7 @@ use helix_core::{
 };
 use helix_view::{
     document::{FormatterError, Mode, SCRATCH_BUFFER_NAME},
-    editor::{Action, Motion},
+    editor::{Action, Motion, NavMode},
     expansion,
     info::Info,
     input::KeyEvent,
@@ -379,8 +379,8 @@ impl MappableCommand {
         rsearch, "Reverse search for regex pattern",
         search_next, "Select next search match",
         search_prev, "Select previous search match",
-        search_next_or_review_next, "Search next; without a search, go to the next review change (across files)",
-        search_prev_or_review_prev, "Search previous; without a search, go to the previous review change (across files)",
+        search_next_or_review_next, "Search next after a search, the next review change (across files) after a review jump or staging",
+        search_prev_or_review_prev, "Search previous after a search, the previous review change (across files) after a review jump or staging",
         extend_search_next, "Add next search match to selection",
         extend_search_prev, "Add previous search match to selection",
         search_selection, "Use current selection as search pattern",
@@ -2402,6 +2402,7 @@ fn searcher(cx: &mut Context, direction: Direction) {
         move |cx, regex, event| {
             if event == PromptEvent::Validate {
                 cx.editor.registers.last_search_register = reg;
+                cx.editor.nav_mode = NavMode::Search;
             } else if event != PromptEvent::Update {
                 return;
             }
@@ -2488,7 +2489,7 @@ fn has_search(cx: &Context) -> bool {
 }
 
 fn search_next_or_review_next(cx: &mut Context) {
-    if has_search(cx) {
+    if cx.editor.nav_mode == NavMode::Search && has_search(cx) {
         search_next(cx)
     } else {
         review_next_change(cx)
@@ -2496,25 +2497,29 @@ fn search_next_or_review_next(cx: &mut Context) {
 }
 
 fn search_prev_or_review_prev(cx: &mut Context) {
-    if has_search(cx) {
+    if cx.editor.nav_mode == NavMode::Search && has_search(cx) {
         search_prev(cx)
     } else {
         review_prev_change(cx)
     }
 }
 fn extend_search_next(cx: &mut Context) {
+    cx.editor.nav_mode = NavMode::Search;
     search_next_or_prev_impl(cx, Movement::Extend, Direction::Forward);
 }
 
 fn extend_search_prev(cx: &mut Context) {
+    cx.editor.nav_mode = NavMode::Search;
     search_next_or_prev_impl(cx, Movement::Extend, Direction::Backward);
 }
 
 fn search_selection(cx: &mut Context) {
+    cx.editor.nav_mode = NavMode::Search;
     search_selection_impl(cx, false)
 }
 
 fn search_selection_detect_word_boundaries(cx: &mut Context) {
+    cx.editor.nav_mode = NavMode::Search;
     search_selection_impl(cx, true)
 }
 
