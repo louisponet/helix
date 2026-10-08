@@ -97,8 +97,10 @@ the canonical `git rev-parse --show-toplevel`. Helix not running is normal:
 nothing is reported.
 
 The mailbox is `<repo>/.pi/helix-review/` with an `outbox/` directory and
-`state.json` (the review baseline and the per-file turn snapshots); ignore
-`.pi/` in Git.
+a `state/<session id>.json` file per pi session (its review baseline, the
+per-file turn snapshots, when each file was last changed in one of its turns,
+its pid while it runs, `last_active` and `cwd`); a `state.json` of an earlier
+version moves into the first session's file. Ignore `.pi/` in Git.
 
 - At the start of an agent turn the baseline becomes `HEAD`, unless the
   previous baseline has not been handed back yet (it is sticky until a
@@ -159,6 +161,17 @@ The mailbox is `<repo>/.pi/helix-review/` with an `outbox/` directory and
   when other instructions say to, but only commit exactly the index when a
   `:review-commit` (commit-staged) handoff asks for it, so your partial
   staging in Helix is not swallowed.
+
+### Multiple sessions
+
+Several pi sessions can be hooked to one repository. A session is live while
+the pid in its state file runs. Each batch goes to one live session: the one
+its `target` names (a session id), else the one that last changed one of its
+files during a turn, else the most recently active one. Only that session
+claims it, by renaming it to `<name>.<session id>.claimed` (if the rename
+fails another session got it first) before handling and deleting it. On
+start, a session puts back claims older than 10 minutes whose session is no
+longer live.
 
 The JSON in the handoff message is described in [`schema.md`](schema.md).
 

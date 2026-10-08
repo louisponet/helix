@@ -6,12 +6,14 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	realpathSync,
 	renameSync,
 	rmSync,
 	symlinkSync,
 	unlinkSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
@@ -57,7 +59,7 @@ function workspace(t: TestContext) {
 }
 
 // The public command against a recording Pi transport; filesystem and Git stay real.
-function piSession(cwd: string) {
+function piSession(cwd: string, sessionId = "session-1") {
 	const sent: { content: unknown; options: unknown }[] = [];
 	const notes: { message: string; type?: string }[] = [];
 	const messages: { message: { customType: string; content: string; display: boolean; details: any }; options: unknown }[] = [];
@@ -83,7 +85,7 @@ function piSession(cwd: string) {
 		ui: { notify: (message: string, type?: string) => void notes.push({ message, type }) },
 		isIdle: () => true,
 		hasPendingMessages: () => false,
-		sessionManager: { getSessionId: () => "session-1" },
+		sessionManager: { getSessionId: () => sessionId },
 	};
 	const emit = async (type: string, event: object = {}) => {
 		let result: unknown;
@@ -650,7 +652,7 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	w.stage("a.rs", "fn a() {}\n");
 	const head = w.commit();
 	const outbox = join(repo, ".pi", "helix-review", "outbox");
-	const state = () => JSON.parse(readFileSync(join(repo, ".pi", "helix-review", "state.json"), "utf8"));
+	const state = () => JSON.parse(readFileSync(join(repo, ".pi", "helix-review", "state", "session-1.json"), "utf8"));
 
 	const session = piSession(join(repo));
 	t.after(() => session.emit("session_shutdown"));
@@ -845,7 +847,7 @@ test("a commit-staged handoff moves the baseline to the agent's commit, an ordin
 	w.stage("b.rs", "b\n");
 	const head = w.commit();
 	const outbox = join(repo, ".pi", "helix-review", "outbox");
-	const state = () => JSON.parse(readFileSync(join(repo, ".pi", "helix-review", "state.json"), "utf8"));
+	const state = () => JSON.parse(readFileSync(join(repo, ".pi", "helix-review", "state", "session-1.json"), "utf8"));
 
 	const session = piSession(repo);
 	t.after(() => session.emit("session_shutdown"));
@@ -1003,8 +1005,88 @@ test("a batch about files outside the repository is dropped without a turn or a 
 	assert.equal(session.messages.length, 0);
 	assert.deepEqual(lines, [], "no receipt is echoed");
 	assert.equal(warn.mock.callCount(), 1);
-	const state = JSON.parse(readFileSync(join(repo, ".pi", "helix-review", "state.json"), "utf8"));
+	const state = JSON.parse(readFileSync(join(repo, ".pi", "helix-review", "state", "session-1.json"), "utf8"));
 	assert.deepEqual(state.baseline, { commit_oid: head, acknowledged: false });
+});
+
+test("several sessions in one repository each take only the batches meant for them", async (t) => {
+	const w = workspace(t);
+	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });
+	const repo = realpathSync(w.repo);
+	const [a, b] = [join(repo, "a.rs"), join(repo, "b.rs")];
+	w.stage("a.rs", "a\n");
+	w.stage("b.rs", "b\n");
+	const head = w.commit();
+	const dir = join(repo, ".pi", "helix-review");
+	const outbox = join(dir, "outbox");
+	// An earlier version's single state.json moves into the first session's file.
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, "state.json"), JSON.stringify({ snapshots: {}, baseline: { commit_oid: head, acknowledged: false } }));
+
+	const one = piSession(repo, "session-1");
+	t.after(() => one.emit("session_shutdown"));
+	await one.emit("session_start", { reason: "startup" });
+	const state = (id: string) => JSON.parse(readFileSync(join(dir, "state", `${id}.json`), "utf8"));
+	assert.ok(!existsSync(join(dir, "state.json")));
+	assert.deepEqual(state("session-1").baseline, { commit_oid: head, acknowledged: false });
+	assert.equal(state("session-1").pid, process.pid);
+
+	const two = piSession(repo, "session-2");
+	t.after(() => two.emit("session_shutdown"));
+	await two.emit("session_start", { reason: "startup" });
+	// Session 1 edits a.rs in its turn; session 2 runs a later turn that edits nothing.
+	await one.emit("agent_start");
+	writeFileSync(a, "a edited\n");
+	await one.emit("agent_end", { messages: [] });
+	await new Promise((wake) => setTimeout(wake, 5));
+	await two.emit("agent_start");
+	await two.emit("agent_end", { messages: [] });
+	assert.ok(state("session-1").edited[a] > 0);
+	assert.equal(state("session-2").edited?.[a], undefined);
+
+	const send = (name: string, file: string, extra: object = {}) => {
+		const path = join(outbox, name);
+		const doc = { format: "helix-review-batch", version: 2, files: [], comments: [{ ...comment(file), comment: name }], ...extra };
+		writeFileSync(`${path}.tmp`, JSON.stringify(doc));
+		renameSync(`${path}.tmp`, path);
+		return path;
+	};
+	const comment = (path: string) => ({
+		path,
+		side: "current",
+		baseline: commitBase(head, null),
+		start_line: 1,
+		end_line: 1,
+		current_line: 1,
+		selected_text: "x",
+		context_before: "",
+		context_after: "",
+	});
+	const got = (session: typeof one) => session.messages.map((m) => m.message.details.files[0].review_comments[0].comment);
+
+	for (const path of [send("1-1.json", a), send("1-2.json", b), send("1-3.json", b, { target: "session-1" })]) {
+		await until(() => !existsSync(path), path);
+	}
+	await until(() => got(one).length + got(two).length === 3, "all three handoffs");
+	assert.deepEqual(got(one), ["1-1.json", "1-3.json"], "the editor of a.rs, then the target");
+	assert.deepEqual(got(two), ["1-2.json"], "the most recently active session");
+	assert.deepEqual(readdirSync(outbox), []);
+
+	// A claim left over 10 minutes ago by a session that is gone goes back to the outbox on the
+	// next session start; a fresh one stays claimed.
+	const doc = (name: string) => JSON.stringify({ format: "helix-review-batch", version: 2, files: [], comments: [{ ...comment(b), comment: name }], target: "session-3" });
+	const stale = join(outbox, "1-4.session-9.claimed");
+	const fresh = join(outbox, "1-5.session-9.claimed");
+	writeFileSync(stale, doc("1-4.json"));
+	writeFileSync(fresh, doc("1-5.json"));
+	const old = new Date(Date.now() - 11 * 60 * 1000);
+	utimesSync(stale, old, old);
+	const three = piSession(repo, "session-3");
+	t.after(() => three.emit("session_shutdown"));
+	await three.emit("session_start", { reason: "startup" });
+	await until(() => got(three).length === 1, "the swept batch");
+	assert.deepEqual(got(three), ["1-4.json"]);
+	assert.deepEqual(readdirSync(outbox), ["1-5.session-9.claimed"]);
 });
 
 test("an unreachable Helix never fails the hook, and an empty handoff is dropped but acknowledged", async (t) => {
@@ -1036,6 +1118,6 @@ test("an unreachable Helix never fails the hook, and an empty handoff is dropped
 	);
 	await until(() => !existsSync(batch), "the batch to be consumed");
 	assert.equal(session.messages.length, 0);
-	const state = JSON.parse(readFileSync(join(repo, ".pi", "helix-review", "state.json"), "utf8"));
+	const state = JSON.parse(readFileSync(join(repo, ".pi", "helix-review", "state", "session-1.json"), "utf8"));
 	assert.deepEqual(state.baseline, { commit_oid: head, acknowledged: true });
 });

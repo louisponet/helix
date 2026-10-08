@@ -101,6 +101,7 @@ updated Helix.
 | `files`    | array  | Every file reviewed since the previous export (including files without comments and reviews closed since), in no particular order. Each path appears once. |
 | `comments` | array  | Pending comments in the order they were made. May be empty. |
 | `request`  | object | Optional. What the reviewer asks the agent to do besides the edits and comments: `{ "kind": "commit-staged", "subject"?: string }` (from `:review-commit [subject]`: commit exactly what is staged in the index) or `{ "kind": "message", "text": string }` (from `:review-send <text>`) or `{ "kind": "ask" }` (from `:review-ask <text>`: act on the batch's comments, one per selection, the primary selection's first). A batch with a request may have no files or comments. |
+| `target`   | string | Optional. The pi session the batch is for, by session id; only that session takes it. Without it, the hook gives the batch to the session that last changed one of its files, else the most recently active one. |
 
 There is no batch-wide baseline.
 

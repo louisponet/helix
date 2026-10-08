@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, type FSWatcher, watch } from "node:fs";
-import { mkdir, readdir, readFile, realpath, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -59,11 +59,14 @@ class ReviewBatch {
 	files: ReviewFile[];
 	comments: ReviewComment[];
 	request?: ReviewRequest;
+	/** The session id or label of the pi session the batch is for, if Helix named one. */
+	target?: string;
 
-	constructor(files: ReviewFile[], comments: ReviewComment[], request?: ReviewRequest) {
+	constructor(files: ReviewFile[], comments: ReviewComment[], request?: ReviewRequest, target?: string) {
 		this.files = files;
 		this.comments = comments;
 		this.request = request;
+		this.target = target;
 	}
 
 	static async read(path: string): Promise<ReviewBatch> {
@@ -143,7 +146,8 @@ class ReviewBatch {
 
 		const request = top.request === undefined ? undefined : parseRequest(top.request);
 		if (files.length === 0 && comments.length === 0 && !request) throw new BatchError("it has no files or comments");
-		return new ReviewBatch(files, comments, request);
+		const target = top.target === undefined ? undefined : text(top.target, "target");
+		return new ReviewBatch(files, comments, request, target);
 	}
 
 	async inspect(): Promise<Map<string, FileState>> {
@@ -439,12 +443,28 @@ function quote(label: string, body: string): string[] {
 	return [`${label}:`, fence, body.endsWith("\n") ? body.slice(0, -1) : body, fence];
 }
 
+/** One pi session's hook state, in `state/<sessionId>.json`. */
 interface HookState {
 	baseline?: { commit_oid: string; acknowledged: boolean };
 	snapshots: Record<string, string>;
+	/** When each file was last changed during one of this session's turns (ms since the epoch). */
+	edited?: Record<string, number>;
 	/** Set by a commit-staged handoff until the end of the turn it starts or steers. */
 	commit_requested?: boolean;
+	/** Updated at session start and at the start and end of each turn (ms since the epoch). */
+	last_active?: number;
+	cwd?: string;
+	/** The pi process, so other sessions can tell whether this one is live; cleared on shutdown. */
+	pid?: number;
 }
+
+interface Session {
+	id: string;
+	state: HookState;
+}
+
+/** How long a claimed batch of a session that is gone waits before it is put back in the outbox. */
+const STALE_CLAIM_MS = 10 * 60 * 1000;
 
 const GUIDELINES = `## Helix review handoff
 The user reviews your changes in Helix against the commit at the start of your turn and hands them back by saving. A handoff arrives as a "helix-review:handoff" message with a JSON block, possibly in the middle of a turn as a steering message: per file, user_edits are the user's edits as unified-diff hunks (integrate them, never revert them; when they undo part of your change, keep it undone and adjust tests and docs to match), agent_comments are lines containing "AGENT: <request>" (new: true when added in this review; new: false ones may be documentation or examples rather than requests), and review_comments are inline review comments. Address each AGENT: request and delete its marker line once handled. After handling a handoff, say per file what you integrated or declined. While this hook is attached, never run git commit or git push on your own, even if other instructions say to commit at the end of a turn: the user stages hunks in Helix and asks for a commit with a commit-staged handoff, the only time you commit (exactly the index, adding nothing).`;
@@ -453,7 +473,11 @@ class Hook {
 	private pi: ExtensionAPI;
 	readonly repo: string;
 	readonly dir: string;
+	/** The pi session id, made safe for file names. */
+	readonly id: string;
 	private state: HookState;
+	/** The changed files and their blobs at the start of the running turn. */
+	private turnStart?: Record<string, string>;
 	private watcher?: FSWatcher;
 	private timer?: NodeJS.Timeout;
 	private poller?: NodeJS.Timeout;
@@ -462,14 +486,15 @@ class Hook {
 	private queue = Promise.resolve();
 	private seen = new Set<string>();
 
-	constructor(pi: ExtensionAPI, repo: string, dir: string, state: HookState) {
+	constructor(pi: ExtensionAPI, repo: string, dir: string, id: string, state: HookState) {
 		this.pi = pi;
 		this.repo = repo;
 		this.dir = dir;
+		this.id = id;
 		this.state = state;
 	}
 
-	static async open(pi: ExtensionAPI, cwd: string): Promise<Hook | undefined> {
+	static async open(pi: ExtensionAPI, cwd: string, sessionId: string): Promise<Hook | undefined> {
 		let repo: string;
 		try {
 			repo = await realpath((await git(cwd, ["rev-parse", "--show-toplevel"])).trim());
@@ -478,11 +503,52 @@ class Hook {
 		}
 		const dir = join(repo, ".pi", "helix-review");
 		await mkdir(join(dir, "outbox"), { recursive: true });
+		await mkdir(join(dir, "state"), { recursive: true });
 		if (!existsSync(join(dir, ".gitignore"))) await writeFile(join(dir, ".gitignore"), "*\n");
-		const state: HookState = await readFile(join(dir, "state.json"), "utf8")
-			.then((text) => JSON.parse(text) as HookState)
-			.catch(() => ({ snapshots: {} }));
-		return new Hook(pi, repo, dir, state);
+		const id = sessionId.replace(/[^\w-]/g, "_");
+		let state = await readState(join(dir, "state", `${id}.json`));
+		if (!state) {
+			// The single state.json of earlier versions moves into the first session that starts.
+			state = await readState(join(dir, "state.json"));
+			if (state) await unlink(join(dir, "state.json")).catch(() => undefined);
+		}
+		const hook = new Hook(pi, repo, dir, id, { ...(state ?? { snapshots: {} }), cwd });
+		await hook.touch();
+		return hook;
+	}
+
+	/** Marks this session live and active now. */
+	async touch(): Promise<void> {
+		this.state.pid = process.pid;
+		this.state.last_active = Date.now();
+		await this.save();
+	}
+
+	/** The sessions in this repository whose pi process is running, this one included. */
+	private async liveSessions(): Promise<Session[]> {
+		const sessions = [{ id: this.id, state: this.state }];
+		for (const name of await readdir(join(this.dir, "state")).catch(() => [] as string[])) {
+			const id = name.endsWith(".json") ? name.slice(0, -5) : undefined;
+			if (!id || id === this.id) continue;
+			const state = await readState(join(this.dir, "state", name));
+			if (state && alive(state.pid)) sessions.push({ id, state });
+		}
+		return sessions;
+	}
+
+	/**
+	 * The session `batch` is for: the one it targets, else the live session that last changed one
+	 * of its files during a turn, else the most recently active live session.
+	 */
+	private async addressee(batch: ReviewBatch): Promise<string | undefined> {
+		const sessions = await this.liveSessions();
+		if (batch.target !== undefined) return sessions.find((s) => s.id === batch.target)?.id ?? batch.target;
+		const paths = [...batch.files, ...batch.comments].map((entry) => entry.path);
+		const newest = (key: (s: Session) => number) =>
+			sessions.reduce((a, b) => (key(b) > key(a) || (key(b) === key(a) && b.id < a.id) ? b : a));
+		const edited = (s: Session) => Math.max(0, ...paths.map((path) => s.state.edited?.[path] ?? 0));
+		const editor = newest(edited);
+		return edited(editor) > 0 ? editor.id : newest((s) => s.state.last_active ?? 0).id;
 	}
 
 	get outbox(): string {
@@ -496,12 +562,31 @@ class Hook {
 		return join(runtime ? join(runtime, "helix") : `/tmp/helix-${process.getuid?.()}`, `${id}.sock`);
 	}
 
-	start(): void {
+	async start(): Promise<void> {
+		await this.sweep();
 		this.watcher = watch(this.outbox, (_event, name) => name && this.enqueue(name));
 		void readdir(this.outbox).then((names) => names.forEach((name) => this.enqueue(name)));
 	}
 
+	/** Puts batches claimed long ago by sessions that are gone back in the outbox. */
+	private async sweep(): Promise<void> {
+		const live = new Set((await this.liveSessions()).map((s) => s.id));
+		for (const name of await readdir(this.outbox)) {
+			const claim = /^(.+)\.([^.]+)\.claimed$/.exec(name);
+			if (!claim || live.has(claim[2])) continue;
+			const path = join(this.outbox, name);
+			const info = await stat(path).catch(() => undefined);
+			if (info && Date.now() - info.mtimeMs > STALE_CLAIM_MS) {
+				await rename(path, join(this.outbox, `${claim[1]}.json`)).catch(() => undefined);
+			}
+		}
+	}
+
 	stop(): void {
+		if (!this.stopped) {
+			this.state.pid = undefined;
+			void this.save().catch(() => undefined);
+		}
 		this.stopped = true;
 		this.watcher?.close();
 		clearTimeout(this.timer);
@@ -512,8 +597,9 @@ class Hook {
 		if (!this.state.baseline || this.state.baseline.acknowledged) {
 			const head = (await git(this.repo, ["rev-parse", "HEAD"])).trim();
 			this.state.baseline = { commit_oid: head, acknowledged: false };
-			await this.save();
 		}
+		this.turnStart = await this.changedFiles();
+		await this.touch();
 		await this.attach();
 	}
 
@@ -602,8 +688,24 @@ class Hook {
 		await this.echo(`Agent turn done: ${files} changed since ${since} (:review-files)`);
 	}
 
+	/** Stores the turn's snapshots and which files the turn changed, and marks the session active. */
 	async snapshot(): Promise<void> {
 		if (!this.state.baseline) return;
+		const now = await this.changedFiles();
+		const at = Date.now();
+		if (this.turnStart) {
+			this.state.edited ??= {};
+			for (const [path, oid] of Object.entries(now)) if (this.turnStart[path] !== oid) this.state.edited[path] = at;
+		}
+		this.turnStart = undefined;
+		this.state.snapshots = now;
+		this.state.last_active = at;
+		await this.save();
+	}
+
+	/** The blobs (`git hash-object -w`) of every file changed since the baseline, untracked ones included. */
+	private async changedFiles(): Promise<Record<string, string>> {
+		if (!this.state.baseline) return {};
 		const changed = await git(this.repo, ["diff", "--name-only", "-z", this.state.baseline.commit_oid]);
 		const untracked = await git(this.repo, ["ls-files", "--others", "--exclude-standard", "-z"]);
 		const paths: string[] = [];
@@ -612,8 +714,7 @@ class Hook {
 			if (!this.isPiState(path) && (await stat(path).catch(() => undefined))?.isFile()) paths.push(path);
 		}
 		const oids = paths.length ? (await git(this.repo, ["hash-object", "-w", "--no-filters", "--", ...paths])).split("\n") : [];
-		this.state.snapshots = Object.fromEntries(paths.map((path, i) => [path, oids[i]]));
-		await this.save();
+		return Object.fromEntries(paths.map((path, i) => [path, oids[i]]));
 	}
 
 	/** Whether `path` is under `<repo>/.pi/`, pi's own state rather than the agent's work. */
@@ -639,6 +740,20 @@ class Hook {
 			if (error instanceof BatchError) return;
 			throw error;
 		}
+		if ((await this.addressee(batch)) !== this.id) {
+			// Another session's: look again if it is still there when the outbox changes.
+			this.seen.delete(basename(path));
+			return;
+		}
+		// Claim it: of several sessions that agree it is theirs, the first rename wins.
+		const claimed = path.replace(/\.json$/, `.${this.id}.claimed`);
+		try {
+			await rename(path, claimed);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+			throw error;
+		}
+		path = claimed;
 		// Another checkout's Helix (or a test) may have used this mailbox: such a batch is not for this agent.
 		const paths = [...batch.files, ...batch.comments].map((entry) => entry.path);
 		const inRepo = await Promise.all(paths.map(async (p) => (await realpath(p).catch(() => p)).startsWith(this.repo + sep)));
@@ -714,8 +829,27 @@ class Hook {
 		await this.echo(`pi received your review: ${receipt(files, request)}`);
 	}
 
-	private save(): Promise<void> {
-		return writeFile(join(this.dir, "state.json"), `${JSON.stringify(this.state, null, 2)}\n`);
+	private async save(): Promise<void> {
+		const file = join(this.dir, "state", `${this.id}.json`);
+		await writeFile(`${file}.tmp`, `${JSON.stringify(this.state, null, 2)}\n`);
+		await rename(`${file}.tmp`, file);
+	}
+}
+
+function readState(path: string): Promise<HookState | undefined> {
+	return readFile(path, "utf8")
+		.then((text) => JSON.parse(text) as HookState)
+		.catch(() => undefined);
+}
+
+/** Whether process `pid` is running. */
+function alive(pid: number | undefined): boolean {
+	if (!pid) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
 	}
 }
 
@@ -804,8 +938,8 @@ export default function helixReview(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, ctx) => {
 		hook?.stop();
-		hook = await Hook.open(pi, ctx.cwd);
-		hook?.start();
+		hook = await Hook.open(pi, ctx.cwd, ctx.sessionManager.getSessionId());
+		await hook?.start();
 		if (await hook?.attach()) await hook?.announceAttach();
 	});
 	pi.on("session_shutdown", () => hook?.stop());
