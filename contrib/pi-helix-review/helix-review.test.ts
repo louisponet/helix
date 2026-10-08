@@ -655,7 +655,7 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	t.after(() => session.emit("session_shutdown"));
 	await session.emit("session_start", { reason: "startup" });
 	assert.ok(existsSync(outbox));
-	assert.deepEqual(lines, [], "nothing to restore without a baseline");
+	assert.deepEqual(lines.splice(0), ["echo pi hook attached"], "nothing to restore without a baseline");
 	assert.ok(existsSync(join(repo, ".pi", "helix-review", ".gitignore")));
 	const promptGuidelines: string[] = [];
 	await session.emit("before_agent_start", { prompt: "p", systemPrompt: "base", systemPromptOptions: { promptGuidelines } });
@@ -784,14 +784,18 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	const restarted = piSession(repo);
 	t.after(() => restarted.emit("session_shutdown"));
 	await restarted.emit("session_start", { reason: "startup" });
-	assert.deepEqual(lines.slice(15), [`review-handoff ${outbox}`, `review-baseline ${next}`], "session_start restores the baseline");
+	assert.deepEqual(
+		lines.slice(15),
+		[`review-handoff ${outbox}`, `review-baseline ${next}`, `echo pi hook attached, baseline ${next.slice(0, 8)}`],
+		"session_start restores the baseline and says the link is live",
+	);
 
 	// A turn that leaves nothing changed since its (still sticky) baseline says so.
 	writeFileSync(file, "fn a() {}\n// AGENT: old request\nfn b() {}\n");
 	unlinkSync(join(repo, "new.rs"));
 	await restarted.emit("agent_start");
 	await restarted.emit("agent_end", { messages: [] });
-	assert.deepEqual(lines.slice(17), [
+	assert.deepEqual(lines.slice(18), [
 		`review-handoff ${outbox}`,
 		`review-baseline ${next}`,
 		started,

@@ -106,7 +106,10 @@ The mailbox is `<repo>/.pi/helix-review/` with an `outbox/` directory and
   so Helix reviews every open file in the workspace against that commit and
   writes a batch into the outbox whenever you save a reviewed file. It then
   sends `echo Agent turn started` to Helix's status line. A new pi session
-  restores the review commands (not the echo) from `state.json`.
+  (or `/reload`) restores the review commands from `state.json` and echoes
+  `pi hook attached` (with `, baseline <commit>` when one was restored), so
+  the status line shows the link is live; nothing is shown when Helix is not
+  running.
 - After `edit`, `write` and `bash` tool results (coalesced within 200 ms) and
   at the end of the turn pi sends `review-baseline <commit>` again, which
   refreshes Helix's review.

@@ -485,6 +485,12 @@ class Hook {
 		await helix(this.socket, [`echo ${message}`]);
 	}
 
+	/** Tells the reviewer in Helix that the hook is linked, and with which restored baseline. */
+	async announceAttach(): Promise<void> {
+		const baseline = this.state.baseline ? `, baseline ${this.state.baseline.commit_oid.slice(0, 8)}` : "";
+		await this.echo(`pi hook attached${baseline}`);
+	}
+
 	/** Tells the reviewer in Helix that the turn ended and how many files differ from the baseline. */
 	async announceEnd(): Promise<void> {
 		if (!this.state.baseline) return;
@@ -671,6 +677,7 @@ export default function helixReview(pi: ExtensionAPI): void {
 		hook = await Hook.open(pi, ctx.cwd);
 		hook?.start();
 		await hook?.attach();
+		await hook?.announceAttach();
 	});
 	pi.on("session_shutdown", () => hook?.stop());
 	pi.on("before_agent_start", (event) => {
