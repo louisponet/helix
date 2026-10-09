@@ -2658,6 +2658,40 @@ async fn staging_moves_on_to_the_next_unstaged_hunk_across_files() -> anyhow::Re
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn enter_stays_on_a_hunk_it_unstages() -> anyhow::Result<()> {
+    let lines = (1..=20).map(|n| format!("{n}\n")).collect::<String>();
+    let changed = (1..=20)
+        .map(|n| match n {
+            9 | 15 => format!("changed {n}\n"),
+            n => format!("{n}\n"),
+        })
+        .collect::<String>();
+    let repo = Repo::new(&lines, &lines, &changed);
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let mut app = repo.app()?;
+    let status = |app: &Application| app.editor.get_status().unwrap().0.to_string();
+    let line = |app: &Application| {
+        let (view, doc) = current_ref!(app.editor);
+        doc.selection(view.id)
+            .primary()
+            .cursor_line(doc.text().slice(..))
+    };
+    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+
+    send_keys(&mut app, "9gg<ret>").await?;
+    assert_eq!(line(&app), 14);
+    assert_eq!(status(&app), "Staged 1 hunk; 1 of 2 staged in file.txt");
+    send_keys(&mut app, "N").await?;
+    assert_eq!(line(&app), 8);
+    send_keys(&mut app, "<ret>").await?;
+    assert_eq!(line(&app), 8);
+    assert_eq!(status(&app), "Unstaged 1 hunk; 0 of 2 staged in file.txt");
+    assert_eq!(git_ok(dir, &["diff", "--cached"]), "");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn review_submit_posts_line_file_level_and_reply_comments() -> anyhow::Result<()> {
     let base: String = "abcdefghijkl".chars().map(|c| format!("{c}\n")).collect();
     let head = base.replacen("b\n", "B\n", 1);

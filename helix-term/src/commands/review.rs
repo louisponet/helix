@@ -1978,9 +1978,9 @@ pub(super) fn review_toggle_stage(
     stage_and_move_on(cx, Staging::Toggle)
 }
 
-/// Stages or unstages like [`change_staging`], then, in a reviewed buffer, moves the cursor on to
-/// the next unstaged hunk after the selections, in this file or the next changed one (wrapping
-/// around); with none left anywhere the cursor stays.
+/// Stages or unstages like [`change_staging`], then, after staging in a reviewed buffer, moves the
+/// cursor on to the next unstaged hunk after the selections, in this file or the next changed one
+/// (wrapping around); with none left anywhere, or after unstaging, the cursor stays.
 fn stage_and_move_on(cx: &mut compositor::Context, staging: Staging) -> anyhow::Result<()> {
     cx.editor.nav_mode = helix_view::editor::NavMode::Review;
     let (view, doc) = current_ref!(cx.editor);
@@ -1992,8 +1992,8 @@ fn stage_and_move_on(cx: &mut compositor::Context, staging: Staging) -> anyhow::
         .unwrap_or(0);
     // The diff buffer has its own cursor to keep, and focused old text marks one block.
     let move_on = doc.review.is_some() && cx.editor.review_diff != Some(doc.id());
-    change_staging(cx.editor, staging)?;
-    if !move_on {
+    let staged = change_staging(cx.editor, staging)?;
+    if !move_on || !staged {
         return Ok(());
     }
     let status = cx.editor.get_status().map(|(status, _)| status.to_string());
@@ -2125,7 +2125,8 @@ enum Staging {
 }
 
 /// Stages or unstages the hunk under the cursor, see `:review-stage` and `:review-unstage`.
-fn change_staging(editor: &mut Editor, staging: Staging) -> anyhow::Result<()> {
+/// Returns whether it staged.
+fn change_staging(editor: &mut Editor, staging: Staging) -> anyhow::Result<bool> {
     let (path, targets) = stage_target(editor)?;
     if let Some(doc) = editor.document_by_path(&path) {
         // The index is staged from the file on disk, which must be what the buffer shows.
@@ -2235,7 +2236,7 @@ fn change_staging(editor: &mut Editor, staging: Staging) -> anyhow::Result<()> {
         "{verb} {}{skipped}; {count} of {total} staged in {name}",
         plural(hunks, "hunk")
     ));
-    Ok(())
+    Ok(stage)
 }
 
 /// The hunks of `hunks` (in order) that any of the `targets` line ranges meet. A single line meets
