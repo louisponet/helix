@@ -211,8 +211,8 @@ like this:
    grey (`diff.plus.review.staged`, `diff.minus.review.staged`) until the next
    edit. Save first: only what is on disk is staged. A hunk `HEAD` already
    holds was committed after the baseline (by the agent, say): it gets its own
-   colours (`diff.plus.review.committed`, `diff.minus.review.committed`, teal in
-   the default theme, falling back to the staged ones) and is counted as committed, and staging or unstaging it fails
+   colours (`diff.plus.review.committed`, `diff.minus.review.committed`, a faint
+   tint in the default theme, falling back to the staged ones) and is counted as committed, and staging or unstaging it fails
    with `already committed in <commit>`. While reviewing, `Enter` in
    normal mode is taken by this; elsewhere it does nothing.
 7. `:review-comment <text>` comments on the current selection, or on the
