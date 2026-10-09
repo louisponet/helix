@@ -104,8 +104,8 @@
 | `:review-pr` | Review a GitHub pull request (number or URL) with gh: check it out and review every buffer against its merge base with the base branch. `close` leaves the pull request review. |
 | `:review-submit` | Post the pending pull request comments as a review with gh: [approve|request-changes|comment] [summary]. Comments outside the pull request's diff become file-level comments quoting their lines; replies go to their threads. |
 | `:review-commit-all` | Stage every file changed since the review baseline (modified, deleted and untracked, like git add -A limited to them), then hand back like :review-commit with an optional subject and a leading @label to address a pi session. |
-| `:review-next` | Go to the next changed block, continuing with the first block of the next file changed since the review baseline (in :review-files order, wrapping around). |
-| `:review-prev` | Go to the previous changed block, continuing with the last block of the previous file changed since the review baseline (wrapping around). |
+| `:review-next` | Go to the next changed block not yet committed, continuing with the first block of the next file changed since the review baseline (in :review-files order, wrapping around). |
+| `:review-prev` | Go to the previous changed block not yet committed, continuing with the last block of the previous file changed since the review baseline (wrapping around). |
 | `:review-baseline-pick` | Pick the review baseline from the first-parent history of HEAD (up to 300 commits), with the current baseline, the merge base with the base branch and HEAD marked. |
 | `:review-older` | Move the review baseline one commit older (its first parent), pinning HEAD first when none is set, and refresh every review. |
 | `:review-newer` | Move the review baseline one commit newer, towards HEAD on its ancestry path, and refresh every review. |

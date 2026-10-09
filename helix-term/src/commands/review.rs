@@ -158,7 +158,7 @@ fn jump_change(cx: &mut compositor::Context, forward: bool, count: usize) -> any
         let hunks = doc
             .review
             .as_ref()
-            .map(Review::hunk_lines)
+            .map(Review::uncommitted_hunk_lines)
             .unwrap_or_default();
         let here = if forward {
             hunks.iter().position(|lines| lines.start > cursor)
@@ -169,27 +169,53 @@ fn jump_change(cx: &mut compositor::Context, forward: bool, count: usize) -> any
             land_on_hunk(cx.editor, hunks[idx].start);
             continue;
         }
-        // Past the last (or first) block: the next (or previous) file, wrapping around.
+        // Past the last (or first) block: the next (or previous) file with an uncommitted hunk,
+        // wrapping around.
         let current = doc
             .path()
             .and_then(|path| files.iter().position(|file| file == path));
-        let next = match (current, forward) {
-            (Some(idx), true) => (idx + 1) % files.len(),
-            (Some(idx), false) => (idx + files.len() - 1) % files.len(),
-            (None, true) => 0,
-            (None, false) => files.len() - 1,
+        let len = files.len();
+        let order: Vec<usize> = match (current, forward) {
+            (Some(idx), true) => (1..=len).map(|step| (idx + step) % len).collect(),
+            (Some(idx), false) => (1..=len).map(|step| (idx + len - step) % len).collect(),
+            (None, true) => (0..len).collect(),
+            (None, false) => (0..len).rev().collect(),
         };
-        cx.editor.open(&files[next], Action::Replace)?;
-        if let Err(err) = ensure_review(cx) {
-            log::info!("not enabling review: {err:#}");
+        let trust_full = doc_trust_full(cx.editor);
+        let mut landed = false;
+        for next in order {
+            let file = &files[next];
+            // A saved file that matches HEAD has only committed hunks: skip it without opening.
+            let all_committed = !cx
+                .editor
+                .document_by_path(file)
+                .is_some_and(Document::is_modified)
+                && cx
+                    .editor
+                    .diff_providers
+                    .get_commit_base(file, "HEAD", trust_full)
+                    .ok()
+                    .zip(std::fs::read(file).ok())
+                    .is_some_and(|(head, worktree)| head.data == worktree);
+            if all_committed {
+                continue;
+            }
+            cx.editor.open(file, Action::Replace)?;
+            if let Err(err) = ensure_review(cx) {
+                log::info!("not enabling review: {err:#}");
+            }
+            let hunks = doc!(cx.editor)
+                .review
+                .as_ref()
+                .map(Review::uncommitted_hunk_lines)
+                .unwrap_or_default();
+            if let Some(target) = if forward { hunks.first() } else { hunks.last() } {
+                land_on_hunk(cx.editor, target.start);
+                landed = true;
+                break;
+            }
         }
-        let hunks = doc!(cx.editor)
-            .review
-            .as_ref()
-            .map(Review::hunk_lines)
-            .unwrap_or_default();
-        let target = if forward { hunks.first() } else { hunks.last() };
-        land_on_hunk(cx.editor, target.map_or(0, |lines| lines.start));
+        ensure!(landed, "no uncommitted changes since {}", &commit[..8]);
     }
     let (view, doc) = current_ref!(cx.editor);
     let cursor = doc
@@ -199,7 +225,7 @@ fn jump_change(cx: &mut compositor::Context, forward: bool, count: usize) -> any
     let hunks = doc
         .review
         .as_ref()
-        .map(Review::hunk_lines)
+        .map(Review::uncommitted_hunk_lines)
         .unwrap_or_default();
     let name = doc
         .path()
@@ -2073,7 +2099,7 @@ fn announce_hunk(editor: &mut Editor) {
     let hunks = doc
         .review
         .as_ref()
-        .map(Review::hunk_lines)
+        .map(Review::uncommitted_hunk_lines)
         .unwrap_or_default();
     let name = doc
         .path()

@@ -54,7 +54,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-pr <number\|url>` | Review a GitHub pull request: check it out with `gh pr checkout` and review every buffer against its merge base with the base branch. Refuses uncommitted changes and unsaved reviewed buffers. `close` leaves the pull request review and keeps the checkout. See [Reviewing pull requests](#reviewing-pull-requests). |
 | `:review-submit [approve\|request-changes\|comment] [summary]` | Post the pending pull request comments as one review (see [Reviewing pull requests](#reviewing-pull-requests)). `G m` opens it while reviewing a pull request. |
 | `:review-commit-all [subject]` | Stage every file changed since the baseline (modified, deleted and untracked, like `git add -A` limited to them), then hand back like `:review-commit`. Refuses unsaved reviewed buffers, and says `no changes since <commit>` when there is nothing. `G M` in the default keymap. |
-| `:review-next` | Go to the next changed block; after the last one, open the next file changed since the baseline (`:review-files` order, wrapping around) at its first block. Shows `<file>: hunk 2 of 5`. `G n` in the default keymap, which takes a count. |
+| `:review-next` | Go to the next changed block that is unstaged or staged, skipping hunks committed since the baseline; after the last one, open the next file changed since the baseline with such a block (`:review-files` order, wrapping around) at its first one. Shows `<file>: hunk 2 of 5`, counting only those blocks, or `no uncommitted changes since <commit>` when there are none. `G n` in the default keymap, which takes a count. |
 | `:review-prev` | Like `:review-next` backwards, landing on the previous file's last block. `G N` in the default keymap. |
 | `:review-baseline-pick` | Pick the baseline from the first-parent history of `HEAD` (up to 300 commits: commit, age, author, subject), with `●` on the current baseline, `base` on the merge base with the base branch (the pull request's while reviewing one, else `origin/HEAD`, `develop`, `main` or `master`) and `HEAD` marked; the current baseline is preselected. Choosing a commit works like `:review-baseline <commit>`. `G b` in the default keymap; `G B` refreshes the buffer's review. |
 | `:review-older` | Move the baseline to its first parent (pinning `HEAD` first when none is set) and refresh every review; the status shows `Baseline <commit> <subject> (N behind HEAD)`. `G -` in the default keymap. |
@@ -254,7 +254,7 @@ does stepping back to where you started.
 These commands are built into the default keymap under `G` in normal mode
 (see [review mode](./keymap.md#review-mode)): `G f` picks a file, `G d` shows the
 diff, `G o` focuses old text, `G c` comments (`G C` lists them), `G s` stages, `G m` asks the agent
-to commit (`G M` stages everything first) and `G n` / `G N` move between changes, on into the next or previous
+to commit (`G M` stages everything first) and `G n` / `G N` move between changes not yet committed, on into the next or previous
 changed file (`:review-files` order, wrapping around) at its edge. Keys you map under
 `[keys.normal.G]` in `config.toml` are added to that menu.
 

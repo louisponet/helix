@@ -2173,6 +2173,69 @@ async fn g_n_walks_changes_across_files_and_wraps_around() -> anyhow::Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn g_n_skips_committed_hunks_and_files() -> anyhow::Result<()> {
+    let lines = (1..=20).map(|n| format!("{n}\n")).collect::<String>();
+    let changing = |changed: &[usize]| {
+        (1..=20)
+            .map(|n| match changed.contains(&n) {
+                true => format!("changed {n}\n"),
+                false => format!("{n}\n"),
+            })
+            .collect::<String>()
+    };
+    let repo = Repo::new(&lines, &lines, &lines);
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    fs::write(dir.join("other.txt"), "x\ny\n")?;
+    git_ok(dir, &["add", "other.txt"]);
+    git_ok(dir, &["commit", "-m", "other"]);
+    let baseline = git_ok(dir, &["rev-parse", "HEAD"]);
+    // The agent commits line 3 and all of other.txt, line 9 is staged and line 15 unstaged.
+    repo.write(&changing(&[3]));
+    fs::write(dir.join("other.txt"), "XX\ny\n")?;
+    git_ok(dir, &["add", "file.txt", "other.txt"]);
+    git_ok(dir, &["commit", "-m", "agent"]);
+    repo.write(&changing(&[3, 9]));
+    repo.stage();
+    repo.write(&changing(&[3, 9, 15]));
+    let mut app = repo.app()?;
+    let status = |app: &Application| app.editor.get_status().unwrap().0.to_string();
+    let at = |app: &Application| {
+        let (view, doc) = current_ref!(app.editor);
+        let name = doc.path().unwrap().file_name().unwrap().to_owned();
+        let line = doc
+            .selection(view.id)
+            .primary()
+            .cursor_line(doc.text().slice(..));
+        (name.into_string().unwrap(), line)
+    };
+    let pin = format!(":review-baseline {baseline}<ret>");
+    send_keys(&mut app, &pin).await?;
+
+    send_keys(&mut app, "ggGn").await?;
+    assert_eq!(at(&app), ("file.txt".to_owned(), 8));
+    assert_eq!(status(&app), "file.txt: hunk 1 of 2");
+    send_keys(&mut app, "Gn").await?;
+    assert_eq!(at(&app), ("file.txt".to_owned(), 14));
+    assert_eq!(status(&app), "file.txt: hunk 2 of 2");
+    // other.txt holds only committed hunks: rolling over skips it and wraps around.
+    send_keys(&mut app, "Gn").await?;
+    assert_eq!(at(&app), ("file.txt".to_owned(), 8));
+    send_keys(&mut app, "GN").await?;
+    assert_eq!(at(&app), ("file.txt".to_owned(), 14));
+
+    // With everything committed, there is nowhere to go.
+    git_ok(dir, &["commit", "-am", "rest"]);
+    send_keys(&mut app, &pin).await?;
+    send_keys(&mut app, "Gn").await?;
+    assert_error(
+        &app,
+        &format!("no uncommitted changes since {}", &baseline[..8]),
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn commit_all_stages_every_changed_file_and_asks_for_a_commit() -> anyhow::Result<()> {
     let repo = Repo::new("a\n", "a\n", "A\n");
     let dir = repo.dir.path();
