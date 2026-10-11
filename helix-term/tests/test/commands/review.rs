@@ -2030,6 +2030,49 @@ async fn hunks_committed_after_the_baseline_are_neither_staged_nor_stageable() -
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_hooks_refresh_marks_hunks_committed_outside_helix() -> anyhow::Result<()> {
+    let lines = (1..=12).map(|n| format!("{n}\n")).collect::<String>();
+    let changed = (1..=12)
+        .map(|n| match n {
+            3 | 9 => format!("changed {n}\n"),
+            n => format!("{n}\n"),
+        })
+        .collect::<String>();
+    let repo = Repo::new(&lines, &lines, &changed);
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let baseline = git_ok(dir, &["rev-parse", "HEAD"]);
+    let mut config = test_config();
+    config.editor.statusline.right = vec![StatusLineElement::Review];
+    let mut app = AppBuilder::new()
+        .with_file(&repo.file, None)
+        .with_config(config)
+        .build()?;
+    let pin = format!(":review-baseline {baseline}<ret>");
+    send_keys(&mut app, &pin).await?;
+    send_keys(&mut app, "3gg<ret>").await?;
+    let status = statusline(&app);
+    assert!(status.contains(" 2 hunks 1 staged "), "{status}");
+
+    // The agent commits the index; the worktree stays as it is.
+    git_ok(dir, &["commit", "-m", "agent"]);
+    let head = git_ok(dir, &["rev-parse", "HEAD"]);
+    app.editor.socket_command = true;
+    send_keys(&mut app, &pin).await?;
+    app.editor.socket_command = false;
+    let status = statusline(&app);
+    assert!(status.contains(" 2 hunks 1 committed "), "{status}");
+    send_keys(&mut app, "3gg<ret>").await?;
+    assert_error(&app, &format!("already committed in {}", &head[..8]));
+    send_keys(&mut app, ":review-files<ret><esc>").await?;
+    assert_eq!(
+        app.editor.get_status().unwrap().0,
+        "1 file, +2 -2, 0/2 hunks staged, 1 committed"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_baseline_steps_through_history_and_survives_the_hooks_refresh() -> anyhow::Result<()> {
     let repo = Repo::new("a\nb\nc\nd\ne\n", "a\nb\nc\nd\ne\n", "a\nb\nc\nd\ne\n");
     let dir = repo.dir.path();

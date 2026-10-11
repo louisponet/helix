@@ -1253,6 +1253,24 @@ fn ensure_review(cx: &mut compositor::Context) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Rereads the git index and `HEAD` content of `path` into its open review, so its hunks are marked
+/// staged or committed as git has them now.
+fn refresh_staging(editor: &mut Editor, path: &Path, trust_full: bool) {
+    let Ok((index, _)) = editor.diff_providers.get_index_base(path, trust_full) else {
+        return;
+    };
+    let head = editor
+        .diff_providers
+        .get_commit_base(path, "HEAD", trust_full)
+        .ok();
+    if let Some(doc) = editor.document_by_path_mut(path) {
+        let text = doc.text().clone();
+        if let Some(review) = doc.review.as_mut() {
+            review.set_index(&index, head.as_ref().map(|head| &head.data[..]), &text);
+        }
+    }
+}
+
 /// The editor-wide review baseline, pinning `HEAD` like `:review-baseline HEAD` when none is set.
 fn review_baseline_or_head(cx: &mut compositor::Context) -> anyhow::Result<String> {
     if cx.editor.review_baseline.is_none() {
@@ -1301,6 +1319,10 @@ pub(super) fn pin_review_baseline(editor: &mut Editor, revision: &str) -> anyhow
             .as_ref()
             .is_some_and(|review| review.baseline().revision() == Some(commit.as_str()));
         if refresh && current && doc.is_modified_on_disk().is_ok_and(|modified| !modified) {
+            // The agent may have committed or staged since: the hunks' stages can still change.
+            if let Some(path) = doc.path().map(Path::to_path_buf) {
+                refresh_staging(editor, &path, trust_full);
+            }
             unchanged += 1;
             continue;
         }
@@ -1520,20 +1542,7 @@ pub(super) fn review_commit_all(
         .stage_paths(&workspace, &paths, trust_full)?;
     // Reviews mark staged hunks from the index they last saw.
     for path in &paths {
-        let Ok((index, _)) = cx.editor.diff_providers.get_index_base(path, trust_full) else {
-            continue;
-        };
-        let head = cx
-            .editor
-            .diff_providers
-            .get_commit_base(path, "HEAD", trust_full)
-            .ok();
-        if let Some(doc) = cx.editor.document_by_path_mut(path) {
-            let text = doc.text().clone();
-            if let Some(review) = doc.review.as_mut() {
-                review.set_index(&index, head.as_ref().map(|head| &head.data[..]), &text);
-            }
-        }
+        refresh_staging(cx.editor, path, trust_full);
     }
     refresh_review_diff(cx.editor);
     let (target, subject) = split_target(args.first());
