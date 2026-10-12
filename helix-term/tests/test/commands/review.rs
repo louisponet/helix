@@ -2123,6 +2123,54 @@ async fn the_hooks_refresh_marks_hunks_committed_outside_helix() -> anyhow::Resu
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn enter_stages_the_uncommitted_part_of_a_partly_committed_block() -> anyhow::Result<()> {
+    let lines = (1..=12).map(|n| format!("{n}\n")).collect::<String>();
+    let changing = |changed: &[usize]| {
+        (1..=12)
+            .map(|n| match changed.contains(&n) {
+                true => format!("changed {n}\n"),
+                false => format!("{n}\n"),
+            })
+            .collect::<String>()
+    };
+    let repo = Repo::new(&lines, &lines, &lines);
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let baseline = git_ok(dir, &["rev-parse", "HEAD"]);
+    // After the baseline the agent commits lines 3-4 and 10, then edits line 5 next to them.
+    repo.write(&changing(&[3, 4, 10]));
+    repo.stage();
+    git_ok(dir, &["commit", "-m", "agent"]);
+    let head = git_ok(dir, &["rev-parse", "HEAD"]);
+    repo.write(&changing(&[3, 4, 5, 10]));
+    let mut app = repo.app()?;
+    send_keys(&mut app, &format!(":review-baseline {baseline}<ret>")).await?;
+    let review = doc!(app.editor).review.as_ref().unwrap();
+    assert_eq!(
+        review.changed_lines_stage().collect::<Vec<_>>(),
+        [(2..5, HunkStage::Unstaged), (9..10, HunkStage::Committed)]
+    );
+
+    // On the committed part of the mixed block, Enter stages the block's new change.
+    send_keys(&mut app, "3gg<ret>").await?;
+    assert_status_not_error(&app.editor);
+    let status = app.editor.get_status().unwrap().0.to_string();
+    assert!(
+        status.starts_with("Staged 1 hunk, 1 already committed;"),
+        "{status}"
+    );
+    let staged = git_ok(dir, &["diff", "--cached"]);
+    assert!(staged.contains("+changed 5"), "{staged}");
+    assert!(!staged.contains("+changed 3"), "{staged}");
+    assert_eq!(git_ok(dir, &["diff", "--name-only"]), "");
+
+    // A block that is committed as a whole still has nothing to stage.
+    send_keys(&mut app, "10gg<ret>").await?;
+    assert_error(&app, &format!("already committed in {}", &head[..8]));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_baseline_steps_through_history_and_survives_the_hooks_refresh() -> anyhow::Result<()> {
     let repo = Repo::new("a\nb\nc\nd\ne\n", "a\nb\nc\nd\ne\n", "a\nb\nc\nd\ne\n");
     let dir = repo.dir.path();

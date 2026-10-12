@@ -2532,12 +2532,20 @@ fn stage_target(editor: &Editor) -> anyhow::Result<(PathBuf, Vec<ops::Range<usiz
     let path = doc.path().context("buffer has no path")?.to_path_buf();
     let lines = match review.focused_block_index(view.id) {
         Some(idx) => vec![review.blocks()[idx].current.clone()],
+        // A displayed block acts as one unit, even where its lines span several staging hunks
+        // (part committed after the baseline, part edited since): each selection grows to the
+        // blocks it meets.
         None => doc
             .selection(view.id)
             .iter()
             .map(|range| {
                 let (start, end) = range.line_range(text);
-                start..end + 1
+                review
+                    .changed_lines()
+                    .filter(|block| block.start <= end && start < block.end)
+                    .fold(start..end + 1, |lines, block| {
+                        lines.start.min(block.start)..lines.end.max(block.end)
+                    })
             })
             .collect(),
     };

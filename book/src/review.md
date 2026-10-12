@@ -215,7 +215,9 @@ like this:
    holds was committed after the baseline (by the agent, say): it gets its own
    colours (`diff.plus.review.committed`, `diff.minus.review.committed`, a faint
    tint in the default theme, falling back to the staged ones) and is counted as committed, and staging or unstaging it fails
-   with `already committed in <commit>`. While reviewing, `Enter` in
+   with `already committed in <commit>`. A block that mixes committed lines
+   with newer edits next to them acts as one unit: `Enter` anywhere in it
+   stages its uncommitted part (`Staged 1 hunk, 1 already committed`). While reviewing, `Enter` in
    normal mode is taken by this; elsewhere it does nothing.
 7. `:review-comment <text>` (`G c` or `G a`) sends a comment on the current
    selections (several are fine), or on the selected old text while it is
