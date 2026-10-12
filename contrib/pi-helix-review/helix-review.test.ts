@@ -1141,6 +1141,56 @@ test("sessions are named pi-N in Helix, and Helix reviews against the oldest unr
 	assert.equal(lines[0], `review-baseline ${second}`, "pi-1's baseline was handed back");
 });
 
+test("a commit the reviewer asked for lifts every session's older baseline to it", async (t) => {
+	const w = workspace(t);
+	const socket = join(w.root, "helix.sock");
+	withEnv(t, { HELIX_COMMAND_SOCKET: socket });
+	const { lines } = await fakeHelix(t, socket);
+	const repo = realpathSync(w.repo);
+	w.stage("a.rs", "a\n");
+	const first = w.commit();
+	const outbox = join(repo, ".pi", "helix-review", "outbox");
+	const sent = () => lines.filter((line) => line.startsWith("review-baseline ")).at(-1);
+
+	const one = piSession(repo, "session-1");
+	t.after(() => one.emit("session_shutdown"));
+	await one.emit("session_start", { reason: "startup" });
+	const two = piSession(repo, "session-2");
+	t.after(() => two.emit("session_shutdown"));
+	await two.emit("session_start", { reason: "startup" });
+	// pi-2 pins the first commit and leaves it unreviewed; pi-1 starts later.
+	await two.emit("agent_start");
+	await new Promise((wake) => setTimeout(wake, 1100));
+	w.stage("b.rs", "b\n");
+	w.commit();
+	await one.emit("agent_start");
+	assert.equal(sent(), `review-baseline ${first}`);
+
+	// The reviewer asks pi-1 to commit; its turn commits, and the review moves on for everyone.
+	const batch = join(outbox, "9-1.json");
+	writeFileSync(`${batch}.tmp`, JSON.stringify({ format: "helix-review-batch", version: 2, files: [], comments: [], request: { kind: "commit-staged" }, target: "pi-1" }));
+	renameSync(`${batch}.tmp`, batch);
+	await until(() => !existsSync(batch), "the batch to be consumed");
+	await one.emit("agent_start");
+	await new Promise((wake) => setTimeout(wake, 1100));
+	w.stage("a.rs", "A\n");
+	const committed = w.commit();
+	lines.length = 0;
+	await one.emit("agent_end", { messages: [] });
+	assert.equal(sent(), `review-baseline ${committed}`);
+	lines.length = 0;
+	await two.emit("agent_end", { messages: [] });
+	assert.equal(sent(), `review-baseline ${committed}`, "pi-2's older baseline is lifted");
+
+	// An ordinary commit afterwards lifts nothing.
+	await one.emit("agent_start");
+	w.stage("c.rs", "c\n");
+	w.commit();
+	lines.length = 0;
+	await two.emit("agent_end", { messages: [] });
+	assert.equal(sent(), `review-baseline ${committed}`);
+});
+
 test("a Helix restarted on the same socket is attached again without waiting for a failed send", async (t) => {
 	const w = workspace(t);
 	const socket = join(w.root, "helix.sock");
@@ -1210,7 +1260,7 @@ test("baselines follow the branch through a rebase onto a newer base", async (t)
 			return sent();
 		};
 		const state = (id: string) => JSON.parse(readFileSync(join(stateDir, `${id}.json`), "utf8"));
-		return { c0, c1, c2, m1, head, pin, turn, attach, state };
+		return { c0, c1, c2, m1, head, pin, turn, attach, state, stateDir };
 	};
 
 	// (a) The branch tip before the rebase becomes the rewritten tip, persisted, still unacknowledged.
@@ -1236,6 +1286,11 @@ test("baselines follow the branch through a rebase onto a newer base", async (t)
 	d.pin("session-2", d.c0, undefined, true);
 	assert.equal(await d.attach("session-2"), d.head, "session-1's only unacknowledged baseline, remapped");
 	assert.equal(d.state("session-1").baseline.commit_oid, d.c2);
+
+	// (e) A commit floor the rebase rewrote is remapped, and still lifts older baselines.
+	const e = await scenario("e", ["main"]);
+	writeFileSync(join(e.stateDir, "session-1.json"), JSON.stringify({ snapshots: {}, baseline: { commit_oid: e.c0, acknowledged: false }, pid: process.pid, commit_floor: e.c2 }));
+	assert.equal(await e.attach("session-2"), e.head, "the rewritten floor lifts session-1's old baseline");
 });
 
 test("an unreachable Helix never fails the hook, and an empty handoff is dropped but acknowledged", async (t) => {

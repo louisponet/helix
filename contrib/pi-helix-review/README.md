@@ -107,7 +107,10 @@ version moves into the first session's file. Ignore `.pi/` in Git.
   handoff). After a `:review-commit` handoff, the end of the turn it starts
   (or steers) moves the baseline to the agent's new `HEAD` right away, sticky
   again, so the committed hunks drop out of the review, and echoes `pi-1: Agent turn
-  done, committed <oid>, N files still changed`. Commits the agent makes on
+  done, committed <oid>, N files still changed`. After a commit you asked for,
+  the review moves on to it for all sessions: the commit is kept as the
+  session's `commit_floor`, and any session's older baseline is lifted to it
+  (a floor a rebase rewrote follows the rewritten commit). Commits the agent makes on
   its own keep the sticky baseline. A `:review-comment` (or `:review-ask`) handoff ends with an
   instruction to do what the question asks, listing each selection with its
   lines, selected text, enclosing code and message; you read the answer in

@@ -451,6 +451,11 @@ interface HookState {
 	edited?: Record<string, number>;
 	/** Set by a commit-staged handoff until the end of the turn it starts or steers. */
 	commit_requested?: boolean;
+	/**
+	 * The commit a commit-staged handoff made: every session's baseline older than it moves up to
+	 * it, so the reviewer stops seeing hunks they asked to commit.
+	 */
+	commit_floor?: string;
 	/** Updated at session start and at the start and end of each turn (ms since the epoch). */
 	last_active?: number;
 	/** The session's name in Helix's status line, `pi-<N>`, unique among live sessions. */
@@ -540,21 +545,50 @@ class Hook {
 
 	/**
 	 * The baseline Helix reviews against: the oldest unacknowledged baseline of the live sessions,
-	 * so no session's unreviewed work drops out of the review, else this session's.
+	 * so no session's unreviewed work drops out of the review, else this session's. Baselines older
+	 * than the newest commit floor are lifted to it first.
 	 */
 	private async reviewBaseline(): Promise<string | undefined> {
 		await this.remapOwnBaseline();
-		// Other sessions' baselines are remapped here only; each session persists its own.
+		const sessions = await this.liveSessions();
+		const floor = await this.commitFloor(sessions);
+		// Other sessions' baselines are lifted and remapped here only; each session persists its own.
+		const lift = async (oid: string) => (floor && (await this.isAncestor(oid, floor)) ? floor : oid);
+		const own = this.state.baseline;
+		if (own && floor && own.commit_oid !== floor && (await this.isAncestor(own.commit_oid, floor))) {
+			own.commit_oid = floor;
+			await this.save();
+		}
 		const pending = await Promise.all(
-			(await this.liveSessions())
-				.map((s) => s.state.baseline)
+			sessions
+				.map((s) => (s.id === this.id ? own : s.state.baseline))
 				.filter((b) => b && !b.acknowledged)
-				.map((b) => this.remap(b!.commit_oid)),
+				.map(async (b) => lift(await this.remap(b!.commit_oid))),
 		);
 		const unique = [...new Set(pending)];
-		if (unique.length <= 1) return unique[0] ?? this.state.baseline?.commit_oid;
-		const newestFirst = await git(this.repo, ["log", "--no-walk=sorted", "--format=%H", ...unique]).catch(() => "");
-		return newestFirst.trim().split("\n").at(-1) || this.state.baseline?.commit_oid;
+		if (unique.length <= 1) return unique[0] ?? own?.commit_oid;
+		return (await this.newestFirst(unique)).at(-1) || own?.commit_oid;
+	}
+
+	/** The newest commit floor of `sessions` that is still in `HEAD`'s history, remapped after rebases. */
+	private async commitFloor(sessions: Session[]): Promise<string | undefined> {
+		const floors: string[] = [];
+		for (const floor of new Set(sessions.map((s) => s.state.commit_floor).filter((f): f is string => !!f))) {
+			const remapped = await this.remap(floor);
+			if (await this.isAncestor(remapped, "HEAD")) floors.push(remapped);
+		}
+		return (await this.newestFirst([...new Set(floors)]))[0];
+	}
+
+	/** `oids` from the newest commit to the oldest. */
+	private async newestFirst(oids: string[]): Promise<string[]> {
+		if (oids.length <= 1) return oids;
+		const out = await git(this.repo, ["log", "--no-walk=sorted", "--format=%H", ...oids]).catch(() => "");
+		return out.trim().split("\n").filter(Boolean);
+	}
+
+	private isAncestor(oid: string, of: string): Promise<boolean> {
+		return git(this.repo, ["merge-base", "--is-ancestor", oid, of]).then(() => true, () => false);
 	}
 
 	/** Moves this session's baseline to the commit a rebase made of it, and persists that. */
@@ -809,6 +843,7 @@ class Hook {
 		const head = (await git(this.repo, ["rev-parse", "HEAD"])).trim();
 		if (head === this.state.baseline.commit_oid) return undefined;
 		this.state.baseline = { commit_oid: head, acknowledged: false };
+		this.state.commit_floor = head;
 		await this.save();
 		await this.send([`review-baseline ${(await this.reviewBaseline()) ?? head}`]);
 		return head;
