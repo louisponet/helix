@@ -1301,9 +1301,11 @@ pub struct Editor {
     pub review_baseline: Option<String>,
     /// Directory that writes of reviewed documents export review batches to.
     pub review_handoff: Option<PathBuf>,
-    /// The baseline the reviewer stepped away from with `:review-older` or `:review-newer`; while
-    /// set, `:review-baseline` with this commit only refreshes the stepped baseline.
-    pub review_stepped_from: Option<String>,
+    /// The baseline the reviewer chose (`G b`, `G -`, `G +` or a typed `:review-baseline`) over
+    /// the one the pi hook sent; while set, the hook's `:review-baseline` only refreshes it.
+    pub review_user_pin: Option<String>,
+    /// The baseline the pi hook last sent over the command socket.
+    pub review_hook_baseline: Option<String>,
     /// What `search_next_or_review_next` and `search_prev_or_review_prev` move between: the last
     /// used of searching and walking review changes.
     pub nav_mode: NavMode,
@@ -1499,7 +1501,8 @@ impl Editor {
             review_baseline: None,
             review_handoff: None,
             review_target: None,
-            review_stepped_from: None,
+            review_user_pin: None,
+            review_hook_baseline: None,
             nav_mode: NavMode::Review,
             review_pr: None,
             review_pr_threads: Vec::new(),

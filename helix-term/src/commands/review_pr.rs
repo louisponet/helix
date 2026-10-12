@@ -134,7 +134,7 @@ pub(super) fn review_pr(
             .review_pr
             .take()
             .context("not reviewing a pull request")?;
-        cx.editor.review_stepped_from = None;
+        cx.editor.review_user_pin = None;
         cx.editor.review_pr_threads.clear();
         cx.editor.share_review_threads();
         cx.editor
@@ -201,7 +201,7 @@ pub(super) fn follow_merge_base(editor: &mut Editor) -> anyhow::Result<()> {
     if let Some(pr) = editor.review_pr.as_mut() {
         pr.merge_base = base.clone();
     }
-    editor.review_stepped_from = None;
+    editor.review_user_pin = None;
     editor.set_status(format!("Baseline moved to {} after a rebase", &base[..8]));
     Ok(())
 }
@@ -493,7 +493,7 @@ async fn fetch_threads(pr: &PullRequest, workspace: &Path) -> anyhow::Result<Vec
 fn start(editor: &mut Editor, pr: PullRequest) -> anyhow::Result<PullRequest> {
     editor.nav_mode = helix_view::editor::NavMode::Review;
     editor.review_pr = None;
-    editor.review_stepped_from = None;
+    editor.review_user_pin = None;
     pin_review_baseline(editor, &pr.merge_base)?;
     let files = changed_files_since(editor, &pr.merge_base)?.len();
     editor.set_status(format!(

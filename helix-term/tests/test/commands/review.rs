@@ -2198,8 +2198,15 @@ async fn the_baseline_steps_through_history_and_survives_the_hooks_refresh() -> 
             .unwrap_or_default()
     };
     let status = |app: &Application| app.editor.get_status().unwrap().0.to_string();
+    // The pi hook sends its baselines over the command socket.
+    async fn hook(app: &mut Application, commit: &str) -> anyhow::Result<()> {
+        app.editor.socket_command = true;
+        let result = send_keys(app, &format!(":review-baseline {commit}<ret>")).await;
+        app.editor.socket_command = false;
+        result
+    }
 
-    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+    hook(&mut app, "HEAD").await?;
     assert_eq!(review(&app), format!("{} 1 hunk", &third[..8]));
     send_keys(&mut app, ":review-older<ret>").await?;
     assert_eq!(
@@ -2222,9 +2229,8 @@ async fn the_baseline_steps_through_history_and_survives_the_hooks_refresh() -> 
     send_keys(&mut app, ":review-older<ret>").await?;
     assert_error(&app, "has no parent");
 
-    // The hook re-sending its baseline (the one stepped away from) keeps the stepped one.
-    let refresh = format!(":review-baseline {third}<ret>");
-    send_keys(&mut app, &refresh).await?;
+    // The hook re-sending its baseline keeps the one the reviewer stepped to.
+    hook(&mut app, &third).await?;
     assert_eq!(
         review(&app),
         format!("{}* 3 hunks 2 committed", &first[..8])
@@ -2244,16 +2250,19 @@ async fn the_baseline_steps_through_history_and_survives_the_hooks_refresh() -> 
     send_keys(&mut app, ":review-newer<ret>").await?;
     assert_error(&app, "already at HEAD");
 
-    // A baseline the hook moved on to is adopted.
+    // Nor does a baseline the hook moved on to replace it, until the pin is cleared.
     send_keys(&mut app, ":review-older<ret>").await?;
     let fourth = commit("A\nb\nC\nd\nE\n", "fourth");
-    send_keys(&mut app, &format!(":review-baseline {fourth}<ret>")).await?;
-    assert!(app.editor.review_stepped_from.is_none());
+    hook(&mut app, &fourth).await?;
+    assert_eq!(app.editor.review_baseline.as_deref(), Some(second.as_str()));
+    send_keys(&mut app, ":review-baseline clear<ret>").await?;
+    hook(&mut app, &fourth).await?;
+    assert!(app.editor.review_user_pin.is_none());
     assert_eq!(app.editor.review_baseline.as_deref(), Some(fourth.as_str()));
     assert_eq!(
         review(&app),
         &fourth[..8],
-        "no changes since it, and no longer stepped"
+        "no changes since it, and no longer pinned"
     );
     Ok(())
 }
@@ -3044,8 +3053,28 @@ async fn g_b_picks_the_baseline_from_the_branch_history() -> anyhow::Result<()> 
         format!("Baseline {} head (2 behind HEAD)", &first[..8])
     );
     let status = statusline(&app);
+    // The reviewer chose it, and the hook keeps away from it.
     assert!(
-        status.contains(&format!(" review {} ", &first[..8])),
+        status.contains(&format!(" review {}* ", &first[..8])),
+        "{status}"
+    );
+    app.editor.socket_command = true;
+    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+    app.editor.socket_command = false;
+    assert_eq!(baseline(&app), first);
+    let status = statusline(&app);
+    assert!(
+        status.contains(&format!(" review {}* ", &first[..8])),
+        "{status}"
+    );
+    // The row marked pi is the hook's baseline: picking it ends the pin.
+    send_keys(&mut app, "Gb").await?;
+    send_keys(&mut app, "%mark pi<ret>").await?;
+    assert_eq!(baseline(&app), third);
+    assert!(app.editor.review_user_pin.is_none());
+    let status = statusline(&app);
+    assert!(
+        status.contains(&format!(" review {} ", &third[..8])),
         "{status}"
     );
 

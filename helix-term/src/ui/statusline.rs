@@ -619,7 +619,7 @@ where
     };
     let mut text = match review.baseline().revision() {
         Some(commit) => {
-            let stepped = if context.editor.review_stepped_from.is_some() {
+            let stepped = if context.editor.review_user_pin.is_some() {
                 "*"
             } else {
                 ""

@@ -56,7 +56,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-commit-all [subject]` | Stage every file changed since the baseline (modified, deleted and untracked, like `git add -A` limited to them), then hand back like `:review-commit`. Refuses unsaved reviewed buffers, and says `no changes since <commit>` when there is nothing. `G M` in the default keymap. |
 | `:review-next` | Go to the next changed block that is unstaged or staged, skipping hunks committed since the baseline; after the last one, open the next file changed since the baseline with such a block (`:review-files` order, wrapping around) at its first one. Shows `<file>: hunk 2 of 5`, counting only those blocks, or `no uncommitted changes since <commit>` when there are none. `G n` in the default keymap, which takes a count. |
 | `:review-prev` | Like `:review-next` backwards, landing on the previous file's last block. `G N` in the default keymap. |
-| `:review-baseline-pick` | Pick the baseline from the first-parent history of `HEAD` (up to 300 commits: commit, age, author, subject), with `●` on the current baseline, `base` on the merge base with the base branch (the pull request's while reviewing one, else `origin/HEAD`, `develop`, `main` or `master`) and `HEAD` marked; the current baseline is preselected. Choosing a commit works like `:review-baseline <commit>`. `G b` in the default keymap; `G B` refreshes the buffer's review. |
+| `:review-baseline-pick` | Pick the baseline from the first-parent history of `HEAD` (up to 300 commits: commit, age, author, subject), with `●` on the current baseline, `base` on the merge base with the base branch (the pull request's while reviewing one, else `origin/HEAD`, `develop`, `main` or `master`), `pi` on the baseline the pi hook last sent and `HEAD` marked; the current baseline is preselected. Choosing a commit works like `:review-baseline <commit>` and pins it as yours (`*`), except the `pi` row, which follows the hook again. `G b` in the default keymap; `G B` refreshes the buffer's review. |
 | `:review-older` | Move the baseline to its first parent (pinning `HEAD` first when none is set) and refresh every review; the status shows `Baseline <commit> <subject> (N behind HEAD)`. `G -` in the default keymap. |
 | `:review-newer` | Move the baseline to the next commit towards `HEAD` on its ancestry path and refresh every review. `G +` in the default keymap. |
 | `:review-handoff <dir>` | Export a batch to `<dir>` on every write of a reviewed buffer. Without it, the default is `<workspace>/.pi/helix-review/outbox` when that directory exists (the pi extension creates it) and every reviewed file and pending comment is in the workspace. `clear` returns to that default. |
@@ -247,14 +247,16 @@ following agent turn is still reviewed against the commit you started from.
 The first turn after a handoff moves the baseline to the then current `HEAD`.
 
 `G b` (`:review-baseline-pick`) picks any commit of the branch history as the
-baseline, with the current baseline, the merge base with the base branch and
-`HEAD` marked. `:review-older` and `:review-newer` (`G -`, `G +`) step the baseline through
-history, for example to see what the last few commits changed. While stepped,
-the statusline's baseline gets a trailing `*`, and the pi hook re-sending the
-baseline you stepped away from only refreshes the reviews against the stepped
-one; a different commit (the hook moved on after a commit) or
-`:review-baseline` with another commit is adopted and ends the stepping, as
-does stepping back to where you started.
+baseline, with the current baseline, the merge base with the base branch, the
+baseline the pi hook last sent (`pi`) and `HEAD` marked. `:review-older` and
+`:review-newer` (`G -`, `G +`) step the baseline through history, for example
+to see what the last few commits changed. A baseline you choose this way, or
+with a typed `:review-baseline <commit>`, is pinned by you: the statusline's
+baseline gets a trailing `*`, and the pi hook's `:review-baseline`, whatever
+commit it sends, only refreshes the reviews against yours. Picking the `pi`
+row in `G b` (or stepping onto the hook's baseline) ends the pin and follows
+the hook again, as does `:review-baseline clear`, after which the hook's next
+refresh pins its baseline.
 
 These commands are built into the default keymap under `G` in normal mode
 (see [review mode](./keymap.md#review-mode)): `G f` picks a file, `G d` shows the
@@ -283,7 +285,8 @@ x = ":review-close"
 ```
 
 `:review-comment` takes the comment text, so type it at the `:` prompt. The
-`review` statusline element shows the baseline, the hunk count, how many hunks
+`review` statusline element shows the baseline (with a trailing `*` when pinned
+by you), the hunk count, how many hunks
 are already committed since the baseline and how many are staged (each omitted
 when zero, as in `9 hunks 3 committed 2 staged`), the pending comment count and
 `@<label>` when the last handoff was addressed to a session; add it with, for example,

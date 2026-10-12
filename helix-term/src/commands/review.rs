@@ -389,7 +389,8 @@ fn relative_age(time: i64) -> String {
 /// A row of the `:review-baseline-pick` picker.
 struct BaselineEntry {
     commit: helix_vcs::CommitEntry,
-    /// `●` for the current baseline, `base` for the merge base with the base branch, `HEAD`.
+    /// `●` for the current baseline, `base` for the merge base with the base branch, `pi` for the
+    /// pi hook's baseline, `HEAD`.
     marker: String,
     /// How many commits it is behind `HEAD`.
     behind: usize,
@@ -414,6 +415,7 @@ pub(super) fn review_baseline_pick(
         .diff_providers
         .first_parent_log(&workspace, 300, trust_full)?;
     let current = cx.editor.review_baseline.clone();
+    let hook = cx.editor.review_hook_baseline.clone();
     let base = super::review_pr::base_merge_base(cx.editor);
     let entries: Vec<_> = log
         .into_iter()
@@ -425,6 +427,9 @@ pub(super) fn review_baseline_pick(
             }
             if base.as_deref() == Some(commit.id.as_str()) {
                 marks.push("base");
+            }
+            if hook.as_deref() == Some(commit.id.as_str()) {
+                marks.push("pi");
             }
             if behind == 0 {
                 marks.push("HEAD");
@@ -1091,7 +1096,7 @@ pub(super) fn review_baseline(
         return Ok(());
     }
 
-    if &args[0] != "clear" {
+    let commit = if &args[0] != "clear" {
         // A stale commit (one a rebase rewrote, say) is never adopted as the baseline.
         let workspace = helix_loader::find_workspace().0;
         let trust_full = cx
@@ -1106,7 +1111,13 @@ pub(super) fn review_baseline(
             "commit {} is not in this branch's history",
             &commit[..8]
         );
-    }
+        if cx.editor.socket_command {
+            cx.editor.review_hook_baseline = Some(commit.clone());
+        }
+        commit
+    } else {
+        String::new()
+    };
     if cx.editor.review_pr.is_some() && &args[0] != "clear" {
         if cx.editor.socket_command {
             // The hook re-sending its baseline only refreshes the pull request's (or a stepped one).
@@ -1119,13 +1130,13 @@ pub(super) fn review_baseline(
         }
         // A baseline the user picks ends the pull request review.
         cx.editor.review_pr = None;
-        cx.editor.review_stepped_from = None;
+        cx.editor.review_user_pin = None;
         cx.editor.review_pr_threads.clear();
         cx.editor.share_review_threads();
     }
     if &args[0] == "clear" {
         cx.editor.review_baseline = None;
-        cx.editor.review_stepped_from = None;
+        cx.editor.review_user_pin = None;
         cx.editor.review_pr = None;
         let doc_ids: Vec<_> = cx.editor.documents().map(Document::id).collect();
         for doc_id in doc_ids {
@@ -1144,26 +1155,29 @@ pub(super) fn review_baseline(
         cx.editor.set_status("Review baseline cleared");
         return Ok(());
     }
-    if let Some(from) = cx.editor.review_stepped_from.clone() {
-        // The hook re-sending the baseline the reviewer stepped away from only refreshes the
-        // stepped one; any other commit is adopted.
-        let workspace = helix_loader::find_workspace().0;
-        let trust_full = cx
+    if cx.editor.socket_command {
+        // The hook never overrides a baseline the reviewer chose: it only refreshes it.
+        if let Some(pin) = cx
             .editor
-            .workspace_trust
-            .query(&workspace, TrustQuery::Git)
-            .is_trusted();
-        let commit = cx
-            .editor
-            .diff_providers
-            .resolve_commit(&workspace, &args[0], trust_full)?;
-        if commit == from {
-            let stepped = cx.editor.review_baseline.clone().unwrap_or(from);
-            return pin_review_baseline(cx.editor, &stepped);
+            .review_user_pin
+            .clone()
+            .filter(|pin| *pin != commit)
+        {
+            let current = cx.editor.review_baseline.clone().unwrap_or(pin);
+            return pin_review_baseline(cx.editor, &current);
         }
-        cx.editor.review_stepped_from = None;
+        cx.editor.review_user_pin = None;
+        return pin_review_baseline(cx.editor, &commit);
     }
-    pin_review_baseline(cx.editor, &args[0])
+    pin_review_baseline(cx.editor, &commit)?;
+    set_user_pin(cx.editor, &commit);
+    Ok(())
+}
+
+/// Records `commit`, just chosen by the reviewer, as pinned unless it is the hook's baseline.
+fn set_user_pin(editor: &mut Editor, commit: &str) {
+    editor.review_user_pin =
+        (editor.review_hook_baseline.as_deref() != Some(commit)).then(|| commit.to_owned());
 }
 
 pub(super) fn review_older(
@@ -1194,8 +1208,8 @@ pub(super) fn review_newer(
     step_baseline(cx, &base, false)
 }
 
-/// Moves the editor-wide baseline one commit older or newer than `base`, remembering the
-/// baseline the reviewer stepped away from until it is reached again.
+/// Moves the editor-wide baseline one commit older or newer than `base`, pinned by the reviewer
+/// unless it is the hook's baseline.
 fn step_baseline(cx: &mut compositor::Context, base: &str, older: bool) -> anyhow::Result<()> {
     let workspace = helix_loader::find_workspace().0;
     let trust_full = cx
@@ -1207,13 +1221,8 @@ fn step_baseline(cx: &mut compositor::Context, base: &str, older: bool) -> anyho
         .editor
         .diff_providers
         .step_commit(&workspace, base, older, trust_full)?;
-    let from = cx
-        .editor
-        .review_stepped_from
-        .take()
-        .unwrap_or_else(|| base.to_owned());
     pin_review_baseline(cx.editor, &commit.id)?;
-    cx.editor.review_stepped_from = Some(from).filter(|from| *from != commit.id);
+    set_user_pin(cx.editor, &commit.id);
     cx.editor.set_status(format!(
         "Baseline {} {} ({behind} behind HEAD)",
         &commit.id[..8],
