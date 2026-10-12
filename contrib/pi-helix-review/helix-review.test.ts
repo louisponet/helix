@@ -671,7 +671,7 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	const started = "echo pi-1: Agent turn started";
 	await session.emit("agent_start");
 	assert.deepEqual(lines, [`review-handoff ${outbox}`, `review-baseline ${head}`, started]);
-	assert.deepEqual(state().baseline, { commit_oid: head, acknowledged: false });
+	assert.deepEqual(state().baseline, { commit_oid: head });
 
 	writeFileSync(file, "fn a() {}\n// AGENT: old request\nfn b() {}\n");
 	for (const toolName of ["edit", "write", "bash", "read"]) await session.emit("tool_result", { toolName, input: {}, content: [], isError: false });
@@ -679,8 +679,6 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	await new Promise((wake) => setTimeout(wake, 300));
 	assert.deepEqual(lines.slice(3), [`review-baseline ${head}`]);
 
-	w.stage("a.rs", "fn a() {}\n// AGENT: old request\nfn b() {}\n");
-	const next = w.commit();
 	writeFileSync(join(repo, "new.rs"), "fn new() {}\n");
 	// pi's own state is neither snapshotted nor counted as a changed file.
 	const piState = join(repo, ".pi", "fabric", "state.json");
@@ -693,10 +691,10 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	]);
 	const snapshots = state().snapshots;
 	assert.deepEqual(Object.keys(snapshots).sort(), [file, join(repo, "new.rs")]);
-	assert.equal(snapshots[file], git(repo, "rev-parse", `${next}:a.rs`));
+	assert.equal(snapshots[file], git(repo, "hash-object", file));
 
 	await session.emit("agent_start");
-	assert.deepEqual(lines.slice(6), [`review-handoff ${outbox}`, `review-baseline ${head}`, started], "the baseline is sticky");
+	assert.deepEqual(lines.slice(6), [`review-handoff ${outbox}`, `review-baseline ${head}`, started], "no commit, so the baseline stays");
 
 	writeFileSync(file, "fn a() {}\n// AGENT: old request\nfn b() -> u8 { 1 }\n// AGENT: rename b\n");
 	const blob = git(repo, "rev-parse", `${head}:a.rs`);
@@ -750,7 +748,6 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	assert.deepEqual(handoff.review_comments.map((c: { comment: string }) => c.comment), ["document a"]);
 	assert.ok(message.content.includes(JSON.stringify(message.details, null, 2)), message.content);
 	assert.match(message.content, /never revert them/);
-	assert.equal(state().baseline.acknowledged, true);
 	await until(() => lines.length === 10, "the receipt echo");
 	assert.equal(lines[9], "echo pi-1 received your review: 1 file with edits, 1 review comment");
 
@@ -810,8 +807,10 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	assert.deepEqual(instruction.details.request, { kind: "message", text: "Please also update the changelog." });
 	assert.match(instruction.content, /User request:\nInstruction:\n```\nPlease also update the changelog\.\n```$/);
 
+	w.stage("a.rs", "fn a() {}\n// AGENT: old request\nfn b() {}\n");
+	const next = w.commit();
 	await session.emit("agent_start");
-	assert.deepEqual(lines.slice(14), [`review-handoff ${outbox}`, `review-baseline ${next}`, started], "an acknowledged baseline moves to HEAD");
+	assert.deepEqual(lines.slice(14), [`review-handoff ${outbox}`, `review-baseline ${next}`, started], "a commit moves the baseline to HEAD");
 
 	const restarted = piSession(repo);
 	t.after(() => restarted.emit("session_shutdown"));
@@ -822,7 +821,8 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 		"session_start restores the baseline and says the link is live",
 	);
 
-	// A turn that leaves nothing changed since its (still sticky) baseline says so.
+	// The commit made after the commit request (1-4) fulfils it: that turn's end forces it and
+	// says so, with nothing left changed.
 	writeFileSync(file, "fn a() {}\n// AGENT: old request\nfn b() {}\n");
 	unlinkSync(join(repo, "new.rs"));
 	await restarted.emit("agent_start");
@@ -831,12 +831,23 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 		`review-handoff ${outbox}`,
 		`review-baseline ${next}`,
 		started,
+		`review-baseline ${next} force`,
+		`review-baseline ${next}`,
+		`echo pi-1: Agent turn done, committed ${next.slice(0, 8)}, 0 files still changed`,
+	]);
+	// Without a request, a turn that leaves nothing changed since its baseline says so.
+	await restarted.emit("agent_start");
+	await restarted.emit("agent_end", { messages: [] });
+	assert.deepEqual(lines.slice(26), [
+		`review-handoff ${outbox}`,
+		`review-baseline ${next}`,
+		started,
 		`review-baseline ${next}`,
 		`echo pi-1: Agent turn done, no file changes since ${next.slice(0, 8)}`,
 	]);
 });
 
-test("a commit-staged handoff moves the baseline to the agent's commit, an ordinary commit does not", async (t) => {
+test("any commit moves the baseline to HEAD; a requested one forces it over a pin in Helix", async (t) => {
 	const w = workspace(t);
 	const socket = join(w.root, "helix.sock");
 	withEnv(t, { HELIX_COMMAND_SOCKET: socket });
@@ -873,21 +884,30 @@ test("a commit-staged handoff moves the baseline to the agent's commit, an ordin
 		`review-baseline ${committed}`,
 		`echo pi-1: Agent turn done, committed ${committed.slice(0, 8)}, 1 file still changed`,
 	]);
-	assert.deepEqual(state().baseline, { commit_oid: committed, acknowledged: false });
+	assert.deepEqual(state().baseline, { commit_oid: committed });
 	assert.deepEqual(Object.keys(state().snapshots), [join(repo, "b.rs")]);
 
-	// An ordinary turn that commits keeps the sticky baseline.
+	// An ordinary turn that commits moves it too, without forcing.
 	await session.emit("agent_start");
 	w.stage("b.rs", "B\n");
 	const ordinary = w.commit();
 	lines.length = 0;
 	await session.emit("agent_end", { messages: [] });
-	assert.deepEqual(state().baseline, { commit_oid: committed, acknowledged: false });
-	assert.notEqual(ordinary, committed);
+	assert.deepEqual(state().baseline, { commit_oid: ordinary });
 	assert.deepEqual(lines, [
-		`review-baseline ${committed}`,
-		`echo pi-1: Agent turn done, 1 file changed since ${committed.slice(0, 8)} (:review-files)`,
+		`review-baseline ${ordinary}`,
+		`echo pi-1: Agent turn done, no file changes since ${ordinary.slice(0, 8)}`,
 	]);
+
+	// A commit made outside pi, between turns, reaches Helix on the next poller tick.
+	writeFileSync(join(repo, "c.rs"), "c\n");
+	git(repo, "add", "c.rs");
+	git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "outside");
+	const outside = git(repo, "rev-parse", "HEAD");
+	lines.length = 0;
+	await until(() => lines.includes(`review-baseline ${outside}`), "the poller to follow HEAD");
+	assert.deepEqual(lines, [`review-baseline ${outside}`]);
+	assert.deepEqual(state().baseline, { commit_oid: outside });
 });
 
 test("an ask handoff instructs the agent with every selection and nothing is sent back but the usual echoes", async (t) => {
@@ -1005,7 +1025,7 @@ test("a batch about files outside the repository is dropped without a turn or a 
 	assert.deepEqual(lines, [], "no receipt is echoed");
 	assert.equal(warn.mock.callCount(), 1);
 	const state = JSON.parse(readFileSync(join(repo, ".pi", "helix-review", "state", "session-1.json"), "utf8"));
-	assert.deepEqual(state.baseline, { commit_oid: head, acknowledged: false });
+	assert.deepEqual(state.baseline, { commit_oid: head });
 });
 
 test("several sessions in one repository each take only the batches meant for them", async (t) => {
@@ -1027,7 +1047,7 @@ test("several sessions in one repository each take only the batches meant for th
 	await one.emit("session_start", { reason: "startup" });
 	const state = (id: string) => JSON.parse(readFileSync(join(dir, "state", `${id}.json`), "utf8"));
 	assert.ok(!existsSync(join(dir, "state.json")));
-	assert.deepEqual(state("session-1").baseline, { commit_oid: head, acknowledged: false });
+	assert.equal(state("session-1").baseline.commit_oid, head);
 	assert.equal(state("session-1").pid, process.pid);
 
 	const two = piSession(repo, "session-2");
@@ -1088,7 +1108,7 @@ test("several sessions in one repository each take only the batches meant for th
 	assert.deepEqual(readdirSync(outbox), ["1-5.session-9.claimed"]);
 });
 
-test("sessions are named pi-N in Helix, and Helix reviews against the oldest unreviewed baseline", async (t) => {
+test("sessions are named pi-N in Helix, and every session's review follows HEAD", async (t) => {
 	const w = workspace(t);
 	const socket = join(w.root, "helix.sock");
 	withEnv(t, { HELIX_COMMAND_SOCKET: socket });
@@ -1112,8 +1132,7 @@ test("sessions are named pi-N in Helix, and Helix reviews against the oldest unr
 		"echo pi hook attached as pi-2",
 	]);
 
-	// pi-1's turn pins the first commit; a later commit becomes pi-2's baseline, but Helix keeps
-	// reviewing against pi-1's older one until pi-1's work is handed back.
+	// pi-1's turn starts on the first commit; after a later commit, pi-2's turn reviews against it.
 	await one.emit("agent_start");
 	await new Promise((wake) => setTimeout(wake, 1100));
 	w.stage("a.rs", "b\n");
@@ -1124,7 +1143,7 @@ test("sessions are named pi-N in Helix, and Helix reviews against the oldest unr
 		`review-baseline ${first}`,
 		"echo pi-1: Agent turn started",
 		`review-handoff ${outbox}`,
-		`review-baseline ${first}`,
+		`review-baseline ${second}`,
 		"echo pi-2: Agent turn started",
 	]);
 
@@ -1137,10 +1156,10 @@ test("sessions are named pi-N in Helix, and Helix reviews against the oldest unr
 	assert.equal(one.messages.length, 1);
 	assert.deepEqual(lines.splice(0), ["echo pi-1 received your review: 1 file with edits"]);
 	await two.emit("agent_end", { messages: [] });
-	assert.equal(lines[0], `review-baseline ${second}`, "pi-1's baseline was handed back");
+	assert.equal(lines[0], `review-baseline ${second}`);
 });
 
-test("a commit the reviewer asked for lifts every session's older baseline to it", async (t) => {
+test("a commit the reviewer asked for moves every session's review to it, past stale baselines", async (t) => {
 	const w = workspace(t);
 	const socket = join(w.root, "helix.sock");
 	withEnv(t, { HELIX_COMMAND_SOCKET: socket, HELIX_GH: "false" });
@@ -1159,13 +1178,13 @@ test("a commit the reviewer asked for lifts every session's older baseline to it
 	const two = piSession(repo, "session-2");
 	t.after(() => two.emit("session_shutdown"));
 	await two.emit("session_start", { reason: "startup" });
-	// pi-2 pins the first commit and leaves it unreviewed; pi-1 starts later.
+	// pi-2's turn starts on the first commit; pi-1 starts after a second one.
 	await two.emit("agent_start");
 	await new Promise((wake) => setTimeout(wake, 1100));
 	w.stage("b.rs", "b\n");
-	w.commit();
+	const second = w.commit();
 	await one.emit("agent_start");
-	assert.equal(sent(), `review-baseline ${first}`);
+	assert.equal(sent(), `review-baseline ${second}`);
 	// A third live session holds a stale baseline on a side branch, older than anything to come.
 	const side = execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit-tree", `${first}^{tree}`, "-p", first, "-m", "side"], { cwd: repo, env: gitEnv, encoding: "utf8" }).trim();
 	writeFileSync(join(repo, ".pi", "helix-review", "state", "session-3.json"), JSON.stringify({ snapshots: {}, baseline: { commit_oid: side, acknowledged: false }, pid: process.pid }));
@@ -1187,14 +1206,14 @@ test("a commit the reviewer asked for lifts every session's older baseline to it
 	await two.emit("agent_end", { messages: [] });
 	assert.equal(sent(), `review-baseline ${committed}`, "pi-2's older and pi-3's side baselines are lifted");
 
-	// An ordinary commit afterwards lifts nothing.
+	// An ordinary commit afterwards moves the review too, without forcing.
 	await one.emit("agent_start");
 	w.stage("c.rs", "c\n");
-	w.commit();
+	const ordinary = w.commit();
 	lines.length = 0;
 	await one.emit("agent_end", { messages: [] });
 	await two.emit("agent_end", { messages: [] });
-	assert.equal(sent(), `review-baseline ${committed}`);
+	assert.equal(sent(), `review-baseline ${ordinary}`);
 	assert.ok(lines.every((line) => !line.endsWith(" force")), "an ordinary turn never forces");
 });
 
@@ -1334,37 +1353,34 @@ test("baselines follow the branch through a rebase onto a newer base", async (t)
 		return { c0, c1, c2, m1, head, pin, turn, attach, state, stateDir };
 	};
 
-	// (a) The branch tip before the rebase becomes the rewritten tip, persisted, still unacknowledged.
-	const a = await scenario("a", ["main"]);
-	a.pin("session-1", a.c2);
-	assert.equal(await a.turn("session-1"), a.head);
-	assert.deepEqual(a.state("session-1").baseline, { commit_oid: a.head, acknowledged: false });
-	assert.ok(log.mock.calls.some((call) => call.arguments[0] === `helix-review: baseline ${a.c2.slice(0, 8)} rewritten as ${a.head.slice(0, 8)} by a rebase`));
+	// (a)-(c) Whatever the rebase did to a session's baseline (rewrote the tip, moved the base,
+	// dropped the commit), its next turn reviews against the rebased HEAD, persisted.
+	for (const [label, rebase, stale] of [
+		["a", ["main"], "c2"],
+		["b", ["main"], "c0"],
+		["c", ["--onto", "main", "HEAD~1"], "c1"],
+	] as const) {
+		const s = await scenario(label, [...rebase]);
+		s.pin("session-1", s[stale]);
+		assert.equal(await s.turn("session-1"), s.head, label);
+		assert.deepEqual(s.state("session-1").baseline, { commit_oid: s.head }, label);
+	}
 
-	// (b) The branch's old base becomes the new merge base.
-	const b = await scenario("b", ["main"]);
-	b.pin("session-1", b.c0);
-	assert.equal(await b.turn("session-1"), b.m1);
-
-	// (c) A commit the rebase dropped falls back to the merge base.
-	const c = await scenario("c", ["--onto", "main", "HEAD~1"]);
-	c.pin("session-1", c.c1);
-	assert.equal(await c.turn("session-1"), c.m1);
-
-	// (d) Another live session's stale baseline is remapped for Helix, but its file is left alone.
+	// (d) Attaching follows HEAD too, and leaves another session's file alone.
 	const d = await scenario("d", ["main"]);
 	d.pin("session-1", d.c2, process.pid);
 	d.pin("session-2", d.c0, undefined, true);
-	assert.equal(await d.attach("session-2"), d.head, "session-1's only unacknowledged baseline, remapped");
+	assert.equal(await d.attach("session-2"), d.head);
 	assert.equal(d.state("session-1").baseline.commit_oid, d.c2);
 
-	// (e) A commit floor the rebase rewrote is remapped, and still lifts older baselines.
+	// (e) A commit floor the rebase rewrote is remapped onto the rewritten commit.
 	const e = await scenario("e", ["main"]);
-	writeFileSync(join(e.stateDir, "session-1.json"), JSON.stringify({ snapshots: {}, baseline: { commit_oid: e.c0, acknowledged: false }, pid: process.pid, commit_floor: e.c2 }));
-	assert.equal(await e.attach("session-2"), e.head, "the rewritten floor lifts session-1's old baseline");
+	writeFileSync(join(e.stateDir, "session-1.json"), JSON.stringify({ snapshots: {}, baseline: { commit_oid: e.c0 }, pid: process.pid, commit_floor: e.c2 }));
+	assert.equal(await e.attach("session-2"), e.head, "the rewritten floor");
+	assert.ok(log.mock.calls.some((call) => call.arguments[0] === `helix-review: baseline ${e.c2.slice(0, 8)} rewritten as ${e.head.slice(0, 8)} by a rebase`));
 });
 
-test("an unreachable Helix never fails the hook, and an empty handoff is dropped but acknowledged", async (t) => {
+test("an unreachable Helix never fails the hook, and an empty handoff is dropped", async (t) => {
 	const w = workspace(t);
 	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });
 	const repo = realpathSync(w.repo);
@@ -1394,5 +1410,5 @@ test("an unreachable Helix never fails the hook, and an empty handoff is dropped
 	await until(() => !existsSync(batch), "the batch to be consumed");
 	assert.equal(session.messages.length, 0);
 	const state = JSON.parse(readFileSync(join(repo, ".pi", "helix-review", "state", "session-1.json"), "utf8"));
-	assert.deepEqual(state.baseline, { commit_oid: head, acknowledged: true });
+	assert.deepEqual(state.baseline, { commit_oid: head });
 });

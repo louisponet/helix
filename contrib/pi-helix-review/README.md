@@ -102,19 +102,17 @@ per-file turn snapshots, when each file was last changed in one of its turns,
 its pid while it runs, `last_active` and `cwd`); a `state.json` of an earlier
 version moves into the first session's file. Ignore `.pi/` in Git.
 
-- At the start of an agent turn the baseline becomes `HEAD`, unless the
-  previous baseline has not been handed back yet (it is sticky until a
-  handoff). After a `:review-commit` handoff, the end of the turn it starts
-  (or steers) moves the baseline to the agent's new `HEAD` right away, sticky
-  again, so the committed hunks drop out of the review, and echoes `pi-1: Agent turn
-  done, committed <oid>, N files still changed`. After a commit you asked for,
-  the review moves on to it for all sessions: pi sends `review-baseline
-  <commit> force`, which also releases a baseline you pinned in Helix, the
-  commit is kept as the session's `commit_floor`, and any session's baseline
-  not descended from it (older, or stale on a dead branch) is lifted to it (a
-  floor a rebase rewrote follows the rewritten commit). If the agent did not
-  commit, nothing moves. Commits the agent makes on
-  its own keep the sticky baseline. A `:review-comment` (or `:review-ask`) handoff ends with an
+- The review always compares against `HEAD`: commits of any kind (the
+  agent's, yours in a shell or lazygit, a rebase) move it, except a baseline
+  you pinned in Helix. pi checks `HEAD` at the start of each turn, on every
+  refresh and on each 2 s socket check, so a commit made outside pi reaches
+  Helix within 2 s as `review-baseline <HEAD>`; the committed hunks drop out
+  of the review. Each move is kept as the session's `commit_floor`. After a
+  `:review-commit` handoff, the end of the turn it starts (or steers) sends
+  `review-baseline <commit> force` once the agent committed, which also
+  releases a baseline you pinned in Helix, and echoes `pi-1: Agent turn done,
+  committed <oid>, N files still changed`; if the agent did not commit,
+  nothing moves. A `:review-comment` (or `:review-ask`) handoff ends with an
   instruction to do what the question asks, listing each selection with its
   lines, selected text, enclosing code and message; you read the answer in
   pi, and the turn ends with the ordinary echo. pi sends `review-handoff <outbox>` and `review-baseline <commit>`,
@@ -153,9 +151,8 @@ version moves into the first session's file. Ignore `.pi/` in Git.
   (commit exactly what is staged, touching nothing else, and report the hash)
   or `:review-send <text>` (a free-text instruction); the message then ends
   with a "User request" section, and such a batch is sent even without edits
-  or comments. The baseline is then acknowledged and the batch deleted. A batch
-  with no edits, comments or request is dropped without a message but
-  still acknowledged. Either way pi echoes a receipt to Helix's status line, such as
+  or comments. The batch is then deleted. A batch with no edits, comments or
+  request is dropped without a message. Either way pi echoes a receipt to Helix's status line, such as
   `pi-1 received your review: 2 files with edits, 1 review comment` or `pi-1 received your review: nothing to do`. Invalid batches stay
   in the outbox untouched.
 - While the mailbox exists, the system prompt explains the handoff: you hand
@@ -184,21 +181,18 @@ the pid in its state file runs. Each session is labelled `pi-N`, the smallest
 number no other live session in the repository uses, kept in its state file
 and shown in its echoes (`pi-2: Agent turn started`, `pi-2 received your
 review: ...`, `pi hook attached as pi-2`). The baseline sent to Helix is the
-oldest unacknowledged baseline of the live sessions (by commit date), else the
-session's own, so no session's unreviewed work drops out of the review; a
-`:review-commit` handoff moves only the baseline of the session that took it.
+newest commit floor of the live sessions (the latest `HEAD` any of them saw),
+else the session's own baseline.
 
-Every baseline is checked against the current history before it is used
-(turn start, refreshes, attaching, the oldest-unacknowledged choice and the
-move after a commit request): after the branch was rebased onto a newer base,
-a baseline that was the branch's old base moves to the new merge base, and one
+The commit floors of the live sessions are checked against the current
+history before they are used: after the branch was rebased onto a newer base,
+a floor that was the branch's old base moves to the new merge base, and one
 the rebase rewrote moves to the branch commit with the same `git patch-id`
 (or to the merge base when the rebase dropped or squashed it). The base branch
 is the pull request's base (`gh pr view`, once per session), else
 `origin/HEAD`, else the first of `origin/develop`, `origin/main`,
-`origin/master`, `develop`, `main`, `master`. A session saves only its own
-remapped baseline and logs `helix-review: baseline <old> rewritten as <new> by
-a rebase`.
+`origin/master`, `develop`, `main`, `master`. It logs `helix-review: baseline
+<old> rewritten as <new> by a rebase`.
 
 Each batch goes to one live session: the one
 its `target` names (a session id or label such as `pi-2`), else the one that last changed one of its

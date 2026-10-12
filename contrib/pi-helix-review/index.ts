@@ -445,12 +445,16 @@ function quote(label: string, body: string): string[] {
 
 /** One pi session's hook state, in `state/<sessionId>.json`. */
 interface HookState {
-	baseline?: { commit_oid: string; acknowledged: boolean };
+	/** `HEAD` as last seen: the review compares against it. (`acknowledged` is from earlier versions.) */
+	baseline?: { commit_oid: string; acknowledged?: boolean };
 	snapshots: Record<string, string>;
 	/** When each file was last changed during one of this session's turns (ms since the epoch). */
 	edited?: Record<string, number>;
-	/** Set by a commit-staged handoff until the end of the turn it starts or steers. */
-	commit_requested?: boolean;
+	/**
+	 * Set by a commit-staged handoff, to `HEAD` at the time, until the end of the turn it starts
+	 * or steers.
+	 */
+	commit_requested?: string | boolean;
 	/**
 	 * The commit a commit-staged handoff made: every session's baseline older than it moves up to
 	 * it, so the reviewer stops seeing hunks they asked to commit.
@@ -474,7 +478,7 @@ interface Session {
 const STALE_CLAIM_MS = 10 * 60 * 1000;
 
 const GUIDELINES = `## Helix review handoff
-The user reviews your changes in Helix (in this repository or any of its worktrees you edit) and hands back explicit requests as a "helix-review:handoff" message with a JSON block, possibly in the middle of a turn as a steering message: per file, review_comments are the user's comments on selections, user_edits are the user's own edits since your turn snapshot as unified-diff hunks (integrate them, never revert them; when they undo part of your change, keep it undone and adjust tests and docs to match), and a request may carry a message or ask for a commit. After handling a handoff, say per file what you integrated or declined. While this hook is attached, never run git commit or git push on your own, even if other instructions say to commit at the end of a turn: the user stages hunks in Helix and asks for a commit with a commit-staged handoff, the only time you commit (exactly the index, adding nothing).`;
+The user reviews your changes in Helix (in this repository or any of its worktrees you edit) and hands back explicit requests as a "helix-review:handoff" message with a JSON block, possibly in the middle of a turn as a steering message: per file, review_comments are the user's comments on selections, user_edits are the user's own edits since your turn snapshot as unified-diff hunks (integrate them, never revert them; when they undo part of your change, keep it undone and adjust tests and docs to match), and a request may carry a message or ask for a commit. The review always compares against HEAD: commits of any kind move it, except a baseline the user pinned in Helix. After handling a handoff, say per file what you integrated or declined. While this hook is attached, never run git commit or git push on your own, even if other instructions say to commit at the end of a turn: the user stages hunks in Helix and asks for a commit with a commit-staged handoff, the only time you commit (exactly the index, adding nothing).`;
 
 class Hook {
 	private pi: ExtensionAPI;
@@ -544,31 +548,25 @@ class Hook {
 	}
 
 	/**
-	 * The baseline Helix reviews against: the oldest unacknowledged baseline of the live sessions,
-	 * so no session's unreviewed work drops out of the review, else this session's. Baselines older
-	 * than the newest commit floor, or not descended from it, are lifted to it first.
+	 * The baseline Helix reviews against: the newest commit floor of the live sessions (each
+	 * session's `HEAD` as it last saw it), else this session's baseline.
 	 */
 	private async reviewBaseline(): Promise<string | undefined> {
-		await this.remapOwnBaseline();
-		const sessions = await this.liveSessions();
-		const floor = await this.commitFloor(sessions);
-		// Other sessions' baselines are lifted and remapped here only; each session persists its own.
-		// A floor lifts every baseline not built on it: older ones, and stale ones on a dead branch.
-		const lift = async (oid: string) => (floor && !(await this.isAncestor(floor, oid)) ? floor : oid);
-		const own = this.state.baseline;
-		if (own && floor && !(await this.isAncestor(floor, own.commit_oid))) {
-			own.commit_oid = floor;
-			await this.save();
-		}
-		const pending = await Promise.all(
-			sessions
-				.map((s) => (s.id === this.id ? own : s.state.baseline))
-				.filter((b) => b && !b.acknowledged)
-				.map(async (b) => lift(await this.remap(b!.commit_oid))),
-		);
-		const unique = [...new Set(pending)];
-		if (unique.length <= 1) return unique[0] ?? own?.commit_oid;
-		return (await this.newestFirst(unique)).at(-1) || own?.commit_oid;
+		return (await this.commitFloor(await this.liveSessions())) ?? this.state.baseline?.commit_oid;
+	}
+
+	/**
+	 * Moves this session's baseline (and floor) to `HEAD` when a commit of any kind moved it, or
+	 * sets it when there is none yet and `start`. Returns whether it changed.
+	 */
+	private async followHead(start = false): Promise<boolean> {
+		if (!this.state.baseline && !start) return false;
+		const head = await git(this.repo, ["rev-parse", "HEAD"]).then((out) => out.trim(), () => "");
+		if (!head || head === this.state.baseline?.commit_oid) return false;
+		this.state.baseline = { commit_oid: head };
+		this.state.commit_floor = head;
+		await this.save();
+		return true;
 	}
 
 	/** The newest commit floor of `sessions` that is still in `HEAD`'s history, remapped after rebases. */
@@ -590,16 +588,6 @@ class Hook {
 
 	private isAncestor(oid: string, of: string): Promise<boolean> {
 		return git(this.repo, ["merge-base", "--is-ancestor", oid, of]).then(() => true, () => false);
-	}
-
-	/** Moves this session's baseline to the commit a rebase made of it, and persists that. */
-	private async remapOwnBaseline(): Promise<void> {
-		const baseline = this.state.baseline;
-		if (!baseline) return;
-		const remapped = await this.remap(baseline.commit_oid);
-		if (remapped === baseline.commit_oid) return;
-		baseline.commit_oid = remapped;
-		await this.save();
 	}
 
 	/**
@@ -764,11 +752,7 @@ class Hook {
 
 	/** Starts a turn; `midTurn` for a hook opened during it, whose changes all count as the turn's. */
 	async begin(midTurn = false): Promise<void> {
-		await this.remapOwnBaseline();
-		if (!this.state.baseline || this.state.baseline.acknowledged) {
-			const head = (await git(this.repo, ["rev-parse", "HEAD"])).trim();
-			this.state.baseline = { commit_oid: head, acknowledged: false };
-		}
+		await this.followHead(true);
 		this.turnStart = midTurn ? {} : await this.changedFiles();
 		await this.touch();
 		await this.attach();
@@ -778,6 +762,7 @@ class Hook {
 	async attach(): Promise<boolean> {
 		const inode = socketId(await stat(this.socket).catch(() => undefined));
 		const commands = [`review-handoff ${this.outbox}`];
+		await this.followHead();
 		const baseline = await this.reviewBaseline();
 		if (baseline) commands.push(`review-baseline ${baseline}`);
 		const reachable = await this.send(commands);
@@ -792,7 +777,10 @@ class Hook {
 		return reachable;
 	}
 
-	/** Attaches again when the socket is a new file: Helix restarted, or started after pi. */
+	/**
+	 * Attaches again when the socket is a new file (Helix restarted, or started after pi), and
+	 * moves the review on when a commit made anywhere moved `HEAD`.
+	 */
 	private async poll(): Promise<void> {
 		if (this.attaching || this.stopped) return;
 		const info = await stat(this.socket).catch(() => undefined);
@@ -800,7 +788,10 @@ class Hook {
 			this.inode = undefined;
 			return;
 		}
-		if (socketId(info) === this.inode) return;
+		if (socketId(info) === this.inode) {
+			if (await this.followHead()) await this.send([`review-baseline ${await this.reviewBaseline()}`]);
+			return;
+		}
 		this.attaching = true;
 		try {
 			if (await this.attach()) await this.announceAttach();
@@ -816,6 +807,7 @@ class Hook {
 
 	async refresh(): Promise<void> {
 		clearTimeout(this.timer);
+		await this.followHead();
 		const baseline = await this.reviewBaseline();
 		if (baseline) await this.send([`review-baseline ${baseline}`]);
 	}
@@ -834,19 +826,17 @@ class Hook {
 
 	/**
 	 * At the end of a turn that was asked to commit the staged hunks, moves the baseline to the new
-	 * `HEAD` (sticky again) so Helix stops showing the committed hunks. Returns the new commit.
+	 * `HEAD` and makes Helix adopt it even over a pinned baseline. Returns the new commit.
 	 */
 	async followRequestedCommit(): Promise<string | undefined> {
-		if (!this.state.commit_requested) return undefined;
+		const requested = this.state.commit_requested;
+		if (!requested) return undefined;
 		this.state.commit_requested = false;
 		await this.save();
-		await this.remapOwnBaseline();
-		if (!this.state.baseline) return undefined;
-		const head = (await git(this.repo, ["rev-parse", "HEAD"])).trim();
-		if (head === this.state.baseline.commit_oid) return undefined;
-		this.state.baseline = { commit_oid: head, acknowledged: false };
-		this.state.commit_floor = head;
-		await this.save();
+		const before = typeof requested === "string" ? requested : this.state.baseline?.commit_oid;
+		const head = await git(this.repo, ["rev-parse", "HEAD"]).then((out) => out.trim(), () => "");
+		if (!head || head === before) return undefined;
+		await this.followHead(true);
 		// Asking for a commit ends any baseline the reviewer pinned in Helix.
 		await this.send([`review-baseline ${head} force`]);
 		return head;
@@ -999,8 +989,9 @@ class Hook {
 				{ triggerTurn: true, deliverAs: "steer" },
 			);
 		}
-		if (this.state.baseline) this.state.baseline.acknowledged = true;
-		if (request?.kind === "commit-staged") this.state.commit_requested = true;
+		if (request?.kind === "commit-staged") {
+			this.state.commit_requested = await git(this.repo, ["rev-parse", "HEAD"]).then((out) => out.trim(), () => true);
+		}
 		await this.save();
 		await unlink(path);
 		await this.echo(`${this.label} received your review: ${receipt(files, request)}`);
