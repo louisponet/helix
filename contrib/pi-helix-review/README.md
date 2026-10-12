@@ -166,6 +166,15 @@ version moves into the first session's file. Ignore `.pi/` in Git.
   when other instructions say to, but only commit exactly the index when a
   `:review-commit` (commit-staged) handoff asks for it, so your partial
   staging in Helix is not swallowed.
+- Worktrees: a session started in the main checkout that edits files in a
+  `git worktree` of it (or changes one with `bash`, noticed at the end of the
+  turn from `git worktree list` and `git status`) gets a second hook for that
+  worktree: its own mailbox under `<worktree>/.pi/helix-review`, state file,
+  label and Helix socket, with the worktree's `HEAD` as its first baseline. The
+  Helix running in the worktree is attached and refreshed like the main one,
+  reviews saved there reach the session, and turn and receipt echoes go to the
+  Helix of the worktree they concern (a worktree's end-of-turn echo only when
+  it has changes). These hooks last for the session.
 
 ### Multiple sessions
 

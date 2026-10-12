@@ -474,7 +474,7 @@ interface Session {
 const STALE_CLAIM_MS = 10 * 60 * 1000;
 
 const GUIDELINES = `## Helix review handoff
-The user reviews your changes in Helix against the commit at the start of your turn and hands them back by saving. A handoff arrives as a "helix-review:handoff" message with a JSON block, possibly in the middle of a turn as a steering message: per file, user_edits are the user's edits as unified-diff hunks (integrate them, never revert them; when they undo part of your change, keep it undone and adjust tests and docs to match), agent_comments are lines containing "AGENT: <request>" (new: true when added in this review; new: false ones may be documentation or examples rather than requests), and review_comments are inline review comments. Address each AGENT: request and delete its marker line once handled. After handling a handoff, say per file what you integrated or declined. While this hook is attached, never run git commit or git push on your own, even if other instructions say to commit at the end of a turn: the user stages hunks in Helix and asks for a commit with a commit-staged handoff, the only time you commit (exactly the index, adding nothing).`;
+The user reviews your changes in Helix against the commit at the start of your turn and hands them back by saving. A handoff arrives, from the Helix of this repository or of any of its worktrees you edit, as a "helix-review:handoff" message with a JSON block, possibly in the middle of a turn as a steering message: per file, user_edits are the user's edits as unified-diff hunks (integrate them, never revert them; when they undo part of your change, keep it undone and adjust tests and docs to match), agent_comments are lines containing "AGENT: <request>" (new: true when added in this review; new: false ones may be documentation or examples rather than requests), and review_comments are inline review comments. Address each AGENT: request and delete its marker line once handled. After handling a handoff, say per file what you integrated or declined. While this hook is attached, never run git commit or git push on your own, even if other instructions say to commit at the end of a turn: the user stages hunks in Helix and asks for a commit with a commit-staged handoff, the only time you commit (exactly the index, adding nothing).`;
 
 class Hook {
 	private pi: ExtensionAPI;
@@ -761,13 +761,14 @@ class Hook {
 		clearInterval(this.poller);
 	}
 
-	async begin(): Promise<void> {
+	/** Starts a turn; `midTurn` for a hook opened during it, whose changes all count as the turn's. */
+	async begin(midTurn = false): Promise<void> {
 		await this.remapOwnBaseline();
 		if (!this.state.baseline || this.state.baseline.acknowledged) {
 			const head = (await git(this.repo, ["rev-parse", "HEAD"])).trim();
 			this.state.baseline = { commit_oid: head, acknowledged: false };
 		}
-		this.turnStart = await this.changedFiles();
+		this.turnStart = midTurn ? {} : await this.changedFiles();
 		await this.touch();
 		await this.attach();
 	}
@@ -849,10 +850,14 @@ class Hook {
 		return head;
 	}
 
-	/** Tells the reviewer in Helix that the turn ended and how many files differ from the baseline. */
-	async announceEnd(committed?: string): Promise<void> {
+	/**
+	 * Tells the reviewer in Helix that the turn ended and how many files differ from the baseline;
+	 * with `quiet`, only when some do.
+	 */
+	async announceEnd(committed?: string, quiet = false): Promise<void> {
 		if (!this.state.baseline) return;
 		const count = Object.keys(this.state.snapshots).length;
+		if (quiet && count === 0 && !committed) return;
 		if (committed) {
 			const files = count === 1 ? "1 file" : `${count} files`;
 			return this.echo(`${this.label}: Agent turn done, committed ${committed.slice(0, 8)}, ${files} still changed`);
@@ -1113,31 +1118,84 @@ function busyReason(ctx: ExtensionCommandContext): string | undefined {
 
 export default function helixReview(pi: ExtensionAPI): void {
 	let importing = false;
+	// The cwd's hook, and one per other repository (a worktree, say) the session edits in.
 	let hook: Hook | undefined;
+	let others = new Map<string, Hook>();
+	let sessionId = "";
+	let generation = 0;
+	const all = () => [...(hook ? [hook] : []), ...others.values()];
+
+	/** The hook of the repository at `dir`, opened and joined into the running turn if new. */
+	const hookFor = async (dir: string): Promise<Hook | undefined> => {
+		const top = await git(dir, ["rev-parse", "--show-toplevel"]).then((out) => realpath(out.trim()), () => undefined);
+		if (!top || top === hook?.repo) return hook;
+		let other = others.get(top);
+		if (other) return other;
+		const opened = generation;
+		other = await Hook.open(pi, top, sessionId);
+		if (!other || opened !== generation || others.has(top)) {
+			other?.stop();
+			return others.get(top);
+		}
+		others.set(top, other);
+		await other.start();
+		await other.begin(true);
+		await other.echo(`${other.label}: Agent turn started`);
+		return other;
+	};
 
 	pi.on("session_start", async (_event, ctx) => {
-		hook?.stop();
-		hook = await Hook.open(pi, ctx.cwd, ctx.sessionManager.getSessionId());
+		generation++;
+		for (const h of all()) h.stop();
+		others = new Map();
+		sessionId = ctx.sessionManager.getSessionId();
+		hook = await Hook.open(pi, ctx.cwd, sessionId);
 		await hook?.start();
 		if (await hook?.attach()) await hook?.announceAttach();
 	});
-	pi.on("session_shutdown", () => hook?.stop());
+	pi.on("session_shutdown", () => {
+		for (const h of all()) h.stop();
+	});
 	pi.on("before_agent_start", (event) => {
-		const guidelines = hook?.guidelines();
+		const guidelines = all()
+			.map((h) => h.guidelines())
+			.find(Boolean);
 		if (guidelines) event.systemPromptOptions.promptGuidelines.push(guidelines);
 	});
 	pi.on("agent_start", async () => {
-		await hook?.begin();
-		if (hook) await hook.echo(`${hook.label}: Agent turn started`);
+		for (const h of all()) {
+			await h.begin();
+			await h.echo(`${h.label}: Agent turn started`);
+		}
 	});
-	pi.on("tool_result", (event) => {
-		if (event.toolName === "edit" || event.toolName === "write" || event.toolName === "bash") hook?.refreshSoon();
+	pi.on("tool_result", async (event, ctx) => {
+		if (event.toolName !== "edit" && event.toolName !== "write" && event.toolName !== "bash") return;
+		hook?.refreshSoon();
+		const path = event.input.path ?? event.input.file_path;
+		if (event.toolName !== "bash" && typeof path === "string" && hook) {
+			const file = resolve(ctx.cwd, path.replace(/^~(?=$|\/)/, homedir()));
+			(await hookFor(dirname(file)))?.refreshSoon();
+		} else {
+			for (const other of others.values()) other.refreshSoon();
+		}
 	});
 	pi.on("agent_end", async () => {
-		const committed = await hook?.followRequestedCommit();
-		await hook?.refresh();
-		await hook?.snapshot();
-		await hook?.announceEnd(committed);
+		// Bash may have changed any worktree of the repository: those with changes join in.
+		if (hook) {
+			const list = await git(hook.repo, ["worktree", "list", "--porcelain"]).catch(() => "");
+			for (const [, dir] of list.matchAll(/^worktree (.+)$/gm)) {
+				const top = await realpath(dir).catch(() => undefined);
+				if (!top || top === hook.repo || others.has(top)) continue;
+				const status = await git(top, ["status", "--porcelain"]).catch(() => "");
+				if (status.trim()) await hookFor(top);
+			}
+		}
+		for (const h of all()) {
+			const committed = await h.followRequestedCommit();
+			await h.refresh();
+			await h.snapshot();
+			await h.announceEnd(committed, h !== hook);
+		}
 	});
 
 	pi.registerCommand("helix-review", {

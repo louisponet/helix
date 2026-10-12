@@ -1191,6 +1191,70 @@ test("a commit the reviewer asked for lifts every session's older baseline to it
 	assert.equal(sent(), `review-baseline ${committed}`);
 });
 
+test("edits in a worktree of the repository get their own hook, Helix and mailbox", async (t) => {
+	const w = workspace(t);
+	const runtime = join(w.root, "run");
+	mkdirSync(join(runtime, "helix"), { recursive: true });
+	withEnv(t, { HELIX_COMMAND_SOCKET: undefined, XDG_RUNTIME_DIR: runtime });
+	const helixAt = (dir: string) => {
+		const id = createHash("sha256").update(dir).digest("hex").slice(0, 32);
+		return fakeHelix(t, join(runtime, "helix", `${id}.sock`));
+	};
+	const repo = realpathSync(w.repo);
+	w.stage("a.rs", "a\n");
+	w.commit();
+	const worktree = (name: string) => {
+		const dir = join(w.root, name);
+		git(repo, "worktree", "add", "-q", "-b", name, dir);
+		const top = realpathSync(dir);
+		writeFileSync(join(top, `${name}.rs`), "x\n");
+		git(top, "add", "--", `${name}.rs`);
+		git(top, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", name);
+		return { top, head: git(top, "rev-parse", "HEAD"), file: join(top, `${name}.rs`), outbox: join(top, ".pi", "helix-review", "outbox") };
+	};
+	const wt = worktree("wt");
+	const main = await helixAt(repo);
+	const other = await helixAt(wt.top);
+
+	const session = piSession(repo);
+	t.after(() => session.emit("session_shutdown"));
+	await session.emit("session_start", { reason: "startup" });
+	await session.emit("agent_start");
+	main.lines.splice(0);
+	assert.deepEqual(other.lines, []);
+
+	// An edit in the worktree opens its hook, pinned to the worktree's HEAD.
+	writeFileSync(wt.file, "y\n");
+	await session.emit("tool_result", { toolName: "edit", input: { path: wt.file }, content: [], isError: false });
+	assert.ok(existsSync(wt.outbox));
+	assert.deepEqual(other.lines.slice(0, 3), [`review-handoff ${wt.outbox}`, `review-baseline ${wt.head}`, "echo pi-1: Agent turn started"]);
+	await session.emit("agent_end", { messages: [] });
+	const state = JSON.parse(readFileSync(join(wt.top, ".pi", "helix-review", "state", "session-1.json"), "utf8"));
+	assert.deepEqual(Object.keys(state.snapshots), [wt.file]);
+	assert.equal(other.lines.at(-1), `echo pi-1: Agent turn done, 1 file changed since ${wt.head.slice(0, 8)} (:review-files)`);
+	assert.ok(main.lines.every((line) => !line.includes(wt.top)), "the main checkout's Helix sees nothing of the worktree");
+	assert.equal(main.lines.at(-1), `echo pi-1: Agent turn done, no file changes since ${git(repo, "rev-parse", "HEAD").slice(0, 8)}`);
+
+	// A review saved in the worktree's Helix reaches the session.
+	writeFileSync(wt.file, "Y\n");
+	const batch = join(wt.outbox, "7-1.json");
+	const blob = git(wt.top, "rev-parse", `HEAD:wt.rs`);
+	writeFileSync(`${batch}.tmp`, JSON.stringify({ format: "helix-review-batch", version: 2, files: [{ path: wt.file, baseline: commitBase(wt.head, blob) }], comments: [] }));
+	renameSync(`${batch}.tmp`, batch);
+	await until(() => session.messages.length === 1 && !existsSync(batch), "the worktree's batch");
+	await until(() => other.lines.at(-1) === "echo pi-1 received your review: 1 file with edits", "the receipt in the worktree's Helix");
+
+	// Bash changing another worktree is noticed at the end of the turn.
+	const wt2 = worktree("wt2");
+	const third = await helixAt(wt2.top);
+	await session.emit("agent_start");
+	writeFileSync(wt2.file, "z\n");
+	await session.emit("tool_result", { toolName: "bash", input: { command: "sed" }, content: [], isError: false });
+	await session.emit("agent_end", { messages: [] });
+	assert.deepEqual(third.lines.slice(0, 2), [`review-handoff ${wt2.outbox}`, `review-baseline ${wt2.head}`]);
+	assert.equal(third.lines.at(-1), `echo pi-1: Agent turn done, 1 file changed since ${wt2.head.slice(0, 8)} (:review-files)`);
+});
+
 test("a Helix restarted on the same socket is attached again without waiting for a failed send", async (t) => {
 	const w = workspace(t);
 	const socket = join(w.root, "helix.sock");
