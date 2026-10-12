@@ -869,7 +869,7 @@ test("a commit-staged handoff moves the baseline to the agent's commit, an ordin
 	lines.length = 0;
 	await session.emit("agent_end", { messages: [] });
 	assert.deepEqual(lines, [
-		`review-baseline ${committed}`,
+		`review-baseline ${committed} force`,
 		`review-baseline ${committed}`,
 		`echo pi-1: Agent turn done, committed ${committed.slice(0, 8)}, 1 file still changed`,
 	]);
@@ -1143,11 +1143,13 @@ test("sessions are named pi-N in Helix, and Helix reviews against the oldest unr
 test("a commit the reviewer asked for lifts every session's older baseline to it", async (t) => {
 	const w = workspace(t);
 	const socket = join(w.root, "helix.sock");
-	withEnv(t, { HELIX_COMMAND_SOCKET: socket });
+	withEnv(t, { HELIX_COMMAND_SOCKET: socket, HELIX_GH: "false" });
 	const { lines } = await fakeHelix(t, socket);
 	const repo = realpathSync(w.repo);
 	w.stage("a.rs", "a\n");
 	const first = w.commit();
+	// No base branch, so a stale side baseline is not remapped onto the merge base.
+	git(repo, "branch", "-m", "work");
 	const outbox = join(repo, ".pi", "helix-review", "outbox");
 	const sent = () => lines.filter((line) => line.startsWith("review-baseline ")).at(-1);
 
@@ -1164,6 +1166,9 @@ test("a commit the reviewer asked for lifts every session's older baseline to it
 	w.commit();
 	await one.emit("agent_start");
 	assert.equal(sent(), `review-baseline ${first}`);
+	// A third live session holds a stale baseline on a side branch, older than anything to come.
+	const side = execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit-tree", `${first}^{tree}`, "-p", first, "-m", "side"], { cwd: repo, env: gitEnv, encoding: "utf8" }).trim();
+	writeFileSync(join(repo, ".pi", "helix-review", "state", "session-3.json"), JSON.stringify({ snapshots: {}, baseline: { commit_oid: side, acknowledged: false }, pid: process.pid }));
 
 	// The reviewer asks pi-1 to commit; its turn commits, and the review moves on for everyone.
 	const batch = join(outbox, "9-1.json");
@@ -1177,17 +1182,20 @@ test("a commit the reviewer asked for lifts every session's older baseline to it
 	lines.length = 0;
 	await one.emit("agent_end", { messages: [] });
 	assert.equal(sent(), `review-baseline ${committed}`);
+	assert.deepEqual(lines.filter((line) => line.endsWith(" force")), [`review-baseline ${committed} force`], "the commit releases a pin in Helix");
 	lines.length = 0;
 	await two.emit("agent_end", { messages: [] });
-	assert.equal(sent(), `review-baseline ${committed}`, "pi-2's older baseline is lifted");
+	assert.equal(sent(), `review-baseline ${committed}`, "pi-2's older and pi-3's side baselines are lifted");
 
 	// An ordinary commit afterwards lifts nothing.
 	await one.emit("agent_start");
 	w.stage("c.rs", "c\n");
 	w.commit();
 	lines.length = 0;
+	await one.emit("agent_end", { messages: [] });
 	await two.emit("agent_end", { messages: [] });
 	assert.equal(sent(), `review-baseline ${committed}`);
+	assert.ok(lines.every((line) => !line.endsWith(" force")), "an ordinary turn never forces");
 });
 
 test("edits in a worktree of the repository get their own hook, Helix and mailbox", async (t) => {

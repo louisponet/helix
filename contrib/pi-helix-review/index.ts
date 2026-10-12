@@ -546,16 +546,17 @@ class Hook {
 	/**
 	 * The baseline Helix reviews against: the oldest unacknowledged baseline of the live sessions,
 	 * so no session's unreviewed work drops out of the review, else this session's. Baselines older
-	 * than the newest commit floor are lifted to it first.
+	 * than the newest commit floor, or not descended from it, are lifted to it first.
 	 */
 	private async reviewBaseline(): Promise<string | undefined> {
 		await this.remapOwnBaseline();
 		const sessions = await this.liveSessions();
 		const floor = await this.commitFloor(sessions);
 		// Other sessions' baselines are lifted and remapped here only; each session persists its own.
-		const lift = async (oid: string) => (floor && (await this.isAncestor(oid, floor)) ? floor : oid);
+		// A floor lifts every baseline not built on it: older ones, and stale ones on a dead branch.
+		const lift = async (oid: string) => (floor && !(await this.isAncestor(floor, oid)) ? floor : oid);
 		const own = this.state.baseline;
-		if (own && floor && own.commit_oid !== floor && (await this.isAncestor(own.commit_oid, floor))) {
+		if (own && floor && !(await this.isAncestor(floor, own.commit_oid))) {
 			own.commit_oid = floor;
 			await this.save();
 		}
@@ -846,7 +847,8 @@ class Hook {
 		this.state.baseline = { commit_oid: head, acknowledged: false };
 		this.state.commit_floor = head;
 		await this.save();
-		await this.send([`review-baseline ${(await this.reviewBaseline()) ?? head}`]);
+		// Asking for a commit ends any baseline the reviewer pinned in Helix.
+		await this.send([`review-baseline ${head} force`]);
 		return head;
 	}
 
