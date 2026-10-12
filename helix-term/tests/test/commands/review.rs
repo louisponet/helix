@@ -2694,7 +2694,10 @@ async fn review_pr_shows_comment_threads_and_keeps_pr_comments_out_of_the_mailbo
         .collect();
     assert_eq!(replies, [Some(1), None]);
     assert!(app.editor.review_batch.comments().is_empty());
+    // The write finishes before the explicit handoff, which refuses unsaved buffers.
     send_keys(&mut app, "ix<esc>:w<ret>").await?;
+    send_keys(&mut app, ":review-send<ret>").await?;
+    assert_status_not_error(&app.editor);
     let batches: Vec<_> = fs::read_dir(&outbox)?.collect::<Result<_, _>>()?;
     assert_eq!(batches.len(), 1, "{batches:?}");
     let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(batches[0].path())?)?;
@@ -3507,13 +3510,8 @@ async fn command_socket_is_taken_over_when_free_and_left_to_a_successor() -> any
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn handoff_exports_unmodified_reviews_on_write_and_suspends_auto_save() -> anyhow::Result<()>
-{
+async fn writes_never_hand_off_but_explicit_commands_do() -> anyhow::Result<()> {
     let repo = Repo::new("old\nkeep\n", "old\nkeep\n", "old\nkeep\n");
-    let other = repo.dir.path().join("other.txt");
-    fs::write(&other, "other\n")?;
-    git_ok(repo.dir.path(), &["add", "other.txt"]);
-    git_ok(repo.dir.path(), &["commit", "-m", "other"]);
     let commit = git_ok(repo.dir.path(), &["rev-parse", "HEAD"]);
     let blob = git_ok(repo.dir.path(), &["rev-parse", "HEAD:file.txt"]);
     let _cwd = Cwd::enter(repo.dir.path());
@@ -3533,32 +3531,26 @@ async fn handoff_exports_unmodified_reviews_on_write_and_suspends_auto_save() ->
         .with_config(config)
         .build()?;
 
-    // Without a handoff directory, auto-save writes reviewed buffers.
-    send_keys(&mut app, ":review-baseline HEAD<ret>ix<esc>").await?;
+    // With a handoff directory, auto-save and :w write reviewed buffers, handing nothing off.
+    let handoff = format!(":review-handoff {}<ret>", outbox.path().display());
+    send_keys(
+        &mut app,
+        &format!(":review-baseline HEAD<ret>{handoff}ix<esc>"),
+    )
+    .await?;
     settle().await;
     send_keys(&mut app, "<esc>").await?;
     assert!(doc!(app.editor).review.is_some());
     assert!(!doc!(app.editor).is_modified());
     assert_eq!(repo.disk(), "xold\nkeep\n");
-
-    let handoff = format!(":review-handoff {}<ret>", outbox.path().display());
-    send_keys(&mut app, &format!("{handoff}iy<esc>")).await?;
-    settle().await;
-    send_keys(&mut app, "<esc>").await?;
-    assert!(doc!(app.editor).is_modified());
-    assert_eq!(repo.disk(), "xold\nkeep\n");
+    send_keys(&mut app, "iy<esc>:w<ret>").await?;
+    assert_eq!(repo.disk(), "xyold\nkeep\n");
     assert_eq!(fs::read_dir(outbox.path())?.count(), 0);
 
-    // The comment writes the modified buffer, whose write exports the batch with it.
-    let keys = format!(
-        ":o {}<ret>iz<esc>:o {}<ret>:review-comment mine<ret>",
-        other.display(),
-        repo.file.display()
-    );
-    send_keys(&mut app, &keys).await?;
-
+    // An explicit command hands off at once (writing a modified buffer first is covered by the
+    // :review-ask test, which has no auto-save racing it).
+    send_keys(&mut app, ":review-comment mine<ret>").await?;
     assert_eq!(repo.disk(), "xyold\nkeep\n");
-    assert_eq!(fs::read_to_string(&other)?, "other\n");
     let exported: Vec<_> = fs::read_dir(outbox.path())?
         .map(|entry| entry.unwrap().path())
         .collect();

@@ -874,11 +874,7 @@ pub fn write_all_impl(
         .into_iter()
         .filter_map(|id| {
             let doc = doc!(cx.editor, &id);
-            if !doc.is_modified()
-                || options.auto_save
-                    && cx.editor.review_handoff_dir().is_some()
-                    && doc.review.is_some()
-            {
+            if !doc.is_modified() {
                 return None;
             }
             if doc.path().is_none() {
@@ -4236,7 +4232,7 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "review-handoff",
         aliases: &[],
-        doc: "On every write of a reviewed buffer, export a review batch to a new file in the given directory; auto-save skips reviewed buffers meanwhile. Without it, batches go to `<workspace>/.pi/helix-review/outbox` when that directory exists and every reviewed file is in the workspace. `clear` returns to that default.",
+        doc: "Set the directory the explicit handoffs (:review-comment, :review-send, :review-commit, :review-commit-all) export review batches to. Without it, batches go to `<workspace>/.pi/helix-review/outbox` when that directory exists and every reviewed file is in the workspace. `clear` returns to that default.",
         fun: review::review_handoff,
         completer: CommandCompleter::positional(&[completers::directory]),
         signature: Signature {

@@ -801,7 +801,8 @@ fn send_comments(cx: &mut compositor::Context, text: &str) -> anyhow::Result<()>
         cx.editor.review_batch.set_target(target);
     }
     if doc!(cx.editor).is_modified() {
-        // Writing a reviewed buffer exports the handoff, carrying the comments and the request.
+        // The batch takes the saved file: it is exported once the write is done.
+        cx.editor.review_send_on_write = Some(doc!(cx.editor).id());
         typed::write_impl(
             cx,
             None,
@@ -1415,7 +1416,7 @@ pub(super) fn review_handoff(
         dir.display()
     );
     cx.editor.set_status(format!(
-        "Writing a reviewed buffer exports a review batch to {}",
+        "Review handoffs export review batches to {}",
         dir.display()
     ));
     cx.editor.review_handoff = Some(dir);
@@ -1598,18 +1599,19 @@ fn hand_off(
     export_handoff(editor, &dir)
 }
 
-/// Starts reviewing the written document against the review baseline and exports a review batch
-/// if a handoff directory is set.
+/// Starts reviewing the written document against the review baseline, and exports the review
+/// batch when `:review-comment` wrote it to send its comments.
 pub(crate) fn document_written(editor: &mut Editor, doc_id: DocumentId) {
     if let Err(err) = editor.start_baseline_review(doc_id) {
         log::info!("not reviewing document {doc_id}: {err:#}");
     }
+    if editor.review_send_on_write != Some(doc_id) {
+        return;
+    }
+    editor.review_send_on_write = None;
     let Some(dir) = editor.review_handoff_dir() else {
         return;
     };
-    if doc!(editor, &doc_id).review.is_none() {
-        return;
-    }
     let comments = editor.review_batch.comments().len();
     match export_handoff(editor, &dir) {
         Ok(_) if comments > 0 => {

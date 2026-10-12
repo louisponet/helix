@@ -59,7 +59,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-baseline-pick` | Pick the baseline from the first-parent history of `HEAD` (up to 300 commits: commit, age, author, subject), with `●` on the current baseline, `base` on the merge base with the base branch (the pull request's while reviewing one, else `origin/HEAD`, `develop`, `main` or `master`), `pi` on the baseline the pi hook last sent and `HEAD` marked; the current baseline is preselected. Choosing a commit works like `:review-baseline <commit>` and pins it as yours (`*`), except the `pi` row, which follows the hook again. `G b` in the default keymap; `G B` refreshes the buffer's review. |
 | `:review-older` | Move the baseline to its first parent (pinning `HEAD` first when none is set) and refresh every review; the status shows `Baseline <commit> <subject> (N behind HEAD)`. `G -` in the default keymap. |
 | `:review-newer` | Move the baseline to the next commit towards `HEAD` on its ancestry path and refresh every review. `G +` in the default keymap. |
-| `:review-handoff <dir>` | Export a batch to `<dir>` on every write of a reviewed buffer. Without it, the default is `<workspace>/.pi/helix-review/outbox` when that directory exists (the pi extension creates it) and every reviewed file and pending comment is in the workspace. `clear` returns to that default. |
+| `:review-handoff <dir>` | Export the batches of the explicit handoffs (`:review-comment`, `:review-send`, `:review-commit`, `:review-commit-all`) to `<dir>`. Writing a buffer never hands anything off. Without it, the default is `<workspace>/.pi/helix-review/outbox` when that directory exists (the pi extension creates it) and every reviewed file and pending comment is in the workspace. `clear` returns to that default. |
 | `:review-send [text]` | Export the handoff batch now without writing any file, for example to acknowledge a review without edits; optional text goes to the agent as an instruction (the batch's `request`). A leading `@label` (`:review-send @pi-2 [text]`) addresses one of several pi sessions (the batch's `target`). |
 | `:review-commit [subject]` | Hand back like `:review-send`, asking the agent to commit exactly what is staged in the git index (optionally with that subject, and addressed to a session with a leading `@label`). Refuses when nothing is staged, naming how many of the buffer's hunks are already committed in `HEAD` if any. |
 | `:review-diff` | Show one unified diff of every file changed since the review baseline (with none set, `HEAD` is pinned as it, like `:review-baseline HEAD`) in a read-only scratch buffer; running it again, or `:review-baseline` (as the pi hook does after each edit), refreshes that buffer in place. File headers are workspace-relative paths (`--- <path>`), so `gf` opens a file. |
@@ -138,8 +138,7 @@ buffer with the file on disk.
 ### Handing a review to pi
 
 The `contrib/pi-helix-review` integration imports exported batches into a pi
-session. Without a handoff directory nothing is sent automatically, and saving
-never notifies pi.
+session. Saving never notifies pi: only the explicit handoff commands do.
 
 1. Pause pi (and any agents it started) so the working tree stops changing.
 2. In Helix, `:review` each file (`:review-refresh` picks up changes made since),
@@ -227,13 +226,12 @@ like this:
    buffer has unsaved changes, say) stays pending and goes with the next
    handoff: `:review-comments` lists pending comments and jumps to one;
    `:review-uncomment [count]` drops the latest.
-8. For a request that belongs in the code, write a line containing
-   `AGENT: <request>` (for example `// AGENT: handle the empty case`); the
-   agent is told to address it and delete the marker.
-9. Hand the review back: `:w` on a reviewed buffer exports your edits,
-   markers and comments, or `:review-send` exports them without writing
-   anything when there is nothing to save; `:review-send <text>` adds an
-   instruction for the agent. `:review-commit [subject]` hands back and asks
+8. Your own edits are ordinary worktree changes: save them as usual (auto-save
+   included), and stage them like any other hunk. Saving tells the agent
+   nothing.
+9. Hand the review back explicitly: `:review-send` (`G S`) exports your saved
+   edits since the agent's turn and any pending comments;
+   `:review-send <text>` adds an instruction for the agent. `:review-commit [subject]` hands back and asks
    the agent to commit exactly what you staged (and nothing else);
    `:review-commit-all [subject]` (`G M`) stages everything first. The status
    line then confirms it, for example `pi-1 received your review: 1 file with
@@ -324,7 +322,7 @@ shown at its original line, tagged `(outdated)`. They reload with
 
 While reviewing a pull request, `G c` (`:review-comment`) collects comments
 for the pull request instead of for pi: they are kept out of the batches
-handed to pi (saving, `:review-send`, `:review-commit`), and a comment on a
+handed to pi (`:review-send`, `:review-commit`), and a comment on a
 line with a thread replies to it. `:review-ask` is the same command, so it does
 likewise.
 
@@ -345,8 +343,8 @@ the status shows `gh`'s error.
   was started after pi, or in another workspace, which has its own socket).
   Open Helix in the repository and run `/reload` in pi (or restart pi); the
   next agent turn also attaches. Meanwhile `:review-files` reviews against
-  `HEAD` on its own, but only pi sets the handoff directory, so saving hands
-  nothing back until it attaches.
+  `HEAD` on its own, but only pi sets the handoff directory, so the handoff
+  commands have nowhere to export to until it attaches.
 - `:review-files` says `no files changed since <commit>` although the agent did
   work: it committed, and after your last handoff the next turn moved the
   baseline to that commit. `:review-baseline <commit>` (for example
@@ -394,12 +392,11 @@ reviewed against that commit whose file has not changed on disk are left alone
 and counted as unchanged (`2 buffers up to date against <commit>` when nothing
 else happened). A different commit switches all of them.
 
-While `:review-handoff <dir>` is set, auto-save skips reviewed buffers, and
-writing a reviewed buffer exports a batch (the same version 2 JSON as
-`:review-export`) to `<dir>/<unix-ms>-<pid>.json`. The file is first written
-under a `.json.tmp` name and then renamed. The batch covers every unmodified
-reviewed buffer with its pending comments; comments on buffers with unsaved
-changes stay pending for a later write.
+The handoff commands export a batch (the same version 2 JSON as
+`:review-export`) to `<dir>/<unix-ms>-<pid>.json` of the handoff directory.
+The file is first written under a `.json.tmp` name and then renamed. The batch
+covers every unmodified reviewed buffer with its pending comments. Writing a
+buffer, by `:w` or auto-save, never exports one.
 
 `:review-send` exports the same batch immediately without writing any file, so
 a review without edits can be handed back without touching the disk. It fails

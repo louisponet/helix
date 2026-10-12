@@ -1295,7 +1295,7 @@ pub struct Editor {
     pub language_servers: helix_lsp::Registry,
     pub diagnostics: Diagnostics,
     pub diff_providers: DiffProviderRegistry,
-    /// Review comments and reviewed files waiting for `:review-export`.
+    /// Review comments and reviewed files waiting for the next handoff or `:review-export`.
     pub review_batch: ReviewBatch,
     /// Commit that documents in the workspace are reviewed against, see `:review-baseline`.
     pub review_baseline: Option<String>,
@@ -1306,6 +1306,8 @@ pub struct Editor {
     pub review_user_pin: Option<String>,
     /// The baseline the pi hook last sent over the command socket.
     pub review_hook_baseline: Option<String>,
+    /// The document `:review-comment` is writing, whose save exports the review batch.
+    pub review_send_on_write: Option<DocumentId>,
     /// What `search_next_or_review_next` and `search_prev_or_review_prev` move between: the last
     /// used of searching and walking review changes.
     pub nav_mode: NavMode,
@@ -1503,6 +1505,7 @@ impl Editor {
             review_target: None,
             review_user_pin: None,
             review_hook_baseline: None,
+            review_send_on_write: None,
             nav_mode: NavMode::Review,
             review_pr: None,
             review_pr_threads: Vec::new(),
