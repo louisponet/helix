@@ -3081,6 +3081,27 @@ async fn g_b_picks_the_baseline_from_the_branch_history() -> anyhow::Result<()> 
         "{status}"
     );
 
+    // A forced hook baseline (after a commit the reviewer asked for) releases a pin.
+    send_keys(&mut app, "Gb").await?;
+    send_keys(&mut app, "%mark base<ret>").await?;
+    assert_eq!(baseline(&app), first);
+    assert!(app.editor.review_user_pin.is_some());
+    app.editor.socket_command = true;
+    send_keys(&mut app, &format!(":review-baseline {third} force<ret>")).await?;
+    assert_eq!(baseline(&app), third);
+    assert!(app.editor.review_user_pin.is_none());
+    let status = statusline(&app);
+    assert!(
+        status.contains(&format!(" review {} ", &third[..8])),
+        "{status}"
+    );
+    // The plain form afterwards still follows the hook.
+    send_keys(&mut app, &format!(":review-baseline {second}<ret>")).await?;
+    app.editor.socket_command = false;
+    assert_eq!(baseline(&app), second);
+    send_keys(&mut app, ":review-baseline HEAD sometimes<ret>").await?;
+    assert_error(&app, "only a trailing 'force'");
+
     // G B still refreshes the buffer's review.
     send_keys(&mut app, "GB").await?;
     assert!(app

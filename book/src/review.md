@@ -50,7 +50,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-toggle-stage` | Stage the hunks the selections touch, or unstage them all if every one is already staged, so hunks can be toggled in any order; hunks committed since the baseline are skipped and counted. All changes go into one index write. |
 | `Enter` | In normal mode, runs `:review-toggle-stage` while the buffer is reviewed or is the `:review-diff` buffer, and does nothing otherwise. |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept. Under a `:review-baseline`, the buffer is not reviewed again until a different baseline, `:review-baseline clear`, or an explicit `:review` on it. |
-| `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. Refuses a commit that is not `HEAD` or one of its ancestors (`commit <commit> is not in this branch's history`), such as a branch tip a rebase rewrote. `clear` closes all reviews. |
+| `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. Refuses a commit that is not `HEAD` or one of its ancestors (`commit <commit> is not in this branch's history`), such as a branch tip a rebase rewrote. `clear` closes all reviews. `:review-baseline <revision> force` adopts the commit even over a baseline pinned by you, ending the pin (the pi hook sends it after a commit you asked for). |
 | `:review-pr <number\|url>` | Review a GitHub pull request: check it out with `gh pr checkout` and review every buffer against its merge base with the base branch. Refuses uncommitted changes and unsaved reviewed buffers. `close` leaves the pull request review and keeps the checkout. See [Reviewing pull requests](#reviewing-pull-requests). |
 | `:review-submit [approve\|request-changes\|comment] [summary]` | Post the pending pull request comments as one review (see [Reviewing pull requests](#reviewing-pull-requests)). `G m` opens it while reviewing a pull request. |
 | `:review-commit-all [subject]` | Stage every file changed since the baseline (modified, deleted and untracked, like `git add -A` limited to them), then hand back like `:review-commit`. Refuses unsaved reviewed buffers, and says `no changes since <commit>` when there is nothing. `G M` in the default keymap. |
@@ -254,7 +254,9 @@ baseline gets a trailing `*`, and the pi hook's `:review-baseline`, whatever
 commit it sends, only refreshes the reviews against yours. Picking the `pi`
 row in `G b` (or stepping onto the hook's baseline) ends the pin and follows
 the hook again, as does `:review-baseline clear`, after which the hook's next
-refresh pins its baseline.
+refresh pins its baseline. A commit you asked for (`G m`, `G M`) releases your
+pin too: the hook then sends the new commit with `force`, and the review moves
+on to it.
 
 These commands are built into the default keymap under `G` in normal mode
 (see [review mode](./keymap.md#review-mode)): `G f` picks a file, `G d` shows the

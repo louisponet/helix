@@ -1097,6 +1097,11 @@ pub(super) fn review_baseline(
         return Ok(());
     }
 
+    let force = match args.get(1) {
+        None => false,
+        Some("force") if &args[0] != "clear" => true,
+        Some(arg) => bail!("unexpected argument '{arg}', only a trailing 'force' is allowed"),
+    };
     let commit = if &args[0] != "clear" {
         // A stale commit (one a rebase rewrote, say) is never adopted as the baseline.
         let workspace = helix_loader::find_workspace().0;
@@ -1155,6 +1160,12 @@ pub(super) fn review_baseline(
         view.ensure_cursor_in_view(doc, scrolloff);
         cx.editor.set_status("Review baseline cleared");
         return Ok(());
+    }
+    if force {
+        // A commit the reviewer asked for releases their pin.
+        cx.editor.review_user_pin = None;
+        cx.editor.review_hook_baseline = Some(commit.clone());
+        return pin_review_baseline(cx.editor, &commit);
     }
     if cx.editor.socket_command {
         // The hook never overrides a baseline the reviewer chose: it only refreshes it.

@@ -4221,11 +4221,11 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "review-baseline",
         aliases: &[],
-        doc: "Review every unmodified buffer in the workspace, and buffers opened later, against a commit revision such as HEAD. Repeating the same commit refreshes the reviews; `clear` closes them.",
+        doc: "Review every unmodified buffer in the workspace, and buffers opened later, against a commit revision such as HEAD. Repeating the same commit refreshes the reviews; `clear` closes them. A trailing `force` adopts the commit even over a baseline pinned by you.",
         fun: review::review_baseline,
         completer: CommandCompleter::none(),
         signature: Signature {
-            positionals: (1, Some(1)),
+            positionals: (1, Some(2)),
             ..Signature::DEFAULT
         },
     },
