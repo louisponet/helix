@@ -4034,21 +4034,9 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     },
     TypableCommand {
         name: "review-comment",
-        aliases: &[],
-        doc: "Add a pending review comment on the primary selection, or on the selected old text. Use %% for a literal %.",
+        aliases: &["review-ask"],
+        doc: "Send a comment on every selection (or the selected old text) to the agent at once, writing the buffer first if modified; a leading @label addresses that pi session. While reviewing a pull request, add a pending pull request comment on the primary selection instead. Use %% for a literal %.",
         fun: review::review_comment,
-        completer: CommandCompleter::none(),
-        signature: Signature {
-            positionals: (1, Some(1)),
-            raw_after: Some(0),
-            ..Signature::DEFAULT
-        },
-    },
-    TypableCommand {
-        name: "review-ask",
-        aliases: &[],
-        doc: "Ask the agent about every selection (or the selected old text): writes the buffer if modified and hands off the review with the question. A leading @label addresses that pi session. Use %% for a literal %.",
-        fun: review::review_ask,
         completer: CommandCompleter::none(),
         signature: Signature {
             positionals: (1, Some(1)),

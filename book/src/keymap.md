@@ -370,8 +370,8 @@ used to go to a line; use `<n>gg` for that.
 | `d` | Show the review as one diff                                  | `review_diff_buffer`     |
 | `g` | Open the file of the review diff hunk under the cursor       | `review_diff_open_hunk`  |
 | `o` | Focus the old review text nearest the cursor                 | `review_old_text`        |
-| `c` | Comment on the selection (opens `:review-comment `)          | `review_comment_prompt`  |
-| `a` | Ask the agent about the selections (opens `:review-ask `)    | `review_ask_prompt`      |
+| `c` | Send a comment on the selections (opens `:review-comment `)  | `review_comment_prompt`  |
+| `a` | Same as `c` (opens `:review-comment `)                       | `review_ask_prompt`      |
 | `C` | Pick a pending review comment                                | `review_comments_picker` |
 | `u` | Drop the latest pending review comment                       | `review_uncomment_latest`|
 | `s` | Stage or unstage the review hunks the selections touch       | `review_toggle_stage`    |

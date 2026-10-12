@@ -27,7 +27,7 @@ package; that path is not exercised by the tests.
 
 1. Pause pi (and any agents it started) so the working tree stops changing.
 2. In Helix, `:review` each file (against the Git index), or `:review <revision>`
-   / `:review-commits` (against a commit), edit or comment, and save.
+   / `:review-commits` (against a commit), edit and save.
 3. `:review-export /tmp/review.json`.
 4. In the idle pi session that should continue: `/helix-review /tmp/review.json`.
 
@@ -108,7 +108,7 @@ version moves into the first session's file. Ignore `.pi/` in Git.
   (or steers) moves the baseline to the agent's new `HEAD` right away, sticky
   again, so the committed hunks drop out of the review, and echoes `pi-1: Agent turn
   done, committed <oid>, N files still changed`. Commits the agent makes on
-  its own keep the sticky baseline. A `:review-ask` handoff ends with an
+  its own keep the sticky baseline. A `:review-comment` (or `:review-ask`) handoff ends with an
   instruction to do what the question asks, listing each selection with its
   lines, selected text, enclosing code and message; you read the answer in
   pi, and the turn ends with the ordinary echo. pi sends `review-handoff <outbox>` and `review-baseline <commit>`,

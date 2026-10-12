@@ -39,8 +39,8 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-commits` | Choose a baseline by hash or subject from the latest 200 commits reachable from `HEAD`. |
 | `:review-old` | Focus the old text nearest the cursor. |
 | `:review-refresh` | Reload the buffer from disk; reread the index in index mode, or retain the selected commit in commit mode. Refuses unsaved changes. |
-| `:review-comment <text>` | Add a pending comment on the primary selection, or on the selected old text while it is focused. Use `%%` for a literal `%`. |
-| `:review-ask <text>` | Ask the agent about every selection, or the selected old text while it is focused: one comment per selection with the text, then hands the review off at once (writing the buffer first if it is modified). Needs a handoff directory (`:review-handoff` or the pi mailbox). A leading `@label` (`:review-ask @pi-2 rename this`) addresses the pi session with that label. Use `%%` for a literal `%`. |
+| `:review-comment <text>` | Send a comment to the agent at once: one comment per selection, or on the selected old text while it is focused, then hands the review off (writing the buffer first if it is modified). Needs a handoff directory (`:review-handoff` or the pi mailbox). A leading `@label` (`:review-comment @pi-2 rename this`) addresses the pi session with that label. While reviewing a pull request it adds a pending pull request comment on the primary selection instead. Use `%%` for a literal `%`. |
+| `:review-ask <text>` | The same command as `:review-comment`. |
 | `:review-comments` | Pick a pending comment, or while reviewing a pull request one of its comment threads, by kind, author, place or text, and jump to its line in the current text. |
 | `:review-uncomment [count]` | Drop the latest pending comment, or the `count` latest ones, and show how many remain. |
 | `:review-export <path>` | Write all pending comments and reviewed files to a new JSON file. |
@@ -138,11 +138,13 @@ buffer with the file on disk.
 ### Handing a review to pi
 
 The `contrib/pi-helix-review` integration imports exported batches into a pi
-session. Nothing is sent automatically; saving or commenting never notifies pi.
+session. Without a handoff directory nothing is sent automatically, and saving
+never notifies pi.
 
 1. Pause pi (and any agents it started) so the working tree stops changing.
 2. In Helix, `:review` each file (`:review-refresh` picks up changes made since),
-   edit and `:write`, and add comments with `:review-comment`. Wait for writing
+   edit and `:write`. (`:review-comment` needs a handoff directory, see
+   below, and hands its comments off at once.) Wait for writing
    to finish before refreshing; chaining both commands in a key mapping does
    not wait for the save.
 3. `:review-export <path>` writes the batch. It refuses while a reviewed buffer
@@ -215,13 +217,14 @@ like this:
    tint in the default theme, falling back to the staged ones) and is counted as committed, and staging or unstaging it fails
    with `already committed in <commit>`. While reviewing, `Enter` in
    normal mode is taken by this; elsewhere it does nothing.
-7. `:review-comment <text>` comments on the current selection, or on the
-   selected old text while it is focused. `:review-comments` lists pending
-   comments and jumps to one; `:review-uncomment [count]` drops the latest.
-   To get an answer right away, select the code (several selections are
-   fine) and use `:review-ask <text>` (`G a`): it hands the selections and the
-   question to the agent at once, writing the buffer first if needed. You
-   watch the agent's edits arrive and read its answer in pi.
+7. `:review-comment <text>` (`G c` or `G a`) sends a comment on the current
+   selections (several are fine), or on the selected old text while it is
+   focused, to the agent at once, writing the buffer first if needed
+   (`Sent 2 comments to the agent`). You watch the agent's edits arrive and
+   read its answer in pi. A comment that could not be sent (another reviewed
+   buffer has unsaved changes, say) stays pending and goes with the next
+   handoff: `:review-comments` lists pending comments and jumps to one;
+   `:review-uncomment [count]` drops the latest.
 8. For a request that belongs in the code, write a line containing
    `AGENT: <request>` (for example `// AGENT: handle the empty case`); the
    agent is told to address it and delete the marker.
@@ -253,7 +256,7 @@ does stepping back to where you started.
 
 These commands are built into the default keymap under `G` in normal mode
 (see [review mode](./keymap.md#review-mode)): `G f` picks a file, `G d` shows the
-diff, `G o` focuses old text, `G c` comments (`G C` lists them), `G s` stages, `G m` asks the agent
+diff, `G o` focuses old text, `G c` and `G a` send a comment to the agent (`G C` lists pending ones), `G s` stages, `G m` asks the agent
 to commit (`G M` stages everything first) and `G n` / `G N` move between changes not yet committed, on into the next or previous
 changed file (`:review-files` order, wrapping around) at its edge. Keys you map under
 `[keys.normal.G]` in `config.toml` are added to that menu.
@@ -317,7 +320,8 @@ shown at its original line, tagged `(outdated)`. They reload with
 While reviewing a pull request, `G c` (`:review-comment`) collects comments
 for the pull request instead of for pi: they are kept out of the batches
 handed to pi (saving, `:review-send`, `:review-commit`), and a comment on a
-line with a thread replies to it. `:review-ask` still goes to pi at once.
+line with a thread replies to it. `:review-ask` is the same command, so it does
+likewise.
 
 `:review-submit [approve|request-changes|comment] [summary]` (`G m` opens it
 while reviewing a pull request) posts them as one review on the pull request's

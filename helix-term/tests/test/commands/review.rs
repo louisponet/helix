@@ -207,6 +207,33 @@ fn statusline(app: &Application) -> String {
         .collect()
 }
 
+/// Points the review handoff at a directory that is then removed, so comments sent to the agent
+/// fail and stay pending.
+async fn break_handoff(app: &mut Application, dir: &Path) -> anyhow::Result<()> {
+    let gone = dir.join("gone");
+    fs::create_dir(&gone)?;
+    send_keys(app, &format!(":review-handoff {}<ret>", gone.display())).await?;
+    fs::remove_dir(&gone)?;
+    Ok(())
+}
+
+/// The batches in `outbox`, removed so the next export is the only one.
+fn take_batches(outbox: &Path) -> Vec<serde_json::Value> {
+    let mut paths: Vec<_> = fs::read_dir(outbox)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            let json = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            fs::remove_file(path).unwrap();
+            json
+        })
+        .collect()
+}
+
 fn old_focus(app: &Application) -> Option<Range> {
     let (view, doc) = current_ref!(app.editor);
     doc.review.as_ref()?.focus(view.id).map(|focus| focus.range)
@@ -283,13 +310,16 @@ async fn export_refuses_external_changes_and_preserves_comments_until_refresh() 
     let repo = Repo::new(INDEX, INDEX, DISK);
     let batch = repo.dir.path().join("batch.json");
     let export = format!(":review-export {}<ret>", batch.display());
+    let mut app = repo.app()?;
+    break_handoff(&mut app, repo.dir.path()).await?;
     test_key_sequences(
-        &mut repo.app()?,
+        &mut app,
         vec![
             (
+                // The comment cannot be sent, so it stays pending.
                 Some(":review<ret>:review-comment retained<ret>"),
                 Some(&|app| {
-                    assert_status_not_error(&app.editor);
+                    assert_eq!(app.editor.review_batch.comments().len(), 1);
                     repo.write_external("external\n");
                 }),
             ),
@@ -397,9 +427,10 @@ async fn review_suspends_visibly_on_large_edits_and_recovers_after_refresh() -> 
         let mut app = repo.app()?;
         let batch = repo.dir.path().join("batch.json");
         let export = format!(":review-export {}<ret>", batch.display());
+        break_handoff(&mut app, repo.dir.path()).await?;
         send_keys_and_paste(
             &mut app,
-            ":review<ret>:review-comment retained<ret>i",
+            ":review<ret>:review-comment retained<ret>:review-handoff clear<ret>i",
             &oversized,
         )
         .await?;
@@ -1029,7 +1060,12 @@ async fn mapped_commands_and_pastes_cannot_edit_old_text() -> anyhow::Result<()>
         assert!(old_focus(app).is_some());
     };
 
-    send_keys_and_paste(&mut app, ":review<ret>:review-old<ret>x", "pasted").await?;
+    let outbox = tempfile::tempdir()?;
+    let keys = format!(
+        ":review-handoff {}<ret>:review<ret>:review-old<ret>x",
+        outbox.path().display()
+    );
+    send_keys_and_paste(&mut app, &keys, "pasted").await?;
     assert_error(&app, "read-only");
     unchanged(&app);
 
@@ -1062,8 +1098,12 @@ async fn mapped_commands_and_pastes_cannot_edit_old_text() -> anyhow::Result<()>
             (
                 Some("<F8>"),
                 Some(&|app| {
-                    assert_status_not_error(&app.editor);
-                    assert_eq!(app.editor.review_batch.comments().len(), 1);
+                    assert_eq!(
+                        app.editor.get_status().unwrap().0,
+                        "Sent 1 comment to the agent"
+                    );
+                    let batches = take_batches(outbox.path());
+                    assert_eq!(batches[0]["comments"][0]["comment"], "mapped");
                     unchanged(app);
                 }),
             ),
@@ -1168,29 +1208,37 @@ async fn commit_review_pins_history_and_preserves_edits_and_comment_baselines() 
     };
     let batch = repo.dir.path().join("commits.json");
     let export = format!(":review-export {}<ret>", batch.display());
+    let outbox = tempfile::tempdir()?;
+    let handoff = format!(
+        ":review-handoff {}<ret>:review HEAD<ret>:review-old<ret>x:review-comment historical<ret><esc>",
+        outbox.path().display()
+    );
     test_key_sequences(
         &mut repo.app()?,
         vec![
-            (Some(":review HEAD<ret>:review-old<ret>x:review-comment historical<ret><esc>"), Some(&|app| {
+            (Some(&handoff), Some(&|app| {
                 assert_status_not_error(&app.editor);
                 assert_eq!(doc!(app.editor).text(), "latest\nkeep\n");
                 assert!(render(app).iter().any(|(_, text)| text == "committed"));
                 assert_eq!(doc!(app.editor).review.as_ref().unwrap().baseline(), &baseline);
+                let json = &take_batches(outbox.path())[0];
+                assert_eq!(json["comments"][0]["baseline"], serde_json::json!({"kind":"git-commit", "commit_oid":commit_oid, "blob_oid":blob_oid}));
+                assert_eq!(json["comments"][0]["selected_text"], "committed\n");
             })),
             (Some("ix<esc>:review missing-baseline-ref<ret>"), Some(&|app| {
                 assert_error(app, "missing-baseline-ref");
                 assert_eq!(doc!(app.editor).text(), "xlatest\nkeep\n");
                 assert!(doc!(app.editor).is_modified());
                 assert_eq!(doc!(app.editor).review.as_ref().unwrap().baseline(), &baseline);
-                assert_eq!(app.editor.review_batch.comments().len(), 1);
             })),
-            (Some(":review<ret>:review-old<ret>x:review-comment staged<ret><esc>"), Some(&|app| {
+            (Some("u:review<ret>:review-old<ret>x:review-comment staged<ret><esc>"), Some(&|app| {
                 assert_status_not_error(&app.editor);
-                assert_eq!(doc!(app.editor).text(), "xlatest\nkeep\n");
                 assert!(render(app).iter().any(|(_, text)| text == "staged"));
-                assert_eq!(app.editor.review_batch.comments().len(), 2);
+                let json = &take_batches(outbox.path())[0];
+                assert_eq!(json["comments"][0]["baseline"], serde_json::json!({"kind":"git-index", "blob_oid":index_oid}));
+                assert_eq!(json["comments"][0]["selected_text"], "staged\n");
             })),
-            (Some("u:review HEAD<ret>"), Some(&|app| {
+            (Some(":review HEAD<ret>"), Some(&|app| {
                 assert_status_not_error(&app.editor);
                 assert_eq!(doc!(app.editor).review.as_ref().unwrap().baseline(), &baseline);
                 repo.write("new commit\nkeep\n");
@@ -1210,10 +1258,6 @@ async fn commit_review_pins_history_and_preserves_edits_and_comment_baselines() 
                 let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(&batch).unwrap()).unwrap();
                 assert_eq!(json["version"], 2);
                 assert_eq!(json["files"][0]["baseline"], serde_json::json!({"kind":"git-commit", "commit_oid":commit_oid, "blob_oid":blob_oid}));
-                assert_eq!(json["comments"][0]["baseline"], json["files"][0]["baseline"]);
-                assert_eq!(json["comments"][0]["selected_text"], "committed\n");
-                assert_eq!(json["comments"][1]["baseline"], serde_json::json!({"kind":"git-index", "blob_oid":index_oid}));
-                assert_eq!(json["comments"][1]["selected_text"], "staged\n");
                 assert_eq!(repo.disk(), "agent latest\nkeep\n");
             })),
         ], false,
@@ -1293,9 +1337,12 @@ async fn comment_picker_jumps_to_pending_comments() -> anyhow::Result<()> {
         }
     };
     let (on_d, on_old_c) = (at("file.txt", 3), at("file.txt", 2));
+    let mut app = repo.app()?;
+    // Comments that cannot be sent stay pending.
+    break_handoff(&mut app, dir).await?;
 
     test_key_sequences(
-        &mut repo.app()?,
+        &mut app,
         vec![
             (
                 Some(":review-comments<ret>"),
@@ -1343,11 +1390,14 @@ async fn uncomment_drops_the_latest_pending_comments() -> anyhow::Result<()> {
             .map(|(_, element)| element.trim_end().to_owned())
     };
 
+    let mut app = AppBuilder::new()
+        .with_config(config)
+        .with_file(&repo.file, None)
+        .build()?;
+    // Comments that cannot be sent stay pending.
+    break_handoff(&mut app, repo.dir.path()).await?;
     test_key_sequences(
-        &mut AppBuilder::new()
-            .with_config(config)
-            .with_file(&repo.file, None)
-            .build()?,
+        &mut app,
         vec![
             (
                 // Review commands enable review against HEAD on their own.
@@ -2988,14 +3038,29 @@ async fn the_g_menu_runs_review_commands_next_to_user_keys() -> anyhow::Result<(
     let text = doc.text().slice(..);
     assert_eq!(doc.selection(view.id).primary().cursor_line(text), 1);
 
-    // The user's G l still extends, and G c opens the comment prompt prefilled.
+    // The user's G l still extends, and G c (like G a) sends a comment to the agent at once.
     send_keys(&mut app, "ggGl").await?;
     let (view, doc) = current_ref!(app.editor);
     assert_eq!(doc.selection(view.id).primary().to(), 2);
-    send_keys(&mut app, "Gclooks good<ret>").await?;
-    let comments = app.editor.review_batch.comments();
-    assert_eq!(comments.len(), 1);
-    assert_eq!(comments[0].comment, "looks good");
+    let outbox = tempfile::tempdir()?;
+    let handoff = format!(":review-handoff {}<ret>", outbox.path().display());
+    send_keys(&mut app, &handoff).await?;
+    for (keys, comment) in [
+        ("Gclooks good<ret>", "looks good"),
+        ("Gaand this<ret>", "and this"),
+    ] {
+        send_keys(&mut app, keys).await?;
+        assert_eq!(
+            app.editor.get_status().unwrap().0,
+            "Sent 1 comment to the agent"
+        );
+        let batches = take_batches(outbox.path());
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0]["request"], serde_json::json!({ "kind": "ask" }));
+        assert_eq!(batches[0]["comments"][0]["comment"], comment);
+        assert_eq!(batches[0]["comments"][0]["selected_text"], "on");
+    }
+    assert!(app.editor.review_batch.comments().is_empty());
     Ok(())
 }
 
@@ -3127,16 +3192,16 @@ async fn commit_review_handles_a_file_introduced_after_the_baseline() -> anyhow:
     repo.write("added later\n");
     repo.stage();
     git_ok(repo.dir.path(), &["commit", "-m", "add file"]);
-    let batch = repo.dir.path().join("added.json");
+    let outbox = tempfile::tempdir()?;
     let keys = format!(
-        ":review HEAD~1<ret>x:review-comment new file<ret>:review-export {}<ret>",
-        batch.display()
+        ":review-handoff {}<ret>:review HEAD~1<ret>x:review-comment new file<ret>",
+        outbox.path().display()
     );
     test_key_sequences(&mut repo.app()?, vec![(Some(&keys), Some(&|app| {
         assert_status_not_error(&app.editor);
         assert_eq!(doc!(app.editor).text(), "added later\n");
         assert!(doc!(app.editor).review.as_ref().unwrap().blocks().is_empty());
-        let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(&batch).unwrap()).unwrap();
+        let json = &take_batches(outbox.path())[0];
         assert_eq!(json["files"][0]["baseline"], serde_json::json!({"kind":"git-commit", "commit_oid":commit_oid, "blob_oid":null}));
         assert_eq!(json["comments"][0]["baseline"], json["files"][0]["baseline"]);
         assert_eq!(json["comments"][0]["side"], "current");
@@ -3159,17 +3224,16 @@ async fn comments_export_as_one_batch() -> anyhow::Result<()> {
     let export_existing = format!(":review-export {}<ret>", existing.display());
     let export_unsaved = format!("ix<esc>:review-export {}<ret>", batch.display());
     let export = format!("u:review-export {}<ret>", batch.display());
+    let mut app = repo.app()?;
+    // Comments that cannot be sent stay pending.
+    break_handoff(&mut app, repo.dir.path()).await?;
     test_key_sequences(
-        &mut repo.app()?,
+        &mut app,
         vec![
             (
                 Some(":review<ret>:review-old<ret>x:review-comment why gone?<ret><esc>x:review-comment keep this<ret>"),
                 Some(&|app| {
                     assert_eq!(pending(app), 2);
-                    assert_eq!(
-                        app.editor.get_status().unwrap().0.as_ref(),
-                        "2 pending review comments, :review-export <path> writes them"
-                    );
                     repo.write(staged);
                     repo.stage();
                 }),
@@ -3216,6 +3280,7 @@ async fn comments_export_as_one_batch() -> anyhow::Result<()> {
                         serde_json::json!({
                             "format": "helix-review-batch",
                             "version": 2,
+                            "request": { "kind": "ask" },
                             "files": [{ "path": file, "baseline": { "kind": "git-index", "blob_oid": file_oid } }],
                             "comments": [
                                 {
@@ -3407,8 +3472,9 @@ async fn handoff_exports_unmodified_reviews_on_write_and_suspends_auto_save() ->
     assert_eq!(repo.disk(), "xold\nkeep\n");
     assert_eq!(fs::read_dir(outbox.path())?.count(), 0);
 
+    // The comment writes the modified buffer, whose write exports the batch with it.
     let keys = format!(
-        ":o {}<ret>iz<esc>:review-comment still editing<ret>:o {}<ret>:review-comment mine<ret>:w<ret>",
+        ":o {}<ret>iz<esc>:o {}<ret>:review-comment mine<ret>",
         other.display(),
         repo.file.display()
     );
@@ -3425,8 +3491,10 @@ async fn handoff_exports_unmodified_reviews_on_write_and_suspends_auto_save() ->
         name.ends_with(&format!("-{}.json", std::process::id())),
         "{name}"
     );
-    let (status, _) = app.editor.get_status().unwrap();
-    assert!(status.contains(name), "{status}");
+    assert_eq!(
+        app.editor.get_status().unwrap().0,
+        "Sent 1 comment to the agent"
+    );
 
     let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(&exported[0])?)?;
     let baseline =
@@ -3440,9 +3508,7 @@ async fn handoff_exports_unmodified_reviews_on_write_and_suspends_auto_save() ->
     assert_eq!(json["comments"].as_array().unwrap().len(), 1);
     assert_eq!(json["comments"][0]["comment"], "mine");
     assert_eq!(json["comments"][0]["baseline"], baseline);
-    let pending = app.editor.review_batch.comments();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].comment, "still editing");
+    assert!(app.editor.review_batch.comments().is_empty());
 
     send_keys(&mut app, ":q!<ret>:q!<ret>").await?;
     Ok(())
@@ -3672,7 +3738,7 @@ async fn review_send_exports_the_handoff_batch_without_writing() -> anyhow::Resu
 
     let before = modified();
     let keys = format!(
-        ":review-handoff {}<ret>:review-comment looks good<ret>:review-send<ret>",
+        ":review-handoff {}<ret>:review-send<ret>",
         outbox.path().display()
     );
     send_keys(&mut app, &keys).await?;
@@ -3687,8 +3753,6 @@ async fn review_send_exports_the_handoff_batch_without_writing() -> anyhow::Resu
     let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(&batches[0])?)?;
     assert_eq!(json["files"][0]["path"], serde_json::json!(file));
     assert_eq!(json["files"][0]["baseline"]["commit_oid"], commit);
-    assert_eq!(json["comments"][0]["comment"], "looks good");
-    assert!(app.editor.review_batch.comments().is_empty());
 
     send_keys(&mut app, "ix<esc>:review-send<ret>").await?;
     assert_error(&app, "unsaved changes: file.txt");

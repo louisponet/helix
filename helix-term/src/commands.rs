@@ -507,8 +507,8 @@ impl MappableCommand {
         review_prev_change, "Go to the previous review change, across changed files",
         review_baseline_older, "Move the review baseline one commit older",
         review_baseline_newer, "Move the review baseline one commit newer",
-        review_comment_prompt, "Comment on the selection for the review",
-        review_ask_prompt, "Ask the agent about the selections",
+        review_comment_prompt, "Send a comment on the selections to the agent (a pending comment on a pull request)",
+        review_ask_prompt, "Send a comment on the selections to the agent (a pending comment on a pull request)",
         redo, "Redo change",
         earlier, "Move backward in history",
         later, "Move forward in history",
@@ -4928,7 +4928,7 @@ fn review_comment_prompt(cx: &mut Context) {
 }
 
 fn review_ask_prompt(cx: &mut Context) {
-    typed::command_mode_with_line(cx, "review-ask ")
+    typed::command_mode_with_line(cx, "review-comment ")
 }
 
 fn redo(cx: &mut Context) {

@@ -202,8 +202,8 @@
 | `review_prev_change` | Go to the previous review change, across changed files | normal: `` GN ``, `` <space>AN ``, select: `` GN ``, `` <space>AN `` |
 | `review_baseline_older` | Move the review baseline one commit older | normal: `` G<minus> ``, `` <space>A<minus> ``, select: `` G<minus> ``, `` <space>A<minus> `` |
 | `review_baseline_newer` | Move the review baseline one commit newer | normal: `` G+ ``, `` <space>A+ ``, select: `` G+ ``, `` <space>A+ `` |
-| `review_comment_prompt` | Comment on the selection for the review | normal: `` Gc ``, `` <space>Ac ``, select: `` Gc ``, `` <space>Ac `` |
-| `review_ask_prompt` | Ask the agent about the selections | normal: `` Ga ``, `` <space>Aa ``, select: `` Ga ``, `` <space>Aa `` |
+| `review_comment_prompt` | Send a comment on the selections to the agent (a pending comment on a pull request) | normal: `` Gc ``, `` <space>Ac ``, select: `` Gc ``, `` <space>Ac `` |
+| `review_ask_prompt` | Send a comment on the selections to the agent (a pending comment on a pull request) | normal: `` Ga ``, `` <space>Aa ``, select: `` Ga ``, `` <space>Aa `` |
 | `redo` | Redo change | normal: `` U ``, select: `` U `` |
 | `earlier` | Move backward in history | normal: `` <A-u> ``, select: `` <A-u> `` |
 | `later` | Move forward in history | normal: `` <A-U> ``, select: `` <A-U> `` |

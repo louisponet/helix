@@ -647,6 +647,8 @@ pub(super) fn review_revert(
     Ok(())
 }
 
+/// Outside a pull request review, hands every selection with `args` to the agent at once; while
+/// reviewing a pull request, adds a pending pull request comment or thread reply.
 pub(super) fn review_comment(
     cx: &mut compositor::Context,
     args: Args,
@@ -655,34 +657,29 @@ pub(super) fn review_comment(
     if event != PromptEvent::Validate {
         return Ok(());
     }
+    if cx.editor.review_pr.is_none() {
+        return send_comments(cx, &args[0]);
+    }
     ensure_review(cx)?;
     let mut comment = selection_comments(cx.editor, &args[0], false)?.remove(0);
-    if cx.editor.review_pr.is_some() {
-        // Pull request comments wait for :review-submit; on a thread's line they reply to it.
-        let (view, doc) = current_ref!(cx.editor);
-        let text = doc.text().slice(..);
-        let cursor = doc.selection(view.id).primary().cursor_line(text);
-        comment.reply_to = doc.review.as_ref().and_then(|review| {
-            review
-                .threads()
-                .iter()
-                .find(|thread| review.thread_anchor(thread, text.len_lines()).0 == cursor)
-                .map(|thread| thread.root_id())
-        });
-        let reply = comment.reply_to.is_some();
-        cx.editor.review_pr_comments.push(comment);
-        let pending = cx.editor.review_pr_comments.len();
-        cx.editor.set_status(format!(
-            "{}{}, :review-submit posts them",
-            if reply { "Reply added; " } else { "" },
-            plural(pending, "pending pull request comment")
-        ));
-        return Ok(());
-    }
-    let pending = cx.editor.review_batch.add_comment(comment);
+    // Pull request comments wait for :review-submit; on a thread's line they reply to it.
+    let (view, doc) = current_ref!(cx.editor);
+    let text = doc.text().slice(..);
+    let cursor = doc.selection(view.id).primary().cursor_line(text);
+    comment.reply_to = doc.review.as_ref().and_then(|review| {
+        review
+            .threads()
+            .iter()
+            .find(|thread| review.thread_anchor(thread, text.len_lines()).0 == cursor)
+            .map(|thread| thread.root_id())
+    });
+    let reply = comment.reply_to.is_some();
+    cx.editor.review_pr_comments.push(comment);
+    let pending = cx.editor.review_pr_comments.len();
     cx.editor.set_status(format!(
-        "{}, :review-export <path> writes them",
-        plural(pending, "pending review comment")
+        "{}{}, :review-submit posts them",
+        if reply { "Reply added; " } else { "" },
+        plural(pending, "pending pull request comment")
     ));
     Ok(())
 }
@@ -778,22 +775,17 @@ fn enclosing_text(doc: &Document, range: Range) -> Option<String> {
     Some(text.byte_slice(start..end).to_string())
 }
 
-pub(super) fn review_ask(
-    cx: &mut compositor::Context,
-    args: Args,
-    event: PromptEvent,
-) -> anyhow::Result<()> {
-    if event != PromptEvent::Validate {
-        return Ok(());
-    }
+/// Comments with `text` on every selection (or the selected old text) and hands the review off
+/// at once as a question, writing the buffer first if it is modified.
+fn send_comments(cx: &mut compositor::Context, text: &str) -> anyhow::Result<()> {
     ensure!(
         cx.editor.review_handoff_dir().is_some(),
         "no review handoff directory, use :review-handoff <dir> first"
     );
     ensure!(doc!(cx.editor).path().is_some(), "buffer has no path");
     ensure_review(cx)?;
-    let (target, message) = split_target(Some(&args[0]));
-    let message = message.context("the question is empty")?;
+    let (target, message) = split_target(Some(text));
+    let message = message.context("the comment is empty")?;
     let comments = selection_comments(cx.editor, message, true)?;
     let count = comments.len();
     for comment in comments {
@@ -815,12 +807,10 @@ pub(super) fn review_ask(
             },
         )?;
     } else {
-        hand_off(cx.editor, None, None, ":review-ask")?;
+        hand_off(cx.editor, None, None, ":review-comment")?;
     }
-    cx.editor.set_status(format!(
-        "Asked the agent about {}",
-        plural(count, "selection")
-    ));
+    cx.editor
+        .set_status(format!("Sent {} to the agent", plural(count, "comment")));
     Ok(())
 }
 
@@ -1611,7 +1601,11 @@ pub(crate) fn document_written(editor: &mut Editor, doc_id: DocumentId) {
     if doc!(editor, &doc_id).review.is_none() {
         return;
     }
+    let comments = editor.review_batch.comments().len();
     match export_handoff(editor, &dir) {
+        Ok(_) if comments > 0 => {
+            editor.set_status(format!("Sent {} to the agent", plural(comments, "comment")))
+        }
         Ok(path) => editor.set_status(format!("Exported review batch {}", path.display())),
         Err(err) => editor.set_error(format!("review handoff failed: {err:#}")),
     }
