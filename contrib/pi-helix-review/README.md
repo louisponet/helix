@@ -116,7 +116,9 @@ version moves into the first session's file. Ignore `.pi/` in Git.
   lines, selected text, enclosing code and message; you read the answer in
   pi, and the turn ends with the ordinary echo. pi sends `review-handoff <outbox>` and `review-baseline <commit>`,
   so Helix reviews every open file in the workspace against that commit and
-  writes a batch into the outbox whenever you save a reviewed file. It then
+  writes a batch into the outbox when you hand back explicitly
+  (`:review-comment`, `:review-send`, `:review-commit`, `:review-commit-all`;
+  saving hands nothing back). It then
   sends `echo pi-1: Agent turn started` to Helix's status line (every echo
   starts with the session's label, see below).
 - A new pi session (or `/reload`) attaches to Helix: it sends
@@ -143,26 +145,22 @@ version moves into the first session's file. Ignore `.pi/` in Git.
 - Each batch in the outbox becomes one `helix-review:handoff` message (entries
   under `<repo>/.pi/` are skipped): your edits as unified-diff hunks against the turn snapshot (or the batch's
   baseline blob when there is none; at most 200 hunk lines per file, the rest
-  summarized with `truncated: true`), every `AGENT: <request>` line in the
-  saved file (marked `new` when you added it in this review), and the review
-  comments. It starts a turn when pi is idle and steers the running turn
+  summarized with `truncated: true`) and the review comments. It starts a turn when pi is idle and steers the running turn
   otherwise. A batch can also carry a request from `:review-commit [subject]`
   (commit exactly what is staged, touching nothing else, and report the hash)
   or `:review-send <text>` (a free-text instruction); the message then ends
   with a "User request" section, and such a batch is sent even without edits
   or comments. The baseline is then acknowledged and the batch deleted. A batch
-  with no edits, markers, comments or request is dropped without a message but
+  with no edits, comments or request is dropped without a message but
   still acknowledged. Either way pi echoes a receipt to Helix's status line, such as
-  `pi-1 received your review: 2 files with edits, 1 AGENT comment, 1 review
-  comment` or `pi-1 received your review: nothing to do`. Invalid batches stay
+  `pi-1 received your review: 2 files with edits, 1 review comment` or `pi-1 received your review: nothing to do`. Invalid batches stay
   in the outbox untouched.
-- While the mailbox exists, the system prompt explains the handoff and the
-  `AGENT:` convention: a handoff can arrive mid-turn as a steering message;
-  integrate your edits and never revert them, keeping parts of the agent's
-  change you undid undone (with tests and docs adjusted); treat old
-  (`new: false`) `AGENT:` lines as possibly documentation; address each
-  `AGENT:` request and delete its marker once handled; report per file
-  what was integrated or declined; and never commit or push on its own, even
+- While the mailbox exists, the system prompt explains the handoff: you hand
+  back explicit requests (review comments on selections, a message, a commit
+  request), possibly mid-turn as a steering message; integrate your edits
+  since the agent's turn snapshot and never revert them, keeping parts of the
+  agent's change you undid undone (with tests and docs adjusted); report per
+  file what was integrated or declined; and never commit or push on its own, even
   when other instructions say to, but only commit exactly the index when a
   `:review-commit` (commit-staged) handoff asks for it, so your partial
   staging in Helix is not swallowed.

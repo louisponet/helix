@@ -168,10 +168,9 @@ quoted as a fenced JSON block in its content, is:
       "path": "/abs/repo/src/lib.rs",
       "user_edits": {
         "against": "turn-snapshot",
-        "hunks": ["@@ -3 +3,2 @@\n-fn b() {}\n+fn b() -> u8 { 1 }\n+// AGENT: rename b\n"],
+        "hunks": ["@@ -3 +3 @@\n-fn b() {}\n+fn b() -> u8 { 1 }\n"],
         "truncated": false
       },
-      "agent_comments": [{ "line": 4, "text": "rename b", "new": true }],
       "review_comments": [
         {
           "side": "current",
@@ -196,11 +195,10 @@ quoted as a fenced JSON block in its content, is:
 | `files[].user_edits.against` | `"turn-snapshot"`: the file as the agent left it at the end of its last turn. `"baseline"`: the batch's baseline blob for the file (empty when absent). |
 | `files[].user_edits.hunks` | Unified-diff hunks (`git diff` of the raw bytes) from that content to the saved file. Whole hunks are kept up to 200 lines per file; the rest are replaced by one entry such as `"... 3 more hunks (480 lines) omitted; read the file"`. |
 | `files[].user_edits.truncated` | `true` when hunks were omitted that way, else `false`. |
-| `files[].agent_comments` | Every line of the saved file matching `/\bAGENT:\s*(.+)$/`: 1-based `line`, the request `text`, and `new` when the line is not in the compared-against content. |
 | `files[].review_comments` | The batch's comments for the file, with the batch fields except `path` and `baseline`. |
 | `request` | The batch's `request`, when it has one. The message content then ends with a "User request" section: for `commit-staged`, an instruction to commit exactly what is staged (`git commit` without `-a`, a Conventional Commit message derived from `git diff --cached`, the subject if given), touch nothing else and report the commit hash; for `message`, the text verbatim; for `ask`, an instruction to do what the message asks, followed by each comment: path, lines, and the fenced selected text, enclosing code (when present) and message. |
 
-Files without edits, markers or comments are omitted; a handoff with no files
+Files without edits or comments are omitted; a handoff with no files
 and no request is not sent.
 
 After a handoff with a `commit-staged` request, the hook checks `HEAD` at the

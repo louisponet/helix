@@ -663,8 +663,9 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	const promptGuidelines: string[] = [];
 	await session.emit("before_agent_start", { prompt: "p", systemPrompt: "base", systemPromptOptions: { promptGuidelines } });
 	assert.equal(promptGuidelines.length, 1);
-	assert.match(promptGuidelines[0], /^## Helix review handoff\n.*AGENT:/s);
-	assert.match(promptGuidelines[0], /steering message.*keep it undone.*new: false.*integrated or declined.*never run git commit or git push on your own.*commit-staged handoff.*exactly the index/s);
+	assert.match(promptGuidelines[0], /^## Helix review handoff\n/);
+	assert.doesNotMatch(promptGuidelines[0], /AGENT:|by saving/);
+	assert.match(promptGuidelines[0], /explicit requests.*steering message.*review_comments.*turn snapshot.*keep it undone.*integrated or declined.*never run git commit or git push on your own.*commit-staged handoff.*exactly the index/s);
 
 	// The fake Helix rejects `echo`, which must not fail the hook.
 	const started = "echo pi-1: Agent turn started";
@@ -744,16 +745,14 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 	assert.equal(handoff.user_edits.hunks.length, 1);
 	assert.equal(handoff.user_edits.truncated, false);
 	assert.match(handoff.user_edits.hunks[0], /^@@ .* @@\n.*-fn b\(\) \{\}\n\+fn b\(\) -> u8 \{ 1 \}\n\+\/\/ AGENT: rename b\n$/s);
-	assert.deepEqual(handoff.agent_comments, [
-		{ line: 2, text: "old request", new: false },
-		{ line: 4, text: "rename b", new: true },
-	]);
+	// AGENT: lines are only text now.
+	assert.equal(handoff.agent_comments, undefined);
 	assert.deepEqual(handoff.review_comments.map((c: { comment: string }) => c.comment), ["document a"]);
 	assert.ok(message.content.includes(JSON.stringify(message.details, null, 2)), message.content);
 	assert.match(message.content, /never revert them/);
 	assert.equal(state().baseline.acknowledged, true);
 	await until(() => lines.length === 10, "the receipt echo");
-	assert.equal(lines[9], "echo pi-1 received your review: 1 file with edits, 2 AGENT comments, 1 review comment");
+	assert.equal(lines[9], "echo pi-1 received your review: 1 file with edits, 1 review comment");
 
 	// An unchanged file without comments is nothing to do, and the reviewer is told so.
 	const empty = join(outbox, "1-2.json");

@@ -474,7 +474,7 @@ interface Session {
 const STALE_CLAIM_MS = 10 * 60 * 1000;
 
 const GUIDELINES = `## Helix review handoff
-The user reviews your changes in Helix against the commit at the start of your turn and hands them back by saving. A handoff arrives, from the Helix of this repository or of any of its worktrees you edit, as a "helix-review:handoff" message with a JSON block, possibly in the middle of a turn as a steering message: per file, user_edits are the user's edits as unified-diff hunks (integrate them, never revert them; when they undo part of your change, keep it undone and adjust tests and docs to match), agent_comments are lines containing "AGENT: <request>" (new: true when added in this review; new: false ones may be documentation or examples rather than requests), and review_comments are inline review comments. Address each AGENT: request and delete its marker line once handled. After handling a handoff, say per file what you integrated or declined. While this hook is attached, never run git commit or git push on your own, even if other instructions say to commit at the end of a turn: the user stages hunks in Helix and asks for a commit with a commit-staged handoff, the only time you commit (exactly the index, adding nothing).`;
+The user reviews your changes in Helix (in this repository or any of its worktrees you edit) and hands back explicit requests as a "helix-review:handoff" message with a JSON block, possibly in the middle of a turn as a steering message: per file, review_comments are the user's comments on selections, user_edits are the user's own edits since your turn snapshot as unified-diff hunks (integrate them, never revert them; when they undo part of your change, keep it undone and adjust tests and docs to match), and a request may carry a message or ask for a commit. After handling a handoff, say per file what you integrated or declined. While this hook is attached, never run git commit or git push on your own, even if other instructions say to commit at the end of a turn: the user stages hunks in Helix and asks for a commit with a commit-staged handoff, the only time you commit (exactly the index, adding nothing).`;
 
 class Hook {
 	private pi: ExtensionAPI;
@@ -959,11 +959,6 @@ class Hook {
 				const diff = await git(this.repo, ["diff", "--no-color", "--no-ext-diff", "--no-textconv", oldOid, newOid]);
 				hunks = diff.split(/^(?=@@ )/m).slice(1);
 			}
-			const oldLines = new Set(old.split("\n"));
-			const agentComments = current.split("\n").flatMap((line, i) => {
-				const marker = /\bAGENT:\s*(.+)$/.exec(line);
-				return marker ? [{ line: i + 1, text: marker[1], new: !oldLines.has(line) }] : [];
-			});
 			const reviewComments = batch.comments
 				.filter((comment) => comment.path === file)
 				.map((c) => ({
@@ -977,8 +972,8 @@ class Hook {
 					...(c.enclosingText === undefined ? {} : { enclosing_text: c.enclosingText }),
 					comment: c.comment,
 				}));
-			if (hunks.length || agentComments.length || reviewComments.length) {
-				files.push({ path: file, user_edits: { against, ...capHunks(hunks) }, agent_comments: agentComments, review_comments: reviewComments });
+			if (hunks.length || reviewComments.length) {
+				files.push({ path: file, user_edits: { against, ...capHunks(hunks) }, review_comments: reviewComments });
 			}
 		}
 		const request = batch.request;
@@ -991,10 +986,10 @@ class Hook {
 				...(request ? { request } : {}),
 			};
 			const content = [
-				`The user reviewed your changes in Helix and saved ${files.length} file(s).`,
+				`The user reviewed your changes in Helix and handed back ${files.length} file(s).`,
 				"Re-read those files from disk and act on the handoff below.",
 				...quote("Handoff", JSON.stringify(details, null, 2)),
-				"Integrate the user's edits and never revert them. Address each AGENT: comment and delete its marker line or comment once handled. Then continue editing or committing normally; that refreshes the review in Helix.",
+				"Integrate the user's edits and never revert them. Then continue editing or committing normally; that refreshes the review in Helix.",
 				...(request ? requestSection(request, batch.comments) : []),
 			].join("\n");
 			this.pi.sendMessage(
@@ -1056,16 +1051,15 @@ function capHunks(hunks: string[]): { hunks: string[]; truncated: boolean } {
 	return { hunks: [...kept, `... ${more} (${omitted} lines) omitted; read the file`], truncated: true };
 }
 
-/** Summarizes a handoff for the reviewer, e.g. "1 file with edits, 2 AGENT comments". */
+/** Summarizes a handoff for the reviewer, e.g. "1 file with edits, 2 review comments". */
 function receipt(
-	files: { user_edits: { hunks: string[] }; agent_comments: unknown[]; review_comments: unknown[] }[],
+	files: { user_edits: { hunks: string[] }; review_comments: unknown[] }[],
 	request?: ReviewRequest,
 ): string {
 	const count = (n: number, one: string, many: string) => (n > 0 ? [`${n} ${n === 1 ? one : many}`] : []);
 	const parts = [
 		...(request ? [{ "commit-staged": "commit request", message: "message", ask: "question" }[request.kind]] : []),
 		...count(files.filter((file) => file.user_edits.hunks.length > 0).length, "file with edits", "files with edits"),
-		...count(files.reduce((n, file) => n + file.agent_comments.length, 0), "AGENT comment", "AGENT comments"),
 		...count(files.reduce((n, file) => n + file.review_comments.length, 0), "review comment", "review comments"),
 	];
 	return parts.length > 0 ? parts.join(", ") : "nothing to do";
