@@ -52,13 +52,13 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept. Under a `:review-baseline`, the buffer is not reviewed again until a different baseline, `:review-baseline clear`, or an explicit `:review` on it. |
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. Refuses a commit that is not `HEAD` or one of its ancestors (`commit <commit> is not in this branch's history`), such as a branch tip a rebase rewrote. `clear` closes all reviews. `:review-baseline <revision> force` adopts the commit even over a baseline pinned by you, ending the pin (the pi hook sends it after a commit you asked for). |
 | `:review-pr <number\|url>` | Review a GitHub pull request: check it out with `gh pr checkout` and review every buffer against its merge base with the base branch. Refuses uncommitted changes and unsaved reviewed buffers. `close` leaves the pull request review and keeps the checkout. See [Reviewing pull requests](#reviewing-pull-requests). |
-| `:review-submit [approve\|request-changes\|comment] [summary]` | Post the pending pull request comments as one review (see [Reviewing pull requests](#reviewing-pull-requests)). `G m` opens it while reviewing a pull request. |
-| `:review-commit-all [subject]` | Stage every file changed since the baseline (modified, deleted and untracked, like `git add -A` limited to them), then hand back like `:review-commit`. Refuses unsaved reviewed buffers, and says `no changes since <commit>` when there is nothing. `G M` in the default keymap. |
-| `:review-next` | Go to the next changed block that is unstaged or staged, skipping hunks committed since the baseline; after the last one, open the next file changed since the baseline with such a block (`:review-files` order, wrapping around) at its first one. Shows `<file>: hunk 2 of 5`, counting only those blocks, or `no uncommitted changes since <commit>` when there are none. `G n` in the default keymap, which takes a count. |
-| `:review-prev` | Like `:review-next` backwards, landing on the previous file's last block. `G N` in the default keymap. |
-| `:review-baseline-pick` | Pick the baseline from the first-parent history of `HEAD` (up to 300 commits: commit, age, author, subject), with `●` on the current baseline, `base` on the merge base with the base branch (the pull request's while reviewing one, else `origin/HEAD`, `develop`, `main` or `master`), `pi` on the baseline the pi hook last sent and `HEAD` marked; the current baseline is preselected. Choosing a commit works like `:review-baseline <commit>` and pins it as yours (`*`), except the `pi` row, which follows the hook again. `G b` in the default keymap; `G B` refreshes the buffer's review. |
-| `:review-older` | Move the baseline to its first parent (pinning `HEAD` first when none is set) and refresh every review; the status shows `Baseline <commit> <subject> (N behind HEAD)`. `G -` in the default keymap. |
-| `:review-newer` | Move the baseline to the next commit towards `HEAD` on its ancestry path and refresh every review. `G +` in the default keymap. |
+| `:review-submit [approve\|request-changes\|comment] [summary]` | Post the pending pull request comments as one review (see [Reviewing pull requests](#reviewing-pull-requests)). `Space A m` opens it while reviewing a pull request. |
+| `:review-commit-all [subject]` | Stage every file changed since the baseline (modified, deleted and untracked, like `git add -A` limited to them), then hand back like `:review-commit`. Refuses unsaved reviewed buffers, and says `no changes since <commit>` when there is nothing. `Space A M` in the default keymap. |
+| `:review-next` | Go to the next changed block that is unstaged or staged, skipping hunks committed since the baseline; after the last one, open the next file changed since the baseline with such a block (`:review-files` order, wrapping around) at its first one. Shows `<file>: hunk 2 of 5`, counting only those blocks, or `no uncommitted changes since <commit>` when there are none. `Space A n` in the default keymap, which takes a count. |
+| `:review-prev` | Like `:review-next` backwards, landing on the previous file's last block. `Space A N` in the default keymap. |
+| `:review-baseline-pick` | Pick the baseline from the first-parent history of `HEAD` (up to 300 commits: commit, age, author, subject), with `●` on the current baseline, `base` on the merge base with the base branch (the pull request's while reviewing one, else `origin/HEAD`, `develop`, `main` or `master`), `pi` on the baseline the pi hook last sent and `HEAD` marked; the current baseline is preselected. Choosing a commit works like `:review-baseline <commit>` and pins it as yours (`*`), except the `pi` row, which follows the hook again. `Space A b` in the default keymap; `Space A B` refreshes the buffer's review. |
+| `:review-older` | Move the baseline to its first parent (pinning `HEAD` first when none is set) and refresh every review; the status shows `Baseline <commit> <subject> (N behind HEAD)`. `Space A -` in the default keymap. |
+| `:review-newer` | Move the baseline to the next commit towards `HEAD` on its ancestry path and refresh every review. `Space A +` in the default keymap. |
 | `:review-handoff <dir>` | Export the batches of the explicit handoffs (`:review-comment`, `:review-send`, `:review-commit`, `:review-commit-all`) to `<dir>`. Writing a buffer never hands anything off. Without it, the default is `<workspace>/.pi/helix-review/outbox` when that directory exists (the pi extension creates it) and every reviewed file and pending comment is in the workspace. `clear` returns to that default. |
 | `:review-send [text]` | Export the handoff batch now without writing any file, for example to acknowledge a review without edits; optional text goes to the agent as an instruction (the batch's `request`). A leading `@label` (`:review-send @pi-2 [text]`) addresses one of several pi sessions (the batch's `target`). |
 | `:review-commit [subject]` | Hand back like `:review-send`, asking the agent to commit exactly what is staged in the git index (optionally with that subject, and addressed to a session with a leading `@label`). Refuses when nothing is staged, naming how many of the buffer's hunks are already committed in `HEAD` if any. |
@@ -204,7 +204,7 @@ like this:
    unstages them all when all are staged (`Staged 3 hunks; 5 of 7 staged in
    file.rs`); after staging the cursor moves on to the next unstaged hunk, in
    this file or the next changed one (`; next: b.rs hunk 1 of 2`), and stays
-   when none is left; after unstaging it stays on the hunk. On a line with nothing to stage, `Enter` (and `G s`) jumps to the
+   when none is left; after unstaging it stays on the hunk. On a line with nothing to stage, `Enter` (and `Space A s`) jumps to the
    next unstaged hunk instead (`next: b.rs hunk 2 of 5`, or `nothing unstaged
    since <commit>`), from a reviewed buffer,
    focused old text or the `:review-diff` buffer, where staged hunks are marked
@@ -218,7 +218,7 @@ like this:
    with newer edits next to them acts as one unit: `Enter` anywhere in it
    stages its uncommitted part (`Staged 1 hunk, 1 already committed`). While reviewing, `Enter` in
    normal mode is taken by this; elsewhere it does nothing.
-7. `:review-comment <text>` (`G c` or `G a`) sends a comment on the current
+7. `:review-comment <text>` (`Space A c` or `Space A a`) sends a comment on the current
    selections (several are fine), or on the selected old text while it is
    focused, to the agent at once, writing the buffer first if needed
    (`Sent 2 comments to the agent`). You watch the agent's edits arrive and
@@ -229,11 +229,11 @@ like this:
 8. Your own edits are ordinary worktree changes: save them as usual (auto-save
    included), and stage them like any other hunk. Saving tells the agent
    nothing.
-9. Hand the review back explicitly: `:review-send` (`G S`) exports your saved
+9. Hand the review back explicitly: `:review-send` (`Space A S`) exports your saved
    edits since the agent's turn and any pending comments;
    `:review-send <text>` adds an instruction for the agent. `:review-commit [subject]` hands back and asks
    the agent to commit exactly what you staged (and nothing else);
-   `:review-commit-all [subject]` (`G M`) stages everything first. The status
+   `:review-commit-all [subject]` (`Space A M`) stages everything first. The status
    line then confirms it, for example `pi-1 received your review: 1 file with
    edits, 1 review comment`. With several pi sessions hooked to the repository,
    a handoff goes to the session that last changed its files (the `agent`
@@ -244,26 +244,26 @@ The baseline stays on the same commit until a handoff is received, so a
 following agent turn is still reviewed against the commit you started from.
 The first turn after a handoff moves the baseline to the then current `HEAD`.
 
-`G b` (`:review-baseline-pick`) picks any commit of the branch history as the
+`Space A b` (`:review-baseline-pick`) picks any commit of the branch history as the
 baseline, with the current baseline, the merge base with the base branch, the
 baseline the pi hook last sent (`pi`) and `HEAD` marked. `:review-older` and
-`:review-newer` (`G -`, `G +`) step the baseline through history, for example
+`:review-newer` (`Space A -`, `Space A +`) step the baseline through history, for example
 to see what the last few commits changed. A baseline you choose this way, or
 with a typed `:review-baseline <commit>`, is pinned by you: the statusline's
 baseline gets a trailing `*`, and the pi hook's `:review-baseline`, whatever
 commit it sends, only refreshes the reviews against yours. Picking the `pi`
-row in `G b` (or stepping onto the hook's baseline) ends the pin and follows
+row in `Space A b` (or stepping onto the hook's baseline) ends the pin and follows
 the hook again, as does `:review-baseline clear`, after which the hook's next
-refresh pins its baseline. A commit you asked for (`G m`, `G M`) releases your
+refresh pins its baseline. A commit you asked for (`Space A m`, `Space A M`) releases your
 pin too: the hook then sends the new commit with `force`, and the review moves
 on to it.
 
-These commands are built into the default keymap under `G` in normal mode
-(see [review mode](./keymap.md#review-mode)): `G f` picks a file, `G d` shows the
-diff, `G o` focuses old text, `G c` and `G a` send a comment to the agent (`G C` lists pending ones), `G s` stages, `G m` asks the agent
-to commit (`G M` stages everything first) and `G n` / `G N` move between changes not yet committed, on into the next or previous
+These commands are built into the default keymap under `Space A` in normal mode
+(see [review mode](./keymap.md#review-mode)): `Space A f` picks a file, `Space A d` shows the
+diff, `Space A o` focuses old text, `Space A c` and `Space A a` send a comment to the agent (`Space A C` lists pending ones), `Space A s` stages, `Space A m` asks the agent
+to commit (`Space A M` stages everything first) and `Space A n` / `Space A N` move between changes not yet committed, on into the next or previous
 changed file (`:review-files` order, wrapping around) at its edge. Keys you map under
-`[keys.normal.G]` in `config.toml` are added to that menu.
+`[keys.normal.space.A]` in `config.toml` are added to that menu.
 
 As an alternative, a keymap under `Space r`, for `config.toml`. It replaces
 the default `Space r` (rename symbol); pick another key to keep it.
@@ -300,17 +300,17 @@ It talks to GitHub through the [`gh`](https://cli.github.com) CLI (`$HELIX_GH`
 when set, else `gh` on `PATH`), in the background: it looks the pull request
 up, runs `gh pr checkout` (which also works for forks), and pins the merge base
 of the base branch and the checked-out head as the review baseline, so every
-buffer, `:review-files`, `:review-diff` and `G n` show exactly the pull
+buffer, `:review-files`, `:review-diff` and `Space A n` show exactly the pull
 request's changes. The status reads `Reviewing PR #123 <title>: N files
 against <base branch> at <merge base>`, and the `review` statusline element
 starts with `#123`. It refuses while the worktree has uncommitted changes.
 
 The pull request's baseline stays pinned: the pi hook re-sending its own
-baseline only refreshes the reviews. `G -` / `G +` still step through history
-(`G +` from the merge base walks the pull request's commits). Running
+baseline only refreshes the reviews. `Space A -` / `Space A +` still step through history
+(`Space A +` from the merge base walks the pull request's commits). Running
 `:review-baseline` yourself leaves the pull request review, and so does
 `:review-pr close`, which keeps the checkout. After the branch was rebased onto
-a newer base, `:review-refresh` (`G B`) moves the baseline to the new merge
+a newer base, `:review-refresh` (`Space A B`) moves the baseline to the new merge
 base (`Baseline moved to <commit> after a rebase`). `:review-pr` also works over the
 command socket, so other tools can open a pull request in Helix.
 
@@ -320,15 +320,15 @@ are shown as threads above the line they are on, greyed
 A comment on the base side is shown above the change that removed its line,
 tagged `(old side)`; one on a line the pull request has since changed is
 shown at its original line, tagged `(outdated)`. They reload with
-`:review-refresh` (`G B`). `G C` lists them next to your pending comments.
+`:review-refresh` (`Space A B`). `Space A C` lists them next to your pending comments.
 
-While reviewing a pull request, `G c` (`:review-comment`) collects comments
+While reviewing a pull request, `Space A c` (`:review-comment`) collects comments
 for the pull request instead of for pi: they are kept out of the batches
 handed to pi (`:review-send`, `:review-commit`), and a comment on a
 line with a thread replies to it. `:review-ask` is the same command, so it does
 likewise.
 
-`:review-submit [approve|request-changes|comment] [summary]` (`G m` opens it
+`:review-submit [approve|request-changes|comment] [summary]` (`Space A m` opens it
 while reviewing a pull request) posts them as one review on the pull request's
 head commit, with the summary as its body (`comment` by default). A comment on
 lines of the pull request's diff (changed lines and 3 lines around them, on

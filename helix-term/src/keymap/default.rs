@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use super::macros::keymap;
 use super::{KeyTrie, Mode};
 use helix_core::hashmap;
-use helix_view::input::KeyEvent;
 
 pub fn default() -> HashMap<Mode, KeyTrie> {
     let normal = keymap!({ "Normal mode"
@@ -36,28 +35,7 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         "E" => move_next_long_word_end,
 
         "v" => select_mode,
-        "G" => { "Review"
-            "f" => review_files_picker,
-            "d" => review_diff_buffer,
-            "g" => review_diff_open_hunk,
-            "o" => review_old_text,
-            "c" => review_comment_prompt,
-            "a" => review_ask_prompt,
-            "C" => review_comments_picker,
-            "u" => review_uncomment_latest,
-            "s" => review_toggle_stage,
-            "r" => review_revert_change,
-            "x" => review_close_buffer,
-            "b" => review_baseline_picker,
-            "B" => review_refresh_buffer,
-            "m" => review_commit_staged,
-            "M" => review_commit_all,
-            "S" => review_send_handoff,
-            "-" => review_baseline_older,
-            "+" => review_baseline_newer,
-            "n" => review_next_change,
-            "N" => review_prev_change,
-        },
+        "G" => goto_line,
         "g" => { "Goto"
             "g" => goto_file_start,
             "|" => goto_column,
@@ -248,6 +226,28 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         "space" => { "Space"
             "f" => file_picker,
             "F" => file_picker_in_current_directory,
+            "A" => { "Review"
+                "f" => review_files_picker,
+                "d" => review_diff_buffer,
+                "g" => review_diff_open_hunk,
+                "o" => review_old_text,
+                "c" => review_comment_prompt,
+                "a" => review_ask_prompt,
+                "C" => review_comments_picker,
+                "u" => review_uncomment_latest,
+                "s" => review_toggle_stage,
+                "r" => review_revert_change,
+                "x" => review_close_buffer,
+                "b" => review_baseline_picker,
+                "B" => review_refresh_buffer,
+                "m" => review_commit_staged,
+                "M" => review_commit_all,
+                "S" => review_send_handoff,
+                "-" => review_baseline_older,
+                "+" => review_baseline_newer,
+                "n" => review_next_change,
+                "N" => review_prev_change,
+            },
             "e" => file_explorer,
             "." => file_explorer_in_current_buffer_directory,
             "b" => buffer_picker,
@@ -362,15 +362,6 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         "C-a" => increment,
         "C-x" => decrement,
     });
-    // The Review menu is also reachable as Space A.
-    let mut normal = normal;
-    let review = normal.search(&["G".parse().unwrap()]).unwrap().clone();
-    let space: KeyEvent = "space".parse().unwrap();
-    let space = normal.node_mut().unwrap().get_mut(&space);
-    match space {
-        Some(KeyTrie::Node(space)) => space.insert("A".parse().unwrap(), review),
-        _ => unreachable!("space is a menu"),
-    };
     let mut select = normal.clone();
     select.merge_nodes(keymap!({ "Select mode"
         "h" | "left" => extend_char_left,

@@ -53,7 +53,7 @@ Normal mode is the default mode when you launch helix. You can return to it from
 | `f`                   | Find next char                                     | `find_next_char`            |
 | `T`                   | Find till previous char                            | `till_prev_char`            |
 | `F`                   | Find previous char                                 | `find_prev_char`            |
-| `<n>gg`               | Go to line number `<n>`                            | `goto_line`                 |
+| `<n>G`, `<n>gg`       | Go to line number `<n>`                            | `goto_line`                 |
 | `Alt-.`               | Repeat last motion (`f`, `t`, `m`, `[` or `]`)     | `repeat_last_motion`        |
 | `Home`                | Move to the start of the line                      | `goto_line_start`           |
 | `End`                 | Move to the end of the line                        | `goto_line_end`             |
@@ -181,7 +181,6 @@ These sub-modes are accessible from normal mode and typically switch back to nor
 | `Z`      | Enter sticky [view mode](#view-mode)               | N/A            |
 | `Ctrl-w` | Enter [window mode](#window-mode)                  | N/A            |
 | `Space`  | Enter [space mode](#space-mode)                    | N/A            |
-| `G`      | Enter [review mode](#review-mode)                  | N/A            |
 
 These modes (except command mode) can be configured by
 [remapping keys](https://docs.helix-editor.com/remapping.html#minor-modes).
@@ -360,9 +359,8 @@ Displays the signature of the selected completion item. Remapping currently not 
 
 #### Review mode
 
-Accessed by typing `G` or `Space A` in [normal mode](#normal-mode). The commands work on
-the [inline review](./review.md) and start one against `HEAD` when needed. `G`
-used to go to a line; use `<n>gg` for that.
+Accessed by typing `Space A` in [normal mode](#normal-mode). The commands work on
+the [inline review](./review.md) and start one against `HEAD` when needed.
 
 | Key | Description                                                  | Command                  |
 | --- | -----------                                                  | -------                  |

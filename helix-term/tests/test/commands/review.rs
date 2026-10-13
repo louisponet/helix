@@ -2217,7 +2217,7 @@ async fn the_baseline_steps_through_history_and_survives_the_hooks_refresh() -> 
         review(&app),
         format!("{}* 2 hunks 1 committed", &second[..8])
     );
-    send_keys(&mut app, "G-").await?;
+    send_keys(&mut app, "<space>A-").await?;
     assert_eq!(
         status(&app),
         format!("Baseline {} head (2 behind HEAD)", &first[..8])
@@ -2241,7 +2241,7 @@ async fn the_baseline_steps_through_history_and_survives_the_hooks_refresh() -> 
         review(&app),
         format!("{}* 2 hunks 1 committed", &second[..8])
     );
-    send_keys(&mut app, "G+").await?;
+    send_keys(&mut app, "<space>A+").await?;
     assert_eq!(
         status(&app),
         format!("Baseline {} third (0 behind HEAD)", &third[..8])
@@ -2268,7 +2268,7 @@ async fn the_baseline_steps_through_history_and_survives_the_hooks_refresh() -> 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn g_n_walks_changes_across_files_and_wraps_around() -> anyhow::Result<()> {
+async fn review_next_walks_changes_across_files_and_wraps_around() -> anyhow::Result<()> {
     let lines = (1..=20).map(|n| format!("{n}\n")).collect::<String>();
     let changed = (1..=20)
         .map(|n| match n {
@@ -2305,21 +2305,21 @@ async fn g_n_walks_changes_across_files_and_wraps_around() -> anyhow::Result<()>
     };
 
     // file.txt's hunks are on lines 2 and 15 (1-based); other.txt's on line 1.
-    send_keys(&mut app, "Gn").await?;
+    send_keys(&mut app, "<space>An").await?;
     assert_eq!(at(&app), ("file.txt".to_owned(), 1));
     assert_eq!(status(&app), "file.txt: hunk 1 of 2");
-    send_keys(&mut app, "Gn").await?;
+    send_keys(&mut app, "<space>An").await?;
     assert_eq!(at(&app), ("file.txt".to_owned(), 14));
-    send_keys(&mut app, "Gn").await?;
+    send_keys(&mut app, "<space>An").await?;
     assert_eq!(at(&app), ("other.txt".to_owned(), 0));
     assert_eq!(status(&app), "other.txt: hunk 1 of 1");
-    send_keys(&mut app, "GN").await?;
+    send_keys(&mut app, "<space>AN").await?;
     assert_eq!(at(&app), ("file.txt".to_owned(), 14));
     assert_eq!(status(&app), "file.txt: hunk 2 of 2");
     // Wrapping: past other.txt's last hunk comes file.txt's first, and back again.
-    send_keys(&mut app, "2Gn").await?;
+    send_keys(&mut app, "2<space>An").await?;
     assert_eq!(at(&app), ("file.txt".to_owned(), 1));
-    send_keys(&mut app, "GN").await?;
+    send_keys(&mut app, "<space>AN").await?;
     assert_eq!(at(&app), ("other.txt".to_owned(), 0));
     send_keys(&mut app, ":review-prev<ret>").await?;
     assert_eq!(at(&app), ("file.txt".to_owned(), 14));
@@ -2327,7 +2327,7 @@ async fn g_n_walks_changes_across_files_and_wraps_around() -> anyhow::Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn g_n_skips_committed_hunks_and_files() -> anyhow::Result<()> {
+async fn review_next_skips_committed_hunks_and_files() -> anyhow::Result<()> {
     let lines = (1..=20).map(|n| format!("{n}\n")).collect::<String>();
     let changing = |changed: &[usize]| {
         (1..=20)
@@ -2366,22 +2366,22 @@ async fn g_n_skips_committed_hunks_and_files() -> anyhow::Result<()> {
     let pin = format!(":review-baseline {baseline}<ret>");
     send_keys(&mut app, &pin).await?;
 
-    send_keys(&mut app, "ggGn").await?;
+    send_keys(&mut app, "gg<space>An").await?;
     assert_eq!(at(&app), ("file.txt".to_owned(), 8));
     assert_eq!(status(&app), "file.txt: hunk 1 of 2");
-    send_keys(&mut app, "Gn").await?;
+    send_keys(&mut app, "<space>An").await?;
     assert_eq!(at(&app), ("file.txt".to_owned(), 14));
     assert_eq!(status(&app), "file.txt: hunk 2 of 2");
     // other.txt holds only committed hunks: rolling over skips it and wraps around.
-    send_keys(&mut app, "Gn").await?;
+    send_keys(&mut app, "<space>An").await?;
     assert_eq!(at(&app), ("file.txt".to_owned(), 8));
-    send_keys(&mut app, "GN").await?;
+    send_keys(&mut app, "<space>AN").await?;
     assert_eq!(at(&app), ("file.txt".to_owned(), 14));
 
     // With everything committed, there is nowhere to go.
     git_ok(dir, &["commit", "-am", "rest"]);
     send_keys(&mut app, &pin).await?;
-    send_keys(&mut app, "Gn").await?;
+    send_keys(&mut app, "<space>An").await?;
     assert_error(
         &app,
         &format!("no uncommitted changes since {}", &baseline[..8]),
@@ -2421,7 +2421,7 @@ async fn commit_all_stages_every_changed_file_and_asks_for_a_commit() -> anyhow:
     );
 
     git_ok(dir, &["commit", "-m", "all"]);
-    send_keys(&mut app, ":review-baseline HEAD<ret>GM").await?;
+    send_keys(&mut app, ":review-baseline HEAD<ret><space>AM").await?;
     assert_error(&app, "no changes since");
     Ok(())
 }
@@ -2677,15 +2677,15 @@ async fn review_pr_shows_comment_threads_and_keeps_pr_comments_out_of_the_mailbo
     assert_eq!(at("  carol │ because") + 1, at("d"));
     assert_eq!(at("dave │ old note (outdated)") + 1, at("e"));
 
-    // G C lists the threads; picking one jumps to its line.
-    send_keys(&mut app, "GC").await?;
+    // Space A C lists the threads; picking one jumps to its line.
+    send_keys(&mut app, "<space>AC").await?;
     send_keys(&mut app, "keep b<ret>").await?;
     let (view, doc) = current_ref!(app.editor);
     let text = doc.text().slice(..);
     assert_eq!(doc.selection(view.id).primary().cursor_line(text), 1);
 
-    // G c on a thread's line replies to it, and PR comments stay out of pi's batches.
-    send_keys(&mut app, "4ggGcsure<ret>gg:review-comment top<ret>").await?;
+    // Space A c on a thread's line replies to it, and PR comments stay out of pi's batches.
+    send_keys(&mut app, "4gg<space>Acsure<ret>gg:review-comment top<ret>").await?;
     let replies: Vec<_> = app
         .editor
         .review_pr_comments
@@ -2746,7 +2746,7 @@ async fn n_mapped_to_search_or_review_follows_whichever_was_used_last() -> anyho
     send_keys(&mut app, "n").await?;
     assert_eq!(line(&app), 10);
     // A review jump (the search is still set) makes n walk the hunks again.
-    send_keys(&mut app, "Gn").await?;
+    send_keys(&mut app, "<space>An").await?;
     assert_eq!(line(&app), 15);
     send_keys(&mut app, "ggn").await?;
     assert_eq!(line(&app), 3);
@@ -2871,12 +2871,12 @@ api\ repos/o/r/pulls/7/comments*) echo '{threads}';;"#
     send_keys(&mut app, "2gg:review-comment fix B<ret>").await?;
     send_keys(&mut app, "3ggxx:review-comment two lines<ret>").await?;
     send_keys(&mut app, "<esc>11gg:review-comment far away<ret>").await?;
-    send_keys(&mut app, "8ggGcthanks<ret>").await?;
+    send_keys(&mut app, "8gg<space>Acthanks<ret>").await?;
     assert_eq!(app.editor.review_pr_comments.len(), 4);
 
-    // G m opens the submit prompt; a failing post keeps everything pending.
+    // Space A m opens the submit prompt; a failing post keeps everything pending.
     fs::write(fake_dir.join("fail"), "")?;
-    send_keys(&mut app, "Gmapprove looks good<ret>").await?;
+    send_keys(&mut app, "<space>Amapprove looks good<ret>").await?;
     wait_for(&mut app, |app| {
         app.editor
             .get_status()
@@ -3002,10 +3002,10 @@ async fn enter_off_a_hunk_jumps_to_the_next_unstaged_one() -> anyhow::Result<()>
     assert_eq!(line(&app), 8);
     assert_eq!(status(&app), "next: file.txt hunk 1 of 2");
     assert_eq!(git_ok(dir, &["diff", "--cached"]), "");
-    // On the hunk, Enter stages it and moves on; G s likewise.
+    // On the hunk, Enter stages it and moves on; Space A s likewise.
     send_keys(&mut app, "<ret>").await?;
     assert_eq!(line(&app), 14);
-    send_keys(&mut app, "Gs").await?;
+    send_keys(&mut app, "<space>As").await?;
     assert_eq!(git_ok(dir, &["diff", "--name-only"]), "");
     // With everything staged, an unchanged line has nowhere to go.
     send_keys(&mut app, "gg<ret>").await?;
@@ -3017,7 +3017,7 @@ async fn enter_off_a_hunk_jumps_to_the_next_unstaged_one() -> anyhow::Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn g_b_picks_the_baseline_from_the_branch_history() -> anyhow::Result<()> {
+async fn space_a_b_picks_the_baseline_from_the_branch_history() -> anyhow::Result<()> {
     let repo = Repo::new("a\nb\nc\n", "a\nb\nc\n", "a\nb\nc\n");
     let dir = repo.dir.path();
     let _cwd = Cwd::enter(dir);
@@ -3042,13 +3042,13 @@ async fn g_b_picks_the_baseline_from_the_branch_history() -> anyhow::Result<()> 
     send_keys(&mut app, &format!(":review-baseline {second}<ret>")).await?;
 
     // The marker column names the current baseline, the merge base with main, and HEAD.
-    send_keys(&mut app, "Gb").await?;
+    send_keys(&mut app, "<space>Ab").await?;
     send_keys(&mut app, "%mark HEAD<ret>").await?;
     assert_eq!(baseline(&app), third);
-    send_keys(&mut app, "Gb").await?;
+    send_keys(&mut app, "<space>Ab").await?;
     send_keys(&mut app, "%mark ●<ret>").await?;
     assert_eq!(baseline(&app), third);
-    send_keys(&mut app, "Gb").await?;
+    send_keys(&mut app, "<space>Ab").await?;
     send_keys(&mut app, "%mark base<ret>").await?;
     assert_eq!(baseline(&app), first);
     assert_eq!(
@@ -3071,7 +3071,7 @@ async fn g_b_picks_the_baseline_from_the_branch_history() -> anyhow::Result<()> 
         "{status}"
     );
     // The row marked pi is the hook's baseline: picking it ends the pin.
-    send_keys(&mut app, "Gb").await?;
+    send_keys(&mut app, "<space>Ab").await?;
     send_keys(&mut app, "%mark pi<ret>").await?;
     assert_eq!(baseline(&app), third);
     assert!(app.editor.review_user_pin.is_none());
@@ -3082,7 +3082,7 @@ async fn g_b_picks_the_baseline_from_the_branch_history() -> anyhow::Result<()> 
     );
 
     // A forced hook baseline (after a commit the reviewer asked for) releases a pin.
-    send_keys(&mut app, "Gb").await?;
+    send_keys(&mut app, "<space>Ab").await?;
     send_keys(&mut app, "%mark base<ret>").await?;
     assert_eq!(baseline(&app), first);
     assert!(app.editor.review_user_pin.is_some());
@@ -3102,8 +3102,8 @@ async fn g_b_picks_the_baseline_from_the_branch_history() -> anyhow::Result<()> 
     send_keys(&mut app, ":review-baseline HEAD sometimes<ret>").await?;
     assert_error(&app, "only a trailing 'force'");
 
-    // G B still refreshes the buffer's review.
-    send_keys(&mut app, "GB").await?;
+    // Space A B still refreshes the buffer's review.
+    send_keys(&mut app, "<space>AB").await?;
     assert!(app
         .editor
         .get_status()
@@ -3114,12 +3114,12 @@ async fn g_b_picks_the_baseline_from_the_branch_history() -> anyhow::Result<()> 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_g_menu_runs_review_commands_next_to_user_keys() -> anyhow::Result<()> {
+async fn the_space_a_menu_runs_review_commands_next_to_user_keys() -> anyhow::Result<()> {
     let repo = Repo::new("one\ntwo\n", "one\ntwo\n", "one\nTWO\n");
     let _cwd = Cwd::enter(repo.dir.path());
-    // A user table under G, as in the reviewer's config, merges with the built-in menu.
+    // A user table under Space A, as in the reviewer's config, merges with the built-in menu.
     let mut config = Config::load(
-        Ok(&"[keys.normal.G]\nl = \"extend_char_right\"\n".to_owned()),
+        Ok(&"[keys.normal.space.A]\nl = \"extend_char_right\"\n".to_owned()),
         Err(ConfigLoadError::default()),
     )
     .map_err(|err| anyhow::anyhow!("{err}"))?;
@@ -3129,8 +3129,8 @@ async fn the_g_menu_runs_review_commands_next_to_user_keys() -> anyhow::Result<(
         .with_file(&repo.file, None)
         .build()?;
 
-    // G f opens the review-files picker, which pins HEAD; picking opens the file reviewed.
-    send_keys(&mut app, "Gf").await?;
+    // Space A f opens the review-files picker, which pins HEAD; picking opens the file reviewed.
+    send_keys(&mut app, "<space>Af").await?;
     send_keys(&mut app, "file.txt<ret>").await?;
     assert_status_not_error(&app.editor);
     let doc = doc!(app.editor);
@@ -3139,16 +3139,17 @@ async fn the_g_menu_runs_review_commands_next_to_user_keys() -> anyhow::Result<(
     let text = doc.text().slice(..);
     assert_eq!(doc.selection(view.id).primary().cursor_line(text), 1);
 
-    // The user's G l still extends, and G c (like G a) sends a comment to the agent at once.
-    send_keys(&mut app, "ggGl").await?;
+    // The user's Space A l still extends, and Space A c (like Space A a) sends a comment to the
+    // agent at once.
+    send_keys(&mut app, "gg<space>Al").await?;
     let (view, doc) = current_ref!(app.editor);
     assert_eq!(doc.selection(view.id).primary().to(), 2);
     let outbox = tempfile::tempdir()?;
     let handoff = format!(":review-handoff {}<ret>", outbox.path().display());
     send_keys(&mut app, &handoff).await?;
     for (keys, comment) in [
-        ("Gclooks good<ret>", "looks good"),
-        ("Gaand this<ret>", "and this"),
+        ("<space>Aclooks good<ret>", "looks good"),
+        ("<space>Aaand this<ret>", "and this"),
     ] {
         send_keys(&mut app, keys).await?;
         assert_eq!(
