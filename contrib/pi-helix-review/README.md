@@ -164,6 +164,19 @@ version moves into the first session's file. Ignore `.pi/` in Git.
   when other instructions say to, but only commit exactly the index when a
   `:review-commit` (commit-staged) handoff asks for it, so your partial
   staging in Helix is not swallowed.
+- Ownership: `state/ownership.json` (shared by the repository's sessions,
+  written atomically) records who changed which uncommitted lines:
+  `{ "files": { "<abs path>": { "blob": <oid the ranges refer to>, "ranges":
+  [{ "start", "end" (exclusive, 1-based; equal for lines deleted before
+  `start`), "owner": "pi-2" | "user", "agent": the last agent owner, kept when
+  you overwrite its lines, "at": ms }] } } }`. Each change is diffed against
+  the recorded blob: the changed lines go to the writer (last writer wins),
+  other ranges shift. The writer is the session after its `edit`/`write`
+  (that file) or `bash` (every changed file) tool results and at the end of
+  its turn; `user` when the 2 s check finds a change while no live session is
+  in a turn (`in_turn` in the state files). A file seen for the first time
+  gives what already differed from `HEAD` to `user`. Ranges a commit took in
+  are dropped, so the ledger only holds uncommitted work.
 - Worktrees: a session started in the main checkout that edits files in a
   `git worktree` of it (or changes one with `bash`, noticed at the end of the
   turn from `git worktree list` and `git status`) gets a second hook for that

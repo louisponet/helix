@@ -4,7 +4,7 @@ import { existsSync, type FSWatcher, watch } from "node:fs";
 import { mkdir, readdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
@@ -467,6 +467,8 @@ interface HookState {
 	cwd?: string;
 	/** The pi process, so other sessions can tell whether this one is live; cleared on shutdown. */
 	pid?: number;
+	/** Whether an agent turn of this session is running. */
+	in_turn?: boolean;
 }
 
 interface Session {
@@ -476,6 +478,124 @@ interface Session {
 
 /** How long a claimed batch of a session that is gone waits before it is put back in the outbox. */
 const STALE_CLAIM_MS = 10 * 60 * 1000;
+
+/**
+ * Lines of a file one writer changed last: a session label, or `user`. `start === end` marks lines
+ * deleted just before line `start`. `agent` is the last agent owner, kept when the user overwrites.
+ */
+export interface OwnedRange {
+	start: number;
+	end: number;
+	owner: string;
+	agent?: string;
+	at: number;
+}
+
+/** `state/ownership.json`: per file, the blob its ranges refer to and the uncommitted ranges. */
+export interface Ownership {
+	files: Record<string, { blob: string; ranges: OwnedRange[] }>;
+}
+
+type Mark = { owner: string; agent?: string; at: number } | undefined;
+
+/** Per-line marks, and per-gap deletion marks (gap `i` is just before line `i + 1`). */
+interface Marks {
+	lines: Mark[];
+	gaps: Mark[];
+}
+
+function lineCount(text: string): number {
+	return text === "" ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
+}
+
+/** The `git diff -U0` hunks from blob `from` to blob `to` as 0-based [old start, old count, new start, new count]. */
+async function blobHunks(repo: string, from: string, to: string): Promise<[number, number, number, number][]> {
+	if (from === to) return [];
+	const diff = await git(repo, ["diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", from, to]);
+	return [...diff.matchAll(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm)].map(([, a, b, c, d]) => {
+		const [oc, nc] = [b === undefined ? 1 : Number(b), d === undefined ? 1 : Number(d)];
+		// A count of 0 names the line after which the change is; otherwise its first line.
+		return [oc > 0 ? Number(a) - 1 : Number(a), oc, nc > 0 ? Number(c) - 1 : Number(c), nc];
+	});
+}
+
+function toMarks(ranges: OwnedRange[], lines: number): Marks {
+	const marks: Marks = { lines: Array(lines).fill(undefined), gaps: Array(lines + 1).fill(undefined) };
+	for (const { start, end, owner, agent, at } of ranges) {
+		const mark = { owner, agent, at };
+		if (start === end) {
+			if (start - 1 <= lines) marks.gaps[start - 1] = mark;
+		} else {
+			for (let i = start - 1; i < Math.min(end - 1, lines); i++) marks.lines[i] = mark;
+		}
+	}
+	return marks;
+}
+
+function toRanges({ lines, gaps }: Marks): OwnedRange[] {
+	const ranges: OwnedRange[] = [];
+	const range = (start: number, end: number, m: NonNullable<Mark>): OwnedRange => ({
+		start,
+		end,
+		owner: m.owner,
+		...(m.agent ? { agent: m.agent } : {}),
+		at: m.at,
+	});
+	for (let i = 0; i <= lines.length; i++) {
+		const gap = gaps[i];
+		if (gap) ranges.push(range(i + 1, i + 1, gap));
+		const mark = lines[i];
+		if (!mark) continue;
+		const last = ranges.at(-1);
+		if (last && last.end === i + 1 && last.start < last.end && last.owner === mark.owner && last.agent === mark.agent && last.at === mark.at) {
+			last.end++;
+		} else {
+			ranges.push(range(i + 1, i + 2, mark));
+		}
+	}
+	return ranges;
+}
+
+/**
+ * Carries `marks` through the change `hunks` describes: lines outside them keep their marks
+ * (shifted), the new lines of each hunk (or, for a pure deletion, its gap) get `mark(replaced)`.
+ */
+function applyHunks(marks: Marks, hunks: [number, number, number, number][], mark: (replaced: Mark[]) => Mark): Marks {
+	const lines: Mark[] = [];
+	const gaps: Mark[] = [];
+	let oi = 0;
+	const copyUntil = (end: number) => {
+		for (; oi < end; oi++) {
+			gaps[lines.length] ??= marks.gaps[oi];
+			lines.push(marks.lines[oi]);
+		}
+	};
+	for (const [os, oc, , nc] of hunks) {
+		copyUntil(os);
+		const written = mark([...marks.lines.slice(os, os + oc), ...marks.gaps.slice(os, os + oc + 1)]);
+		if (nc === 0) gaps[lines.length] = written;
+		for (let k = 0; k < nc; k++) lines.push(written);
+		oi = os + oc;
+	}
+	copyUntil(marks.lines.length);
+	gaps[lines.length] ??= marks.gaps[oi];
+	return { lines, gaps: Array.from({ length: lines.length + 1 }, (_, i) => gaps[i]) };
+}
+
+async function readOwnership(path: string): Promise<Ownership> {
+	try {
+		const parsed = JSON.parse(await readFile(path, "utf8")) as Ownership;
+		return parsed && typeof parsed.files === "object" ? parsed : { files: {} };
+	} catch {
+		return { files: {} };
+	}
+}
+
+async function writeOwnership(path: string, ownership: Ownership): Promise<void> {
+	const temp = `${path}.${process.pid}.tmp`;
+	await writeFile(temp, `${JSON.stringify(ownership, null, 2)}\n`);
+	await rename(temp, path);
+}
 
 const GUIDELINES = `## Helix review handoff
 The user reviews your changes in Helix (in this repository or any of its worktrees you edit) and hands back explicit requests as a "helix-review:handoff" message with a JSON block, possibly in the middle of a turn as a steering message: per file, review_comments are the user's comments on selections, user_edits are the user's own edits since your turn snapshot as unified-diff hunks (integrate them, never revert them; when they undo part of your change, keep it undone and adjust tests and docs to match), and a request may carry a message or ask for a commit. The review always compares against HEAD: commits of any kind move it, except a baseline the user pinned in Helix. After handling a handoff, say per file what you integrated or declined. While this hook is attached, never run git commit or git push on your own, even if other instructions say to commit at the end of a turn: the user stages hunks in Helix and asks for a commit with a commit-staged handoff, the only time you commit (exactly the index, adding nothing).`;
@@ -489,6 +609,8 @@ class Hook {
 	private state: HookState;
 	/** The changed files and their blobs at the start of the running turn. */
 	private turnStart?: Record<string, string>;
+	/** Updates of the ownership ledger, one at a time. */
+	private ledger = Promise.resolve();
 	private watcher?: FSWatcher;
 	private timer?: NodeJS.Timeout;
 	private poller?: NodeJS.Timeout;
@@ -566,6 +688,7 @@ class Hook {
 		this.state.baseline = { commit_oid: head };
 		this.state.commit_floor = head;
 		await this.save();
+		await this.pruneOwnership();
 		return true;
 	}
 
@@ -742,6 +865,7 @@ class Hook {
 	stop(): void {
 		if (!this.stopped) {
 			this.state.pid = undefined;
+			this.state.in_turn = undefined;
 			void this.save().catch(() => undefined);
 		}
 		this.stopped = true;
@@ -754,6 +878,7 @@ class Hook {
 	async begin(midTurn = false): Promise<void> {
 		await this.followHead(true);
 		this.turnStart = midTurn ? {} : await this.changedFiles();
+		this.state.in_turn = true;
 		await this.touch();
 		await this.attach();
 	}
@@ -783,13 +908,15 @@ class Hook {
 	 */
 	private async poll(): Promise<void> {
 		if (this.attaching || this.stopped) return;
+		const moved = await this.followHead();
+		await this.attributeUserEdits();
 		const info = await stat(this.socket).catch(() => undefined);
 		if (!info) {
 			this.inode = undefined;
 			return;
 		}
 		if (socketId(info) === this.inode) {
-			if (await this.followHead()) await this.send([`review-baseline ${await this.reviewBaseline()}`]);
+			if (moved) await this.send([`review-baseline ${await this.reviewBaseline()}`]);
 			return;
 		}
 		this.attaching = true;
@@ -808,6 +935,7 @@ class Hook {
 	async refresh(): Promise<void> {
 		clearTimeout(this.timer);
 		await this.followHead();
+		await this.attributeUserEdits();
 		const baseline = await this.reviewBaseline();
 		if (baseline) await this.send([`review-baseline ${baseline}`]);
 	}
@@ -887,6 +1015,117 @@ class Hook {
 		}
 		const oids = paths.length ? (await git(this.repo, ["hash-object", "-w", "--no-filters", "--", ...paths])).split("\n") : [];
 		return Object.fromEntries(paths.map((path, i) => [path, oids[i]]));
+	}
+
+	/** The repository's shared ownership ledger. */
+	get ownershipFile(): string {
+		return join(this.dir, "state", "ownership.json");
+	}
+
+	/**
+	 * Records `writer` (this session's label, or `user`) as the owner of what changed in `paths`
+	 * since the ledger last saw them; without `paths`, of every file that differs from the ledger.
+	 */
+	attribute(paths: string[] | undefined, writer: string): Promise<void> {
+		return this.withLedger(async (ownership) => {
+			const candidates = paths ?? [...new Set([...Object.keys(await this.changedFiles()), ...Object.keys(ownership.files)])];
+			let changed = false;
+			for (const path of candidates) {
+				if (this.isPiState(path)) continue;
+				let entry = ownership.files[path];
+				if (!(await stat(path).catch(() => undefined))?.isFile()) {
+					if (entry) delete ownership.files[path];
+					changed ||= !!entry;
+					continue;
+				}
+				const blob = (await git(this.repo, ["hash-object", "-w", "--no-filters", "--", path])).trim();
+				if (entry?.blob === blob) continue;
+				const head = await this.headBlob(path);
+				if (!entry) {
+					// What differed from HEAD before this change is the user's.
+					entry = await this.changeEntry({ blob: head, ranges: [] }, this.turnStart?.[path] ?? head, "user");
+				}
+				entry = await this.pruneEntry(await this.changeEntry(entry, blob, writer), head);
+				if (entry.ranges.length > 0) ownership.files[path] = entry;
+				else delete ownership.files[path];
+				changed = true;
+			}
+			return changed;
+		});
+	}
+
+	/** Drops the ranges a commit took in: the ledger only holds uncommitted work. */
+	private pruneOwnership(): Promise<void> {
+		return this.withLedger(async (ownership) => {
+			for (const [path, entry] of Object.entries(ownership.files)) {
+				const pruned = await this.pruneEntry(entry, await this.headBlob(path));
+				if (pruned.ranges.length > 0) ownership.files[path] = pruned;
+				else delete ownership.files[path];
+			}
+			return existsSync(this.ownershipFile);
+		});
+	}
+
+	/**
+	 * Attributes changes nobody announced to the user: only while no session, this one included,
+	 * is in a turn.
+	 */
+	private async attributeUserEdits(): Promise<void> {
+		if (this.state.in_turn || !this.state.baseline) return;
+		if ((await this.liveSessions()).some((s) => s.state.in_turn)) return;
+		// shortcut: hashes every changed file on each 2 s tick; watch the files if that gets slow.
+		await this.attribute(undefined, "user");
+	}
+
+	/** Ends the turn: changes still unannounced are this session's. */
+	async endTurn(): Promise<void> {
+		await this.attribute(undefined, this.label);
+		this.state.in_turn = false;
+		await this.save();
+	}
+
+	/** Runs `update` on the ledger, one update at a time, and writes it when `update` says it changed. */
+	private withLedger(update: (ownership: Ownership) => Promise<boolean>): Promise<void> {
+		// shortcut: serialized per session only; two sessions updating at the same instant can lose one update.
+		const run = this.ledger.then(async () => {
+			const ownership = await readOwnership(this.ownershipFile);
+			if (await update(ownership)) await writeOwnership(this.ownershipFile, ownership);
+		});
+		this.ledger = run.catch((error) => console.warn(`helix-review: ownership not updated: ${error}`));
+		return this.ledger;
+	}
+
+	/** The blob of `path` in `HEAD`, or the empty blob. */
+	private async headBlob(path: string): Promise<string> {
+		const inHead = await git(this.repo, ["rev-parse", "--verify", "--quiet", `HEAD:${relative(this.repo, path)}`]).catch(() => "");
+		return inHead.trim() || (await git(this.repo, ["hash-object", "-w", "--stdin"], "")).trim();
+	}
+
+	private async lines(blob: string): Promise<number> {
+		return lineCount(await git(this.repo, ["cat-file", "blob", blob]));
+	}
+
+	/** `entry` carried to the content `blob`, the changed lines owned by `writer`. */
+	private async changeEntry(entry: Ownership["files"][string], blob: string, writer: string): Promise<Ownership["files"][string]> {
+		if (entry.blob === blob) return entry;
+		const at = Date.now();
+		const marks = applyHunks(toMarks(entry.ranges, await this.lines(entry.blob)), await blobHunks(this.repo, entry.blob, blob), (replaced) => {
+			if (writer !== "user") return { owner: writer, agent: writer, at };
+			const agent = replaced.filter((m) => m?.agent).sort((x, y) => y!.at - x!.at)[0]?.agent;
+			return { owner: "user", agent, at };
+		});
+		return { blob, ranges: toRanges(marks) };
+	}
+
+	/** `entry` without the marks on lines (and deletions) that match `head`, the committed ones. */
+	private async pruneEntry(entry: Ownership["files"][string], head: string): Promise<Ownership["files"][string]> {
+		const marks = toMarks(entry.ranges, await this.lines(entry.blob));
+		const keep: Marks = { lines: marks.lines.map(() => undefined), gaps: marks.gaps.map(() => undefined) };
+		for (const [, , ns, nc] of await blobHunks(this.repo, head, entry.blob)) {
+			if (nc === 0) keep.gaps[ns] = marks.gaps[ns];
+			for (let k = ns; k < ns + nc; k++) keep.lines[k] = marks.lines[k];
+		}
+		return { blob: entry.blob, ranges: toRanges(keep) };
 	}
 
 	/** Whether `path` is under `<repo>/.pi/`, pi's own state rather than the agent's work. */
@@ -1161,9 +1400,13 @@ export default function helixReview(pi: ExtensionAPI): void {
 		const path = event.input.path ?? event.input.file_path;
 		if (event.toolName !== "bash" && typeof path === "string" && hook) {
 			const file = resolve(ctx.cwd, path.replace(/^~(?=$|\/)/, homedir()));
-			(await hookFor(dirname(file)))?.refreshSoon();
+			const owner = await hookFor(dirname(file));
+			owner?.refreshSoon();
+			await owner?.attribute([await realpath(file).catch(() => file)], owner.label);
 		} else {
 			for (const other of others.values()) other.refreshSoon();
+			// Bash may have changed anything: what changed is this session's.
+			for (const h of all()) await h.attribute(undefined, h.label);
 		}
 	});
 	pi.on("agent_end", async () => {
@@ -1180,6 +1423,7 @@ export default function helixReview(pi: ExtensionAPI): void {
 		for (const h of all()) {
 			const committed = await h.followRequestedCommit();
 			await h.refresh();
+			await h.endTurn();
 			await h.snapshot();
 			await h.announceEnd(committed, h !== hook);
 		}

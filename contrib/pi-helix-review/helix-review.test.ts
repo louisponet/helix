@@ -1281,6 +1281,85 @@ test("edits in a worktree of the repository get their own hook, Helix and mailbo
 	assert.equal(third.lines.at(-1), `echo pi-1: Agent turn done, 1 file changed since ${wt2.head.slice(0, 8)} (:review-files)`);
 });
 
+test("the ownership ledger tracks who changed which lines until they are committed", async (t) => {
+	const w = workspace(t);
+	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });
+	const repo = realpathSync(w.repo);
+	const file = join(repo, "a.rs");
+	const lines = (edit: (lines: string[]) => void) => {
+		const all = readFileSync(file, "utf8").split("\n").slice(0, -1);
+		edit(all);
+		writeFileSync(file, `${all.join("\n")}\n`);
+	};
+	w.stage("a.rs", Array.from({ length: 10 }, (_, i) => `${i + 1}\n`).join(""));
+	w.commit();
+	const ledger = join(repo, ".pi", "helix-review", "state", "ownership.json");
+	const owners = () => {
+		if (!existsSync(ledger)) return [];
+		const entry = JSON.parse(readFileSync(ledger, "utf8")).files[file];
+		return (entry?.ranges ?? []).map(({ start, end, owner, agent }: { start: number; end: number; owner: string; agent?: string }) => [start, end, owner, agent]);
+	};
+	const edited = { toolName: "edit", input: { path: file }, content: [], isError: false };
+
+	const one = piSession(repo, "session-1");
+	t.after(() => one.emit("session_shutdown"));
+	await one.emit("session_start", { reason: "startup" });
+	const two = piSession(repo, "session-2");
+	t.after(() => two.emit("session_shutdown"));
+	await two.emit("session_start", { reason: "startup" });
+
+	// pi-1 changes lines 2-3.
+	await one.emit("agent_start");
+	lines((l) => l.splice(1, 2, "two", "three"));
+	await one.emit("tool_result", edited);
+	assert.deepEqual(owners(), [[2, 4, "pi-1", "pi-1"]]);
+	await one.emit("agent_end", { messages: [] });
+
+	// pi-2 overwrites line 3 (last writer wins) and changes line 8.
+	await two.emit("agent_start");
+	lines((l) => {
+		l[2] = "THREE";
+		l[7] = "eight";
+	});
+	await two.emit("tool_result", edited);
+	assert.deepEqual(owners(), [
+		[2, 3, "pi-1", "pi-1"],
+		[3, 4, "pi-2", "pi-2"],
+		[8, 9, "pi-2", "pi-2"],
+	]);
+
+	// Two lines inserted at the top by bash shift every range.
+	lines((l) => l.unshift("a", "b"));
+	await two.emit("tool_result", { toolName: "bash", input: { command: "sed" }, content: [], isError: false });
+	assert.deepEqual(owners(), [
+		[1, 3, "pi-2", "pi-2"],
+		[4, 5, "pi-1", "pi-1"],
+		[5, 6, "pi-2", "pi-2"],
+		[10, 11, "pi-2", "pi-2"],
+	]);
+	await two.emit("agent_end", { messages: [] });
+
+	// With no turn running, an edit is the user's, keeping the agent it overwrote.
+	lines((l) => {
+		l[4] = "three!";
+	});
+	await until(() => owners().some(([, , owner]: string[]) => owner === "user"), "the poller to attribute the user's edit");
+	assert.deepEqual(owners(), [
+		[1, 3, "pi-2", "pi-2"],
+		[4, 5, "pi-1", "pi-1"],
+		[5, 6, "user", "pi-2"],
+		[10, 11, "pi-2", "pi-2"],
+	]);
+
+	// A commit of everything but the two inserted lines leaves only those.
+	const partial = readFileSync(file, "utf8").split("\n").slice(2).join("\n");
+	const blob = execFileSync("git", ["hash-object", "-w", "--stdin"], { cwd: repo, env: gitEnv, input: partial, encoding: "utf8" }).trim();
+	git(repo, "update-index", "--cacheinfo", `100644,${blob},a.rs`);
+	w.commit();
+	await until(() => owners().length === 1, "the poller to prune the committed ranges");
+	assert.deepEqual(owners(), [[1, 3, "pi-2", "pi-2"]]);
+});
+
 test("a Helix restarted on the same socket is attached again without waiting for a failed send", async (t) => {
 	const w = workspace(t);
 	const socket = join(w.root, "helix.sock");
