@@ -3736,6 +3736,59 @@ async fn files_show_the_agent_that_changed_them_and_handoffs_can_address_one() -
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn blocks_show_the_owners_from_the_hooks_ledger() -> anyhow::Result<()> {
+    let head = "1\n2\n3\n4\n5\n6\n7\n8\n";
+    let repo = Repo::new(head, head, "1\nTWO\n3\n4\nFIVE\n6\nSEVEN\n8\n");
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let file = helix_stdx::path::canonicalize(&repo.file);
+    let blob = git_ok(dir, &["hash-object", "file.txt"]);
+    // Another changed file, without owners.
+    fs::write(dir.join("a.txt"), "a\n")?;
+    git_ok(dir, &["add", "a.txt"]);
+    git_ok(dir, &["commit", "-m", "a"]);
+    fs::write(dir.join("a.txt"), "A\n")?;
+    let state = dir.join(".pi/helix-review/state");
+    fs::create_dir_all(&state)?;
+    let range = |start: usize, owner: &str, agent: &str| serde_json::json!({ "start": start, "end": start + 1, "owner": owner, "agent": agent, "at": start });
+    let ledger = serde_json::json!({ "files": { file.display().to_string(): {
+        "blob": blob,
+        "ranges": [range(2, "pi-1", "pi-1"), range(5, "pi-2", "pi-2"), range(7, "user", "pi-1")],
+    } } });
+    fs::write(state.join("ownership.json"), ledger.to_string())?;
+    let mut app = repo.app()?;
+    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+
+    // Each block's first line ends with its owner, `you` for the reviewer's own edit.
+    let labelled = |app: &Application| -> Vec<String> {
+        render(app)
+            .into_iter()
+            .filter_map(|(_, text)| {
+                let (line, label) = text.split_once(' ')?;
+                let label = label.trim();
+                ["pi-1", "pi-2", "you"]
+                    .contains(&label)
+                    .then(|| format!("{line} {label}"))
+            })
+            .collect()
+    };
+    assert_eq!(labelled(&app), ["TWO pi-1", "FIVE pi-2", "SEVEN you"]);
+
+    // :review-files lists every owner of the file's hunks in its agent column. The picker opens
+    // from a job callback, so filtering it takes a separate key sequence.
+    for owner in ["pi-1", "pi-2", "you"] {
+        send_keys(&mut app, ":o a.txt<ret>:review-files<ret>").await?;
+        send_keys(&mut app, &format!("%agent {owner}<ret>")).await?;
+        assert_eq!(doc!(app.editor).path(), Some(file.as_path()), "{owner}");
+    }
+
+    // An edit makes the ledger's lines stale: the labels go until the next refresh.
+    send_keys(&mut app, "ggix<esc>").await?;
+    assert_eq!(labelled(&app), Vec::<String>::new());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn buffers_reviewed_against_the_baseline_show_a_summary() -> anyhow::Result<()> {
     let repo = Repo::new("old\n", "old\n", "old\n");
     let dir = repo.dir.path();

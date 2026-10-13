@@ -15,7 +15,7 @@ use helix_core::{
     softwrapped_dimensions, visual_offset_from_block, Position, Range, Rope, RopeSlice,
 };
 use helix_vcs::{compute_hunks, Hunk};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ViewId;
 
@@ -136,6 +136,62 @@ pub struct PullRequest {
     pub merge_base: String,
 }
 
+/// The pi hook's ownership ledger, `<workspace>/.pi/helix-review/state/ownership.json`: who
+/// changed which uncommitted lines of each file.
+#[derive(Debug, Default, Deserialize)]
+pub struct Ownership {
+    pub files: HashMap<PathBuf, OwnedFile>,
+}
+
+/// The owned ranges of one file, valid for the content with blob id `blob`.
+#[derive(Debug, Deserialize)]
+pub struct OwnedFile {
+    pub blob: String,
+    pub ranges: Vec<OwnedRange>,
+}
+
+/// 1-based lines `start..end` (lines removed just before `start` when equal) last changed by
+/// `owner`: a pi session label, or `user`.
+#[derive(Debug, Deserialize)]
+pub struct OwnedRange {
+    pub start: usize,
+    pub end: usize,
+    pub owner: String,
+}
+
+impl Ownership {
+    /// The ledger of the workspace, empty when it is missing or unreadable.
+    pub fn load(workspace: &Path) -> Self {
+        std::fs::read(workspace.join(".pi/helix-review/state/ownership.json"))
+            .ok()
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_default()
+    }
+}
+
+impl OwnedFile {
+    /// The owners of its ranges, in order, `you` for the user.
+    pub fn owner_names(&self) -> Vec<&str> {
+        let mut names = Vec::new();
+        for range in &self.ranges {
+            if !names.contains(&range.name()) {
+                names.push(range.name());
+            }
+        }
+        names
+    }
+}
+
+impl OwnedRange {
+    /// The name shown for the owner: the session label, or `you`.
+    pub fn name(&self) -> &str {
+        match self.owner.as_str() {
+            "user" => "you",
+            owner => owner,
+        }
+    }
+}
+
 /// How far a review hunk has got towards a commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HunkStage {
@@ -165,6 +221,8 @@ pub struct Review {
     committed: Vec<bool>,
     /// The pull request's comment threads on this file, see `:review-pr`.
     threads: Vec<ReviewThread>,
+    /// The owners of each block, by its first 0-based document line, until the next edit.
+    owners: Vec<(usize, String)>,
 }
 
 impl Review {
@@ -196,6 +254,7 @@ impl Review {
             head: None,
             committed: Vec::new(),
             threads: Vec::new(),
+            owners: Vec::new(),
         };
         review.update_blocks();
         Ok(review)
@@ -219,6 +278,8 @@ impl Review {
             return;
         };
         self.hunks = hunks;
+        // The ledger's lines no longer match the document.
+        self.owners.clear();
         self.update_staged(doc);
         self.update_blocks();
         // Focus is kept in snapshot coordinates and stays valid while its old lines are
@@ -391,6 +452,41 @@ impl Review {
 
     pub fn threads(&self) -> &[ReviewThread] {
         &self.threads
+    }
+
+    /// Names the owners of each block from `file`, the ledger's entry for this document.
+    pub fn set_owners(&mut self, file: Option<&OwnedFile>) {
+        self.owners = file
+            .map(|file| {
+                self.hunks
+                    .iter()
+                    .filter_map(|hunk| {
+                        let lines = hunk.after.start as usize..hunk.after.end as usize;
+                        let mut names = Vec::new();
+                        for range in &file.ranges {
+                            let (start, end) = (range.start.max(1) - 1, range.end.max(1) - 1);
+                            let meets = if start == end {
+                                lines.start <= start && start <= lines.end
+                            } else {
+                                start < lines.end && lines.start < end
+                            };
+                            if meets && !names.contains(&range.name()) {
+                                names.push(range.name());
+                            }
+                        }
+                        (!names.is_empty()).then(|| (lines.start, names.join(" ")))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+
+    /// The owners shown on 0-based document line `line`, the first line of a block.
+    pub fn owners_at(&self, line: usize) -> Option<&str> {
+        self.owners
+            .iter()
+            .find(|(start, _)| *start == line)
+            .map(|(_, names)| names.as_str())
     }
 
     /// The 0-based document line `thread` is anchored at in a document of `len_lines` lines, and

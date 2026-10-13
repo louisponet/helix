@@ -64,7 +64,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-commit [subject]` | Hand back like `:review-send`, asking the agent to commit exactly what is staged in the git index (optionally with that subject, and addressed to a session with a leading `@label`). Refuses when nothing is staged, naming how many of the buffer's hunks are already committed in `HEAD` if any. |
 | `:review-diff` | Show one unified diff of every file changed since the review baseline (with none set, `HEAD` is pinned as it, like `:review-baseline HEAD`) in a read-only scratch buffer; running it again, or `:review-baseline` (as the pi hook does after each edit), refreshes that buffer in place. File headers are workspace-relative paths (`--- <path>`), so `gf` opens a file. |
 | `:review-diff-open` | In the `:review-diff` buffer, open the file of the hunk under the cursor at the current line it shows (the next current line on a removed line). |
-| `:review-files` | Pick a file added (`A`), modified (`M`) or deleted (`D`) since the review baseline, and open it at its first change. The `+/-` and `hunks` columns show added and removed lines and staged/total hunks plus the hunks already committed since the baseline (`?` over the size limits), and the status line the totals. The `agent` column names the pi session that last changed the file, from the hook's state files. With no baseline set, it first pins `HEAD` like `:review-baseline HEAD`. |
+| `:review-files` | Pick a file added (`A`), modified (`M`) or deleted (`D`) since the review baseline, and open it at its first change. The `+/-` and `hunks` columns show added and removed lines and staged/total hunks plus the hunks already committed since the baseline (`?` over the size limits), and the status line the totals. The `agent` column names the owners of the file's hunks from the pi hook's ownership ledger (`you` for your own edits, as in `pi-1 pi-2`), else the pi session that last changed the file. With no baseline set, it first pins `HEAD` like `:review-baseline HEAD`. |
 
 ### Choosing a commit range
 
@@ -183,6 +183,10 @@ like this:
    `:review-diff-open`). It shows the review summary, for example
    `Reviewing against the git commit 1a2b3c4d: 2 blocks of old text,
    :review-old to inspect them`.
+   With several pi sessions at work, each block's first line ends with the
+   session that last changed it (`pi-2`, or `you` for your own edits), from
+   the hook's ownership ledger (`ui.review.owner`); an edit hides the labels
+   until the next refresh.
 3. `]g` / `[g` move to the next or previous hunk of the current text that
    differs from the baseline, selecting its changed lines; `]G` / `[G` jump to
    the last or first one. The diff gutter marks the same hunks, and both follow

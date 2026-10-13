@@ -369,6 +369,7 @@ These scopes are used for theming the editor interface:
 | `ui.highlight`                    | Highlighted lines in the picker preview                                                        |
 | `ui.highlight.frameline`          | Line at which debugging execution is paused at                                                 |
 | `ui.review.thread`                | Pull request comment threads shown above their line while reviewing a pull request (`:review-pr`) |
+| `ui.review.owner`                 | The pi session (or `you`) owning a review block, right-aligned on its first line (dim) |
 | `ui.cursorline.primary`           | The line of the primary cursor ([if cursorline is enabled][editor-section])                    |
 | `ui.cursorline.secondary`         | The lines of any other cursors ([if cursorline is enabled][editor-section])                    |
 | `ui.cursorcolumn.primary`         | The column of the primary cursor ([if cursorcolumn is enabled][editor-section])                |

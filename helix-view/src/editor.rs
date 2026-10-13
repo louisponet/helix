@@ -2245,11 +2245,35 @@ impl Editor {
         let status = review.summary();
         doc.set_review(review);
         self.share_review_threads();
+        self.refresh_review_owners();
         self.set_status(status);
         Ok(())
     }
 
     /// Gives every reviewed document the pull request threads on its file.
+    /// Names the owners of the blocks of every reviewed buffer from the pi hook's ledger, when
+    /// its entry matches the unmodified file on disk.
+    pub fn refresh_review_owners(&mut self) {
+        let ownership = crate::review::Ownership::load(&helix_loader::find_workspace().0);
+        for doc in self.documents.values_mut() {
+            let Some(path) = doc.path().map(Path::to_path_buf) else {
+                continue;
+            };
+            let modified = doc.is_modified();
+            let Some(review) = doc.review.as_mut() else {
+                continue;
+            };
+            let file = ownership.files.get(&path).filter(|file| {
+                !modified
+                    && std::fs::read(&path)
+                        .ok()
+                        .and_then(|data| helix_vcs::blob_id(&data))
+                        .is_some_and(|blob| blob == file.blob)
+            });
+            review.set_owners(file);
+        }
+    }
+
     pub fn share_review_threads(&mut self) {
         let threads = &self.review_pr_threads;
         for doc in self.documents.values_mut() {

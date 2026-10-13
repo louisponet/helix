@@ -28,6 +28,8 @@ pub struct ReviewDecoration<'a> {
     cursor: Style,
     /// The style of pull request comment threads.
     thread: Style,
+    /// The style of the owner labels at the end of each block's first line.
+    owner: Style,
     /// Document lines with old lines or threads below them, ascending.
     anchors: Vec<usize>,
     next_anchor: usize,
@@ -64,6 +66,7 @@ impl<'a> ReviewDecoration<'a> {
             selection: theme.get("ui.selection.primary"),
             cursor: theme.get("ui.cursor.primary"),
             thread: theme.get("ui.review.thread"),
+            owner: theme.get("ui.review.owner"),
             anchors,
             next_anchor: 0,
             pending_line: None,
@@ -165,6 +168,25 @@ impl<'a> ReviewDecoration<'a> {
     }
 }
 
+impl ReviewDecoration<'_> {
+    /// Right-aligns the owners of the block starting on `pos`'s line, when they fit after its
+    /// `line_end` columns of text.
+    fn draw_owners(&self, renderer: &mut TextRenderer, pos: LinePos, line_end: usize) {
+        if !pos.first_visual_line {
+            return;
+        }
+        let Some(names) = self.review.owners_at(pos.doc_line) else {
+            return;
+        };
+        let width = renderer.viewport.width as usize;
+        let text = line_end.saturating_sub(renderer.offset.col);
+        if text + 1 + names.len() < width {
+            let x = renderer.viewport.x + (width - names.len()) as u16;
+            renderer.set_string(x, pos.visual_line, names, self.owner);
+        }
+    }
+}
+
 fn is_visible(renderer: &TextRenderer, row: usize) -> bool {
     (renderer.offset.row..renderer.offset.row + renderer.viewport.height as usize).contains(&row)
 }
@@ -194,6 +216,7 @@ impl Decoration for ReviewDecoration<'_> {
         pos: LinePos,
         virt_off: Position,
     ) -> Position {
+        self.draw_owners(renderer, pos, virt_off.col);
         let Some(line) = self.pending_line.take() else {
             return Position::new(0, 0);
         };

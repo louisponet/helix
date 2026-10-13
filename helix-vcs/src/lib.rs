@@ -23,6 +23,19 @@ mod status;
 
 pub use status::FileChange;
 
+/// The git blob id of `data`, `None` without git support.
+pub fn blob_id(data: &[u8]) -> Option<String> {
+    #[cfg(feature = "git")]
+    return gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, data)
+        .ok()
+        .map(|id| id.to_hex().to_string());
+    #[cfg(not(feature = "git"))]
+    {
+        let _ = data;
+        None
+    }
+}
+
 pub struct CommitBase {
     pub data: Vec<u8>,
     pub commit_id: String,

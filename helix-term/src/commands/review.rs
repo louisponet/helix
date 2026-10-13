@@ -319,6 +319,7 @@ fn start_review(cx: &mut compositor::Context, revision: Option<&str>) -> anyhow:
     ensure!(!review.is_suspended(), Review::LIMIT_MESSAGE);
     let status = review.summary();
     doc.set_review(review);
+    cx.editor.refresh_review_owners();
     let scrolloff = cx.editor.config().scrolloff;
     let (view, doc) = current!(cx.editor);
     view.ensure_cursor_in_view(doc, scrolloff);
@@ -1363,6 +1364,7 @@ pub(super) fn pin_review_baseline(editor: &mut Editor, revision: &str) -> anyhow
 
     // Keep an open :review-diff buffer in step with the files it shows.
     refresh_review_diff(editor);
+    editor.refresh_review_owners();
 
     let scrolloff = editor.config().scrolloff;
     let (view, doc) = current!(editor);
@@ -1690,11 +1692,18 @@ pub(super) fn review_files(
         return Ok(());
     }
     let agents = agent_labels(&workspace);
+    let ownership = helix_view::review::Ownership::load(&workspace);
     let files: Vec<_> = changes
         .into_iter()
         .map(|change| {
             let stats = file_stats(cx.editor, change.path(), &commit, trust_full);
-            let agent = agents.get(change.path()).cloned();
+            // The owners of its hunks, else the session that last changed it.
+            let agent = ownership
+                .files
+                .get(change.path())
+                .map(|file| file.owner_names().join(" "))
+                .filter(|owners| !owners.is_empty())
+                .or_else(|| agents.get(change.path()).cloned());
             (change, stats, agent)
         })
         .collect();

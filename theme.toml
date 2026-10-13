@@ -47,6 +47,7 @@ tabstop = { modifiers = ["italic"], bg = "bossanova" }
 "diff.plus.review.committed" = { bg = "#3f2751" }
 "diff.minus.review.committed" = { fg = "#9d93b0", bg = "#4a224a" }
 "ui.review.thread" = { fg = "#9a96a8", bg = "#2a2833" }
+"ui.review.owner" = { fg = "comet", modifiers = ["dim"] }
 
 # TODO: differentiate doc comment
 # concat (ERROR) @error.syntax and "MISSING ;" selectors for errors
