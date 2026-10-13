@@ -301,6 +301,49 @@ function requestSection(request: ReviewRequest, comments: ReviewComment[]): stri
 	];
 }
 
+/** A staged hunk: 0-based `HEAD` and index line spans of `name` and the blobs they refer to. */
+interface StagedHunk {
+	name: string;
+	head: string;
+	index: string;
+	os: number;
+	oc: number;
+	ns: number;
+	nc: number;
+}
+
+/** The patch with only this session's staged hunks, and those hunks as `path:lines`. */
+interface CommitPatch {
+	patch: string;
+	hunks: string[];
+}
+
+/** The "User request" section asking to commit only the hunks in `own`, through a temporary index. */
+function patchSection(own: CommitPatch, subject?: string): string[] {
+	const message = subject ? ` Use this subject: ${JSON.stringify(subject)}.` : "";
+	return [
+		"User request:",
+		`The git index also holds other sessions' hunks: commit exactly your hunks, which are in ${own.patch}:`,
+		...own.hunks.map((hunk) => `- ${hunk}`),
+		`Do not touch the real index. Create a temporary index from HEAD, apply the patch to it, commit with it (a Conventional Commit message derived from the patch), then delete it:${message}`,
+		"```sh",
+		"tmp=$(mktemp -u)",
+		"GIT_INDEX_FILE=$tmp git read-tree HEAD",
+		`GIT_INDEX_FILE=$tmp git apply --cached ${q(own.patch)}`,
+		"GIT_INDEX_FILE=$tmp git commit -m '<message>'",
+		'rm -f "$tmp"',
+		"```",
+		"Report the commit hash. The next session commits the rest of the index after you.",
+	];
+}
+
+/** The agent owning line `line` of `path` in the ledger: the range's owner, or the agent a user edit overwrote. */
+function ownerAt(ownership: Ownership, path: string, line: number): string | undefined {
+	const ranges = ownership.files[path]?.ranges ?? [];
+	const range = ranges.find((r) => r.start <= line && line < r.end) ?? ranges.find((r) => r.start === r.end && r.start === line);
+	return range && (range.owner === "user" ? range.agent : range.owner);
+}
+
 function absolutePath(value: unknown, at: string): string {
 	const path = text(value, at);
 	if (!isAbsolute(path) || path.includes("\0")) throw new BatchError(`${at} must be an absolute path`);
@@ -469,6 +512,8 @@ interface HookState {
 	pid?: number;
 	/** Whether an agent turn of this session is running. */
 	in_turn?: boolean;
+	/** Set while this session commits its share of a staged set that holds other sessions' hunks. */
+	commit_chain?: boolean;
 }
 
 interface Session {
@@ -961,10 +1006,13 @@ class Hook {
 		if (!requested) return undefined;
 		this.state.commit_requested = false;
 		await this.save();
+		const chained = this.state.commit_chain;
+		this.state.commit_chain = undefined;
 		const before = typeof requested === "string" ? requested : this.state.baseline?.commit_oid;
 		const head = await git(this.repo, ["rev-parse", "HEAD"]).then((out) => out.trim(), () => "");
 		if (!head || head === before) return undefined;
 		await this.followHead(true);
+		if (chained) await this.passCommitOn();
 		// Asking for a commit ends any baseline the reviewer pinned in Helix.
 		await this.send([`review-baseline ${head} force`]);
 		return head;
@@ -1151,7 +1199,12 @@ class Hook {
 			if (error instanceof BatchError) return;
 			throw error;
 		}
-		if ((await this.addressee(batch)) !== this.id) {
+		// A batch routed to its owner keeps the original name before its `.<label>` suffix.
+		const routed = basename(path, ".json");
+		const name = batch.target && routed.endsWith(`.${batch.target}`) ? routed.slice(0, -batch.target.length - 1) : routed;
+		const route = batch.target === undefined ? await this.route(path, batch) : "default";
+		if (route === "routed") return;
+		if (route === "default" && (await this.addressee(batch)) !== this.id) {
 			// Another session's: look again if it is still there when the outbox changes.
 			this.seen.delete(basename(path));
 			return;
@@ -1208,6 +1261,8 @@ class Hook {
 			}
 		}
 		const request = batch.request;
+		// With other sessions' hunks staged too, this session commits only its own, from a patch.
+		const own = request?.kind === "commit-staged" ? await this.ownCommitPatch(name) : undefined;
 		if (files.length > 0 || request) {
 			const details = {
 				format: "helix-review-handoff",
@@ -1215,13 +1270,14 @@ class Hook {
 				baseline: this.state.baseline?.commit_oid ?? null,
 				files,
 				...(request ? { request } : {}),
+				...(own ? { commit_patch: own } : {}),
 			};
 			const content = [
 				`The user reviewed your changes in Helix and handed back ${files.length} file(s).`,
 				"Re-read those files from disk and act on the handoff below.",
 				...quote("Handoff", JSON.stringify(details, null, 2)),
 				"Integrate the user's edits and never revert them. Then continue editing or committing normally; that refreshes the review in Helix.",
-				...(request ? requestSection(request, batch.comments) : []),
+				...(own && request?.kind === "commit-staged" ? patchSection(own, request.subject) : request ? requestSection(request, batch.comments) : []),
 			].join("\n");
 			this.pi.sendMessage(
 				{ customType: "helix-review:handoff", content, display: true, details },
@@ -1234,6 +1290,146 @@ class Hook {
 		await this.save();
 		await unlink(path);
 		await this.echo(`${this.label} received your review: ${receipt(files, request)}`);
+	}
+
+	/**
+	 * Routes a batch without a target by the owners of the hunks its comments are on (and, for a
+	 * commit request, of the first staged hunk): "mine" when they are all this session, else
+	 * rewrites it as one batch per owning session, each targeted at it ("routed"). "default"
+	 * leaves the usual choice of session.
+	 */
+	private async route(path: string, batch: ReviewBatch): Promise<"routed" | "mine" | "default"> {
+		const inRepo = await Promise.all(
+			[...batch.files, ...batch.comments].map(async (e) => (await realpath(e.path).catch(() => e.path)).startsWith(this.repo + sep)),
+		);
+		if (inRepo.length > 0 && !inRepo.includes(true)) return "default";
+		const sessions = await this.liveSessions();
+		const ownership = await readOwnership(this.ownershipFile);
+		const labels = batch.comments.map((c) => this.liveLabel(ownerAt(ownership, c.path, c.currentLine), sessions) ?? this.lastEditor(c.path, sessions));
+		const committer = batch.request?.kind === "commit-staged" ? [...(await this.stagedOwners(sessions, ownership)).keys()][0] : undefined;
+		const owners = [...new Set([...labels, ...(committer ? [committer] : [])])];
+		if (owners.length === 0) return "default";
+		if (owners.length === 1 && owners[0] === this.label) return "mine";
+		// Of several sessions routing it, the first rename wins.
+		const routing = path.replace(/\.json$/, `.${this.id}.routing`);
+		try {
+			await rename(path, routing);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return "routed";
+			throw error;
+		}
+		const raw = JSON.parse(await readFile(routing, "utf8")) as { comments: unknown[]; files: unknown[]; request?: { kind: string } };
+		for (const owner of owners) {
+			const doc = { ...raw, comments: raw.comments.filter((_, i) => labels[i] === owner), target: owner };
+			// One commit request, to the owner of the first staged hunk; the rest follow in turn.
+			if (raw.request?.kind === "commit-staged" && owner !== committer) delete doc.request;
+			if (doc.comments.length === 0 && !doc.request && raw.files.length === 0) continue;
+			const split = path.replace(/\.json$/, `.${owner}.json`);
+			await writeFile(`${split}.tmp`, JSON.stringify(doc));
+			await rename(`${split}.tmp`, split);
+		}
+		await unlink(routing);
+		return "routed";
+	}
+
+	/** `label` when a live session has it. */
+	private liveLabel(label: string | undefined, sessions: Session[]): string | undefined {
+		return label && sessions.some((s) => s.state.label === label) ? label : undefined;
+	}
+
+	/** The live session that last changed `path` in a turn, else the most recently active one. */
+	private lastEditor(path: string, sessions: Session[]): string {
+		const newest = (key: (s: Session) => number) => sessions.reduce((a, b) => (key(b) > key(a) ? b : a));
+		const editor = newest((s) => s.state.edited?.[path] ?? 0);
+		return ((editor.state.edited?.[path] ?? 0) > 0 ? editor : newest((s) => s.state.last_active ?? 0)).state.label!;
+	}
+
+	/**
+	 * The staged hunks (`git diff --cached`) grouped by the live session owning them in the ledger,
+	 * in order of first appearance; hunks without a live owner go to the most recently active session.
+	 */
+	private async stagedOwners(sessions: Session[], ownership: Ownership): Promise<Map<string, StagedHunk[]>> {
+		const groups = new Map<string, StagedHunk[]>();
+		const names = (await git(this.repo, ["diff", "--cached", "--name-only", "-z"])).split("\0").filter(Boolean);
+		const empty = (await git(this.repo, ["hash-object", "-w", "--stdin"], "")).trim();
+		for (const name of names) {
+			const path = join(this.repo, name);
+			if (this.isPiState(path)) continue;
+			const head = await this.headBlob(path);
+			const index = await git(this.repo, ["rev-parse", "--verify", "--quiet", `:${name}`]).then((out) => out.trim() || empty, () => empty);
+			const entry = ownership.files[path];
+			// Index lines map to the ledger's (worktree) lines through the unstaged changes.
+			const unstaged = entry ? await blobHunks(this.repo, index, entry.blob) : [];
+			const toWorktree = (line: number) => {
+				let shift = 0;
+				for (const [os, oc, ns, nc] of unstaged) {
+					if (os + oc <= line) shift += nc - oc;
+					else if (os <= line) return ns;
+				}
+				return line + shift;
+			};
+			for (const [os, oc, ns, nc] of await blobHunks(this.repo, head, index)) {
+				const start = toWorktree(ns) + 1;
+				const ranges = (entry?.ranges ?? []).filter((r) =>
+					nc === 0 ? r.start === start || (r.start <= start && start < r.end) : r.start < start + nc && start < r.end,
+				);
+				const last = ranges.sort((a, b) => b.at - a.at)[0];
+				const agent = last && (last.owner === "user" ? last.agent : last.owner);
+				const owner = this.liveLabel(agent, sessions) ?? this.lastEditor(path, sessions);
+				groups.set(owner, [...(groups.get(owner) ?? []), { name, head, index, os, oc, ns, nc }]);
+			}
+		}
+		return groups;
+	}
+
+	/**
+	 * When the index also holds other sessions' hunks, writes this session's into
+	 * `commits/<batch>-<label>.patch` (against `HEAD`) and returns it, marking the commit as a link
+	 * in a chain the next owner continues.
+	 */
+	private async ownCommitPatch(batch: string): Promise<CommitPatch | undefined> {
+		const groups = await this.stagedOwners(await this.liveSessions(), await readOwnership(this.ownershipFile));
+		const mine = groups.get(this.label);
+		if (!mine || groups.size < 2) return undefined;
+		const patch = join(this.dir, "commits", `${batch}-${this.label}.patch`);
+		await mkdir(dirname(patch), { recursive: true });
+		await writeFile(patch, await this.patchOf(mine));
+		this.state.commit_chain = true;
+		return {
+			patch,
+			hunks: mine.map((h) => (h.nc === 0 ? `${h.name}:${h.ns} (lines removed after it)` : `${h.name}:${h.ns + 1}-${h.ns + h.nc}`)),
+		};
+	}
+
+	/** A unified diff, applying to `HEAD`, of only `hunks`. */
+	private async patchOf(hunks: StagedHunk[]): Promise<string> {
+		let patch = "";
+		for (const name of [...new Set(hunks.map((h) => h.name))]) {
+			const own = hunks.filter((h) => h.name === name);
+			const split = (text: string) => text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+			const lines = split(await git(this.repo, ["cat-file", "blob", own[0].head]));
+			const index = split(await git(this.repo, ["cat-file", "blob", own[0].index]));
+			for (const h of [...own].sort((a, b) => b.os - a.os)) lines.splice(h.os, h.oc, ...index.slice(h.ns, h.ns + h.nc));
+			const blob = (await git(this.repo, ["hash-object", "-w", "--stdin"], lines.join(""))).trim();
+			const diff = await git(this.repo, ["diff", "--no-color", "--no-ext-diff", "--no-textconv", own[0].head, blob]);
+			const inHead = await git(this.repo, ["rev-parse", "--verify", "--quiet", `HEAD:${name}`]).then(() => true, () => false);
+			// shortcut: a new file is always mode 100644, and removing a whole file stays a modification.
+			const header = inHead ? `--- a/${name}\n` : "new file mode 100644\n--- /dev/null\n";
+			patch += `diff --git a/${name} b/${name}\n${header}+++ b/${name}\n${diff.slice(diff.indexOf("@@"))}`;
+		}
+		return patch;
+	}
+
+	/** After this session committed its share, asks the owner of the first remaining staged hunk to commit. */
+	private async passCommitOn(): Promise<void> {
+		const groups = await this.stagedOwners(await this.liveSessions(), await readOwnership(this.ownershipFile));
+		const next = [...groups.keys()].find((label) => label !== this.label);
+		if (!next) return;
+		const batch = join(this.outbox, `${Date.now()}-${process.pid}-commit.json`);
+		const doc = { format: "helix-review-batch", version: 2, files: [], comments: [], request: { kind: "commit-staged" }, target: next };
+		await writeFile(`${batch}.tmp`, JSON.stringify(doc));
+		await rename(`${batch}.tmp`, batch);
+		await this.echo(`${this.label} committed its hunks; ${next} commits the rest`);
 	}
 
 	private async save(): Promise<void> {

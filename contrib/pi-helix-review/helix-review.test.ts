@@ -1083,10 +1083,12 @@ test("several sessions in one repository each take only the batches meant for th
 	});
 	const got = (session: typeof one) => session.messages.map((m) => m.message.details.files[0].review_comments[0].comment);
 
-	for (const path of [send("1-1.json", a), send("1-2.json", b), send("1-3.json", b, { target: "session-1" })]) {
-		await until(() => !existsSync(path), path);
+	// One at a time: a batch routed by ownership is rewritten for its owner before it is handled.
+	const handled = () => got(one).length + got(two).length;
+	for (const [i, path] of [() => send("1-1.json", a), () => send("1-2.json", b), () => send("1-3.json", b, { target: "session-1" })].entries()) {
+		path();
+		await until(() => handled() === i + 1, `handoff ${i + 1}`);
 	}
-	await until(() => got(one).length + got(two).length === 3, "all three handoffs");
 	assert.deepEqual(got(one), ["1-1.json", "1-3.json"], "the editor of a.rs, then the target");
 	assert.deepEqual(got(two), ["1-2.json"], "the most recently active session");
 	assert.deepEqual(readdirSync(outbox), []);
@@ -1358,6 +1360,96 @@ test("the ownership ledger tracks who changed which lines until they are committ
 	w.commit();
 	await until(() => owners().length === 1, "the poller to prune the committed ranges");
 	assert.deepEqual(owners(), [[1, 3, "pi-2", "pi-2"]]);
+});
+
+test("comments go to the owners of their hunks, and each owner commits only its staged hunks", async (t) => {
+	const w = workspace(t);
+	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });
+	const repo = realpathSync(w.repo);
+	const file = join(repo, "a.rs");
+	const edit = (line: number, text: string) => {
+		const all = readFileSync(file, "utf8").split("\n");
+		all[line - 1] = text;
+		writeFileSync(file, all.join("\n"));
+	};
+	w.stage("a.rs", Array.from({ length: 10 }, (_, i) => `${i + 1}\n`).join(""));
+	const head = w.commit();
+	const blob = git(repo, "rev-parse", "HEAD:a.rs");
+	const outbox = join(repo, ".pi", "helix-review", "outbox");
+	const edited = { toolName: "edit", input: { path: file }, content: [], isError: false };
+
+	const one = piSession(repo, "session-1");
+	t.after(() => one.emit("session_shutdown"));
+	await one.emit("session_start", { reason: "startup" });
+	const two = piSession(repo, "session-2");
+	t.after(() => two.emit("session_shutdown"));
+	await two.emit("session_start", { reason: "startup" });
+	// pi-1 changes line 2, pi-2 line 8.
+	await one.emit("agent_start");
+	edit(2, "two");
+	await one.emit("tool_result", edited);
+	await one.emit("agent_end", { messages: [] });
+	await two.emit("agent_start");
+	edit(8, "eight");
+	await two.emit("tool_result", edited);
+	await two.emit("agent_end", { messages: [] });
+
+	const send = (name: string, doc: object) => {
+		const batch = join(outbox, name);
+		writeFileSync(`${batch}.tmp`, JSON.stringify({ format: "helix-review-batch", version: 2, files: [], comments: [], ...doc }));
+		renameSync(`${batch}.tmp`, batch);
+	};
+	const comment = (line: number, text: string) => ({
+		path: file,
+		side: "current",
+		baseline: commitBase(head, blob),
+		start_line: line,
+		end_line: line,
+		current_line: line,
+		selected_text: "x",
+		context_before: "",
+		context_after: "",
+		comment: text,
+	});
+	const commented = (session: ReturnType<typeof piSession>) =>
+		session.messages.flatMap((m) => m.message.details.files.flatMap((f: { review_comments: { comment: string }[] }) => f.review_comments.map((c) => c.comment)));
+
+	// One batch with a comment on each session's hunk is split between them.
+	send("1-1.json", { comments: [comment(2, "on two"), comment(8, "on eight")] });
+	await until(() => one.messages.length === 1 && two.messages.length === 1, "each owner's share");
+	assert.deepEqual(commented(one), ["on two"]);
+	assert.deepEqual(commented(two), ["on eight"]);
+	assert.deepEqual(readdirSync(outbox), []);
+
+	// With both hunks staged, pi-1 commits only its own, from a patch, through a temporary index.
+	git(repo, "add", "a.rs");
+	send("1-2.json", { request: { kind: "commit-staged" } });
+	await until(() => one.messages.length === 2, "pi-1's commit request");
+	assert.equal(two.messages.length, 1);
+	const first = one.messages[1].message;
+	assert.deepEqual(first.details.commit_patch.hunks, ["a.rs:2-2"]);
+	const patch = first.details.commit_patch.patch;
+	assert.equal(patch, join(repo, ".pi", "helix-review", "commits", "1-2-pi-1.patch"));
+	assert.match(readFileSync(patch, "utf8"), /^diff --git a\/a.rs b\/a.rs\n--- a\/a.rs\n\+\+\+ b\/a.rs\n@@ [^\n]*\n( [^\n]*\n)*-2\n\+two\n( [^\n]*\n)*$/);
+	assert.doesNotMatch(readFileSync(patch, "utf8"), /eight/);
+	assert.match(first.content, /GIT_INDEX_FILE=\$tmp git apply --cached/);
+	const tmp = join(w.root, "index.tmp");
+	const env = { ...gitEnv, GIT_INDEX_FILE: tmp };
+	const run = (...args: string[]) => execFileSync("git", args, { cwd: repo, env, encoding: "utf8" });
+	run("read-tree", "HEAD");
+	run("apply", "--cached", patch);
+	run("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "pi-1's share");
+	rmSync(tmp);
+	assert.equal(git(repo, "show", "HEAD:a.rs").split("\n")[7], "8");
+
+	// At the end of its turn, pi-2 is asked to commit the rest: the real index, as usual.
+	await one.emit("agent_end", { messages: [] });
+	await until(() => two.messages.length === 2, "pi-2's commit request");
+	const rest = two.messages[1].message;
+	assert.deepEqual(rest.details.request, { kind: "commit-staged" });
+	assert.equal(rest.details.commit_patch, undefined);
+	assert.match(rest.content, /Commit exactly what is staged in the git index/);
+	assert.equal(git(repo, "diff", "--cached", "--stat"), "a.rs | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)");
 });
 
 test("a Helix restarted on the same socket is attached again without waiting for a failed send", async (t) => {

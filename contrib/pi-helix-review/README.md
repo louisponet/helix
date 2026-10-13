@@ -177,6 +177,23 @@ version moves into the first session's file. Ignore `.pi/` in Git.
   in a turn (`in_turn` in the state files). A file seen for the first time
   gives what already differed from `HEAD` to `user`. Ranges a commit took in
   are dropped, so the ledger only holds uncommitted work.
+- Routing by ownership: a batch without a `target` goes to the sessions owning
+  the hunks its comments are on (the range's agent, for your own edits the
+  agent you overwrote, else the session that last changed the file, else the
+  most recently active one). When that is several sessions, the first session
+  to see it rewrites it as `<name>.<label>.json`, one per owner, each with only
+  its comments (and the batch's files) and targeted at it, so each owner claims
+  its own. A `target` still wins.
+- Commit requests by ownership: `:review-commit` / `:review-commit-all` go to
+  the owner of the first staged hunk (`git diff --cached`, attributed through
+  the ledger). When the index also holds other sessions' hunks, that owner gets
+  `<mailbox>/commits/<batch>-<label>.patch` with only its hunks (listed as
+  `path:lines`) and is told to commit them through a temporary index
+  (`GIT_INDEX_FILE=<tmp> git read-tree HEAD`, `git apply --cached`,
+  `git commit`), leaving the real index alone. At the end of that turn, once
+  `HEAD` moved, the owner of the first remaining staged hunk gets the next
+  request the same way; the last one commits the real index as usual. Hunks
+  of a session that is gone go to the most recently active one.
 - Worktrees: a session started in the main checkout that edits files in a
   `git worktree` of it (or changes one with `bash`, noticed at the end of the
   turn from `git worktree list` and `git status`) gets a second hook for that
