@@ -512,6 +512,8 @@ interface HookState {
 	pid?: number;
 	/** Whether an agent turn of this session is running. */
 	in_turn?: boolean;
+	/** When the running turn started (ms since the epoch); cleared at its end. */
+	turn_started?: number;
 	/** Set while this session commits its share of a staged set that holds other sessions' hunks. */
 	commit_chain?: boolean;
 }
@@ -700,6 +702,7 @@ class Hook {
 			if (state) await unlink(join(dir, "state.json")).catch(() => undefined);
 		}
 		const hook = new Hook(pi, repo, dir, id, { ...(state ?? { snapshots: {} }), cwd });
+		await hook.removeDeadSessions();
 		const taken = new Set((await hook.liveSessions()).filter((s) => s.id !== id).map((s) => s.state.label));
 		if (!hook.state.label || taken.has(hook.state.label)) {
 			let n = 1;
@@ -856,9 +859,30 @@ class Hook {
 		return sessions;
 	}
 
+	/** Deletes the state files of sessions whose pi process is gone. */
+	private async removeDeadSessions(): Promise<void> {
+		for (const name of await readdir(join(this.dir, "state")).catch(() => [] as string[])) {
+			if (!name.endsWith(".json") || name === "ownership.json" || name === `${this.id}.json`) continue;
+			const path = join(this.dir, "state", name);
+			const state = await readState(path);
+			if (state && !alive(state.pid)) await unlink(path).catch(() => undefined);
+		}
+	}
+
+	/**
+	 * Of `sessions`, the least busy: the longest idle of those not in a turn, else the one whose
+	 * turn started first.
+	 */
+	private idlest(sessions: Session[]): Session {
+		const idle = sessions.filter((s) => !s.state.in_turn);
+		const pool = idle.length > 0 ? idle : sessions;
+		const key = (s: Session) => (idle.length > 0 ? s.state.last_active : s.state.turn_started) ?? 0;
+		return pool.reduce((a, b) => (key(b) < key(a) || (key(b) === key(a) && b.id < a.id) ? b : a));
+	}
+
 	/**
 	 * The session `batch` is for: the one it targets, else the live session that last changed one
-	 * of its files during a turn, else the most recently active live session.
+	 * of its files during a turn, else the least busy live session.
 	 */
 	private async addressee(batch: ReviewBatch): Promise<string | undefined> {
 		const sessions = await this.liveSessions();
@@ -870,7 +894,7 @@ class Hook {
 			sessions.reduce((a, b) => (key(b) > key(a) || (key(b) === key(a) && b.id < a.id) ? b : a));
 		const edited = (s: Session) => Math.max(0, ...paths.map((path) => s.state.edited?.[path] ?? 0));
 		const editor = newest(edited);
-		return edited(editor) > 0 ? editor.id : newest((s) => s.state.last_active ?? 0).id;
+		return edited(editor) > 0 ? editor.id : this.idlest(sessions).id;
 	}
 
 	get outbox(): string {
@@ -893,9 +917,13 @@ class Hook {
 		this.poller.unref();
 	}
 
-	/** Puts batches claimed long ago by sessions that are gone back in the outbox. */
+	/**
+	 * Puts batches claimed long ago by sessions that are gone back in the outbox, and deletes the
+	 * state files of those sessions.
+	 */
 	private async sweep(): Promise<void> {
 		const live = new Set((await this.liveSessions()).map((s) => s.id));
+		await this.removeDeadSessions();
 		for (const name of await readdir(this.outbox)) {
 			const claim = /^(.+)\.([^.]+)\.claimed$/.exec(name);
 			if (!claim || live.has(claim[2])) continue;
@@ -911,6 +939,7 @@ class Hook {
 		if (!this.stopped) {
 			this.state.pid = undefined;
 			this.state.in_turn = undefined;
+			this.state.turn_started = undefined;
 			void this.save().catch(() => undefined);
 		}
 		this.stopped = true;
@@ -924,6 +953,7 @@ class Hook {
 		await this.followHead(true);
 		this.turnStart = midTurn ? {} : await this.changedFiles();
 		this.state.in_turn = true;
+		this.state.turn_started = Date.now();
 		await this.touch();
 		await this.attach();
 	}
@@ -1129,6 +1159,7 @@ class Hook {
 	async endTurn(): Promise<void> {
 		await this.attribute(undefined, this.label);
 		this.state.in_turn = false;
+		this.state.turn_started = undefined;
 		await this.save();
 	}
 
@@ -1337,16 +1368,16 @@ class Hook {
 		return label && sessions.some((s) => s.state.label === label) ? label : undefined;
 	}
 
-	/** The live session that last changed `path` in a turn, else the most recently active one. */
+	/** The live session that last changed `path` in a turn, else the least busy one. */
 	private lastEditor(path: string, sessions: Session[]): string {
-		const newest = (key: (s: Session) => number) => sessions.reduce((a, b) => (key(b) > key(a) ? b : a));
-		const editor = newest((s) => s.state.edited?.[path] ?? 0);
-		return ((editor.state.edited?.[path] ?? 0) > 0 ? editor : newest((s) => s.state.last_active ?? 0)).state.label!;
+		const edited = (s: Session) => s.state.edited?.[path] ?? 0;
+		const editor = sessions.reduce((a, b) => (edited(b) > edited(a) ? b : a));
+		return (edited(editor) > 0 ? editor : this.idlest(sessions)).state.label!;
 	}
 
 	/**
 	 * The staged hunks (`git diff --cached`) grouped by the live session owning them in the ledger,
-	 * in order of first appearance; hunks without a live owner go to the most recently active session.
+	 * in order of first appearance; hunks without a live owner go to the least busy session.
 	 */
 	private async stagedOwners(sessions: Session[], ownership: Ownership): Promise<Map<string, StagedHunk[]>> {
 		const groups = new Map<string, StagedHunk[]>();

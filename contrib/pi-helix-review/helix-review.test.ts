@@ -1053,13 +1053,13 @@ test("several sessions in one repository each take only the batches meant for th
 	const two = piSession(repo, "session-2");
 	t.after(() => two.emit("session_shutdown"));
 	await two.emit("session_start", { reason: "startup" });
-	// Session 1 edits a.rs in its turn; session 2 runs a later turn that edits nothing.
+	// Session 2 runs a turn that edits nothing; session 1 edits a.rs in a later turn.
+	await two.emit("agent_start");
+	await two.emit("agent_end", { messages: [] });
+	await new Promise((wake) => setTimeout(wake, 5));
 	await one.emit("agent_start");
 	writeFileSync(a, "a edited\n");
 	await one.emit("agent_end", { messages: [] });
-	await new Promise((wake) => setTimeout(wake, 5));
-	await two.emit("agent_start");
-	await two.emit("agent_end", { messages: [] });
 	assert.ok(state("session-1").edited[a] > 0);
 	assert.equal(state("session-2").edited?.[a], undefined);
 
@@ -1090,7 +1090,7 @@ test("several sessions in one repository each take only the batches meant for th
 		await until(() => handled() === i + 1, `handoff ${i + 1}`);
 	}
 	assert.deepEqual(got(one), ["1-1.json", "1-3.json"], "the editor of a.rs, then the target");
-	assert.deepEqual(got(two), ["1-2.json"], "the most recently active session");
+	assert.deepEqual(got(two), ["1-2.json"], "the longest idle session");
 	assert.deepEqual(readdirSync(outbox), []);
 
 	// A claim left over 10 minutes ago by a session that is gone goes back to the outbox on the
@@ -1108,6 +1108,55 @@ test("several sessions in one repository each take only the batches meant for th
 	await until(() => got(three).length === 1, "the swept batch");
 	assert.deepEqual(got(three), ["1-4.json"]);
 	assert.deepEqual(readdirSync(outbox), ["1-5.session-9.claimed"]);
+});
+
+test("a batch nobody's changes explain goes to the least busy session, and dead sessions' state is removed", async (t) => {
+	const w = workspace(t);
+	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });
+	const repo = realpathSync(w.repo);
+	const file = join(repo, "a.rs");
+	w.stage("a.rs", "a\n");
+	const head = w.commit();
+	const dir = join(repo, ".pi", "helix-review");
+	const outbox = join(dir, "outbox");
+	mkdirSync(join(dir, "state"), { recursive: true });
+	const dead = join(dir, "state", "session-dead.json");
+	writeFileSync(dead, JSON.stringify({ snapshots: {}, label: "pi-1", pid: 2 ** 22 + 12345, baseline: { commit_oid: head } }));
+
+	const tick = () => new Promise((wake) => setTimeout(wake, 5));
+	const sessions: ReturnType<typeof piSession>[] = [];
+	for (const id of ["idle-long", "idle-short", "busy-early", "busy-late"]) {
+		const s = piSession(repo, id);
+		t.after(() => s.emit("session_shutdown"));
+		await s.emit("session_start", { reason: "startup" });
+		sessions.push(s);
+		await tick();
+	}
+	const [idleLong, idleShort, busyEarly, busyLate] = sessions;
+	assert.ok(!existsSync(dead), "a dead session's state file is removed at open");
+	await busyEarly.emit("agent_start");
+	await tick();
+	await busyLate.emit("agent_start");
+
+	let n = 0;
+	const send = () => {
+		const path = join(outbox, `9-${++n}.json`);
+		const comment = { path: file, side: "current", baseline: commitBase(head, null), start_line: 1, end_line: 1, current_line: 1, selected_text: "a", context_before: "", context_after: "", comment: "c" };
+		writeFileSync(`${path}.tmp`, JSON.stringify({ format: "helix-review-batch", version: 2, files: [], comments: [comment] }));
+		renameSync(`${path}.tmp`, path);
+	};
+	const counts = () => sessions.map((s) => s.messages.length);
+	send();
+	await until(() => counts().reduce((a, b) => a + b) === 1, "the first handoff");
+	assert.deepEqual(counts(), [1, 0, 0, 0], "the longest idle of the sessions not in a turn");
+
+	await tick();
+	await idleShort.emit("agent_start");
+	await idleLong.emit("agent_start");
+	send();
+	await until(() => counts().reduce((a, b) => a + b) === 2, "the second handoff");
+	assert.deepEqual(counts(), [1, 0, 1, 0], "with every session in a turn, the one whose turn started first");
+	assert.deepEqual(readdirSync(outbox), []);
 });
 
 test("sessions are named pi-N in Helix, and every session's review follows HEAD", async (t) => {

@@ -180,7 +180,9 @@ version moves into the first session's file. Ignore `.pi/` in Git.
 - Routing by ownership: a batch without a `target` goes to the sessions owning
   the hunks its comments are on (the range's agent, for your own edits the
   agent you overwrote, else the session that last changed the file, else the
-  most recently active one). When that is several sessions, the first session
+  least busy one: the longest idle of the sessions not in a turn (oldest
+  `last_active`), or when all are in a turn the one whose turn started first
+  (`turn_started`)). When that is several sessions, the first session
   to see it rewrites it as `<name>.<label>.json`, one per owner, each with only
   its comments (and the batch's files) and targeted at it, so each owner claims
   its own. A `target` still wins.
@@ -193,7 +195,7 @@ version moves into the first session's file. Ignore `.pi/` in Git.
   `git commit`), leaving the real index alone. At the end of that turn, once
   `HEAD` moved, the owner of the first remaining staged hunk gets the next
   request the same way; the last one commits the real index as usual. Hunks
-  of a session that is gone go to the most recently active one.
+  of a session that is gone go to the least busy one, chosen as above.
 - Worktrees: a session started in the main checkout that edits files in a
   `git worktree` of it (or changes one with `bash`, noticed at the end of the
   turn from `git worktree list` and `git status`) gets a second hook for that
@@ -226,11 +228,11 @@ is the pull request's base (`gh pr view`, once per session), else
 
 Each batch goes to one live session: the one
 its `target` names (a session id or label such as `pi-2`), else the one that last changed one of its
-files during a turn, else the most recently active one. Only that session
+files during a turn, else the least busy one (as for routing by ownership). Only that session
 claims it, by renaming it to `<name>.<session id>.claimed` (if the rename
 fails another session got it first) before handling and deleting it. On
 start, a session puts back claims older than 10 minutes whose session is no
-longer live.
+longer live, and deletes the state files of sessions whose pid is not running.
 
 The JSON in the handoff message is described in [`schema.md`](schema.md).
 
