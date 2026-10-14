@@ -2054,11 +2054,11 @@ async fn hunks_committed_after_the_baseline_are_neither_staged_nor_stageable() -
         Some(surface[(inner.x, inner.y + y)].bg)
     };
     let theme = &app.editor.theme;
-    // A faint tint a few steps off the editor background.
+    // A muted tint, still clearly off the editor background.
     use helix_view::graphics::Color;
     for (row, scope, tint) in [
-        ("B", "diff.plus.review", Color::Rgb(0x3f, 0x27, 0x51)),
-        ("b", "diff.minus.review", Color::Rgb(0x4a, 0x22, 0x4a)),
+        ("B", "diff.plus.review", Color::Rgb(0x35, 0x33, 0x57)),
+        ("b", "diff.minus.review", Color::Rgb(0x4b, 0x2c, 0x4f)),
     ] {
         let committed = theme.get(&format!("{scope}.committed")).bg;
         assert_eq!(committed, Some(tint), "{scope}.committed");

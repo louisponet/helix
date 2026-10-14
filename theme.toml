@@ -44,8 +44,8 @@ tabstop = { modifiers = ["italic"], bg = "bossanova" }
 "diff.minus.review" = { fg = "#f22c86", bg = "#5e2550" }
 "diff.plus.review.staged" = { bg = "#2b3f5e" }
 "diff.minus.review.staged" = { fg = "#8a8696", bg = "#3b3946" }
-"diff.plus.review.committed" = { bg = "#3f2751" }
-"diff.minus.review.committed" = { fg = "#9d93b0", bg = "#4a224a" }
+"diff.plus.review.committed" = { bg = "#353357" }
+"diff.minus.review.committed" = { fg = "#a49ab6", bg = "#4b2c4f" }
 "ui.review.thread" = { fg = "#9a96a8", bg = "#2a2833" }
 "ui.review.owner" = { fg = "comet", modifiers = ["dim"] }
 

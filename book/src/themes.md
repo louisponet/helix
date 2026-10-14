@@ -282,12 +282,12 @@ See also [#2380]
     - `gutter` - gutter indicator
     - `review` - lines changed since the selected baseline during [`:review`](./review.md)
       - `staged` - those lines when their hunk is already staged in the git index
-      - `committed` - those lines when their hunk was committed after the baseline, best a faint tint a few steps off the background (falls back to `staged`)
+      - `committed` - those lines when their hunk was committed after the baseline, best a muted tint that is still clearly visible against the background (falls back to `staged`)
   - `minus` - deletions
     - `gutter` - gutter indicator
     - `review` - old baseline lines shown inline during [`:review`](./review.md)
       - `staged` - those old lines when their hunk is already staged in the git index
-      - `committed` - those old lines when their hunk was committed after the baseline, best a faint tint with a dimmed foreground (falls back to `staged`)
+      - `committed` - those old lines when their hunk was committed after the baseline, best a muted but clearly visible tint with a dimmed, readable foreground (falls back to `staged`)
   - `delta` - modifications
     - `moved` - renamed or moved files/changes
     - `conflict` - merge conflicts

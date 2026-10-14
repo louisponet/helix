@@ -216,7 +216,7 @@ like this:
    grey (`diff.plus.review.staged`, `diff.minus.review.staged`) until the next
    edit. Save first: only what is on disk is staged. A hunk `HEAD` already
    holds was committed after the baseline (by the agent, say): it gets its own
-   colours (`diff.plus.review.committed`, `diff.minus.review.committed`, a faint
+   colours (`diff.plus.review.committed`, `diff.minus.review.committed`, a muted
    tint in the default theme, falling back to the staged ones) and is counted as committed, and staging or unstaging it fails
    with `already committed in <commit>`. A block that mixes committed lines
    with newer edits next to them acts as one unit: `Enter` anywhere in it
