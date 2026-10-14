@@ -2065,10 +2065,7 @@ async fn hunks_committed_after_the_baseline_are_neither_staged_nor_stageable() -
         assert_eq!(row_bg(row), committed, "{row}");
     }
 
-    send_keys(&mut app, "j<ret>").await?;
-    assert_error(&app, &format!("already committed in {}", &head[..8]));
-    assert_eq!(git_ok(dir, &["diff", "--cached"]), "");
-    send_keys(&mut app, ":review-commit<ret>").await?;
+    send_keys(&mut app, "j:review-commit<ret>").await?;
     assert_error(
         &app,
         &format!(
@@ -2076,6 +2073,23 @@ async fn hunks_committed_after_the_baseline_are_neither_staged_nor_stageable() -
             &head[..8]
         ),
     );
+    // With everything committed, Enter on the committed hunk only jumps to the next block.
+    send_keys(&mut app, "<ret>").await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(
+        app.editor.get_status().unwrap().0,
+        "next: file.txt hunk 1 of 1"
+    );
+    assert_eq!(git_ok(dir, &["diff", "--cached"]), "");
+    // With an uncommitted change elsewhere, it says the hunk is committed.
+    fs::write(
+        dir.join("other.txt"),
+        "x
+",
+    )?;
+    git_ok(dir, &["add", "other.txt"]);
+    send_keys(&mut app, "<ret>").await?;
+    assert_error(&app, &format!("already committed in {}", &head[..8]));
     Ok(())
 }
 
@@ -2378,14 +2392,15 @@ async fn review_next_skips_committed_hunks_and_files() -> anyhow::Result<()> {
     send_keys(&mut app, "<space>AN").await?;
     assert_eq!(at(&app), ("file.txt".to_owned(), 14));
 
-    // With everything committed, there is nowhere to go.
+    // With everything committed, every block counts again, other.txt's too.
     git_ok(dir, &["commit", "-am", "rest"]);
     send_keys(&mut app, &pin).await?;
     send_keys(&mut app, "<space>An").await?;
-    assert_error(
-        &app,
-        &format!("no uncommitted changes since {}", &baseline[..8]),
-    );
+    assert_eq!(at(&app), ("other.txt".to_owned(), 0));
+    assert_eq!(status(&app), "other.txt: hunk 1 of 1");
+    send_keys(&mut app, "<space>An").await?;
+    assert_eq!(at(&app), ("file.txt".to_owned(), 2));
+    assert_eq!(status(&app), "file.txt: hunk 1 of 3");
     Ok(())
 }
 
@@ -2637,6 +2652,53 @@ async fn review_pr_checks_out_a_pull_request_and_reviews_it_against_the_merge_ba
     send_keys(&mut app, ":review-pr close<ret>").await?;
     assert!(app.editor.review_pr.is_none());
     assert!(!element(&app).contains("#7"), "{}", element(&app));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_next_and_enter_walk_the_committed_hunks_of_a_pull_request() -> anyhow::Result<()> {
+    let fixture = PrFixture::new(
+        "a\nb\nc\nd\ne\nf\n",
+        "a\nB\nc\nd\ne\nF\n",
+        r#"api\ *) echo '[]';;"#,
+    );
+    let dir = fixture.repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let mut app = fixture.open().await?;
+    let status = |app: &Application| app.editor.get_status().unwrap().0.to_string();
+    let at = |app: &Application| {
+        let (view, doc) = current_ref!(app.editor);
+        let name = doc.path().unwrap().file_name().unwrap().to_owned();
+        let line = doc
+            .selection(view.id)
+            .primary()
+            .cursor_line(doc.text().slice(..));
+        (name.into_string().unwrap(), line)
+    };
+
+    // file.txt's hunks are on lines 2 and 6 (1-based); new.txt is new.
+    send_keys(&mut app, "gg<space>An").await?;
+    assert_eq!(at(&app), ("file.txt".to_owned(), 1));
+    assert_eq!(status(&app), "file.txt: hunk 1 of 2");
+    send_keys(&mut app, "<space>An").await?;
+    assert_eq!(at(&app), ("file.txt".to_owned(), 5));
+    assert_eq!(status(&app), "file.txt: hunk 2 of 2");
+    send_keys(&mut app, "<space>An").await?;
+    assert_eq!(at(&app), ("new.txt".to_owned(), 0));
+    assert_eq!(status(&app), "new.txt: hunk 1 of 1");
+    send_keys(&mut app, "<space>AN").await?;
+    assert_eq!(at(&app), ("file.txt".to_owned(), 5));
+    assert_eq!(status(&app), "file.txt: hunk 2 of 2");
+
+    // Enter on a committed hunk jumps on without staging; Shift-Enter comes back.
+    send_keys(&mut app, "<ret>").await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(at(&app), ("new.txt".to_owned(), 0));
+    assert_eq!(status(&app), "next: new.txt hunk 1 of 1");
+    assert_eq!(git_ok(dir, &["diff", "--cached"]), "");
+    send_keys(&mut app, "<S-ret>").await?;
+    assert_eq!(at(&app), ("file.txt".to_owned(), 5));
+    assert_eq!(status(&app), "previous: file.txt hunk 2 of 2");
     Ok(())
 }
 

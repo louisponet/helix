@@ -134,11 +134,51 @@ pub(super) fn changed_files_since(
         .get_changed_files_since(&workspace, &commit, trust_full)
 }
 
+/// Whether every change since the baseline in `changes` is committed, nothing staged or unstaged
+/// in any of their files, as when reviewing a pull request.
+fn only_committed(editor: &Editor, changes: &[FileChange]) -> bool {
+    let trust_full = doc_trust_full(editor);
+    changes.iter().all(|change| match change {
+        FileChange::Deleted { .. } => {
+            !change.path().exists()
+                && editor
+                    .diff_providers
+                    .get_commit_base(change.path(), "HEAD", trust_full)
+                    .is_err()
+        }
+        _ => file_committed(editor, change.path(), trust_full),
+    })
+}
+
+/// Whether `file` is saved and its worktree and index content both match `HEAD`.
+fn file_committed(editor: &Editor, file: &Path, trust_full: bool) -> bool {
+    !editor
+        .document_by_path(file)
+        .is_some_and(Document::is_modified)
+        && editor
+            .diff_providers
+            .get_commit_base(file, "HEAD", trust_full)
+            .is_ok_and(|head| {
+                std::fs::read(file).is_ok_and(|worktree| head.data == worktree)
+                    && editor
+                        .diff_providers
+                        .get_index_base(file, trust_full)
+                        .is_ok_and(|(index, _)| index == head.data)
+            })
+}
+
 /// Moves to the next (or previous) changed block `count` times: within the current buffer, then
-/// on to the first (or last) block of the next (or previous) changed file, wrapping around.
+/// on to the first (or last) block of the next (or previous) changed file, wrapping around. Only
+/// blocks not yet committed count, unless everything since the baseline is committed.
 fn jump_change(cx: &mut compositor::Context, forward: bool, count: usize) -> anyhow::Result<()> {
     cx.editor.nav_mode = helix_view::editor::NavMode::Review;
     let (commit, changes) = changed_files(cx)?;
+    let every = only_committed(cx.editor, &changes);
+    let blocks: fn(&Review) -> Vec<ops::Range<usize>> = if every {
+        Review::hunk_lines
+    } else {
+        Review::uncommitted_hunk_lines
+    };
     // Deleted files have nothing to land on.
     let files: Vec<PathBuf> = changes
         .iter()
@@ -155,11 +195,7 @@ fn jump_change(cx: &mut compositor::Context, forward: bool, count: usize) -> any
             .selection(view.id)
             .primary()
             .cursor_line(doc.text().slice(..));
-        let hunks = doc
-            .review
-            .as_ref()
-            .map(Review::uncommitted_hunk_lines)
-            .unwrap_or_default();
+        let hunks = doc.review.as_ref().map(blocks).unwrap_or_default();
         let here = if forward {
             hunks.iter().position(|lines| lines.start > cursor)
         } else {
@@ -185,19 +221,8 @@ fn jump_change(cx: &mut compositor::Context, forward: bool, count: usize) -> any
         let mut landed = false;
         for next in order {
             let file = &files[next];
-            // A saved file that matches HEAD has only committed hunks: skip it without opening.
-            let all_committed = !cx
-                .editor
-                .document_by_path(file)
-                .is_some_and(Document::is_modified)
-                && cx
-                    .editor
-                    .diff_providers
-                    .get_commit_base(file, "HEAD", trust_full)
-                    .ok()
-                    .zip(std::fs::read(file).ok())
-                    .is_some_and(|(head, worktree)| head.data == worktree);
-            if all_committed {
+            // A file that matches HEAD has only committed hunks: skip it without opening.
+            if !every && file_committed(cx.editor, file, trust_full) {
                 continue;
             }
             cx.editor.open(file, Action::Replace)?;
@@ -207,7 +232,7 @@ fn jump_change(cx: &mut compositor::Context, forward: bool, count: usize) -> any
             let hunks = doc!(cx.editor)
                 .review
                 .as_ref()
-                .map(Review::uncommitted_hunk_lines)
+                .map(blocks)
                 .unwrap_or_default();
             if let Some(target) = if forward { hunks.first() } else { hunks.last() } {
                 land_on_hunk(cx.editor, target.start);
@@ -215,18 +240,17 @@ fn jump_change(cx: &mut compositor::Context, forward: bool, count: usize) -> any
                 break;
             }
         }
-        ensure!(landed, "no uncommitted changes since {}", &commit[..8]);
+        match every {
+            true => ensure!(landed, "no changes since {}", &commit[..8]),
+            false => ensure!(landed, "no uncommitted changes since {}", &commit[..8]),
+        }
     }
     let (view, doc) = current_ref!(cx.editor);
     let cursor = doc
         .selection(view.id)
         .primary()
         .cursor_line(doc.text().slice(..));
-    let hunks = doc
-        .review
-        .as_ref()
-        .map(Review::uncommitted_hunk_lines)
-        .unwrap_or_default();
+    let hunks = doc.review.as_ref().map(blocks).unwrap_or_default();
     let name = doc
         .path()
         .map(|path| {
@@ -2032,7 +2056,7 @@ fn stage_and_move_on(cx: &mut compositor::Context, staging: Staging) -> anyhow::
     }
     let status = cx.editor.get_status().map(|(status, _)| status.to_string());
     let from = doc!(cx.editor).path().map(Path::to_path_buf);
-    match next_unstaged_hunk(cx, past) {
+    match unstaged_hunk(cx, past, true) {
         Ok(true) => {
             let to = doc!(cx.editor).path().map(Path::to_path_buf);
             let target = cx.editor.get_status().map(|(status, _)| status.to_string());
@@ -2054,18 +2078,27 @@ fn stage_and_move_on(cx: &mut compositor::Context, staging: Staging) -> anyhow::
     Ok(())
 }
 
-/// Lands on the first unstaged hunk of the current buffer starting at or after line `past`, else
+/// Lands on the first unstaged hunk of the current buffer starting at or after line `from`, else
 /// on the first unstaged hunk of the next changed file with any, wrapping around to the start of
-/// the current buffer. Returns whether there was one.
-fn next_unstaged_hunk(cx: &mut compositor::Context, past: usize) -> anyhow::Result<bool> {
+/// the current buffer; backwards, on the last one starting before `from`, else on the last one
+/// of the previous file. Returns whether there was one.
+fn unstaged_hunk(cx: &mut compositor::Context, from: usize, forward: bool) -> anyhow::Result<bool> {
     let unstaged = |doc: &Document| -> Vec<usize> {
         doc.review
             .as_ref()
             .map(Review::unstaged_hunk_lines)
             .unwrap_or_default()
     };
+    let first = |lines: &[usize]| match forward {
+        true => lines.iter().min().copied(),
+        false => lines.iter().max().copied(),
+    };
     let here: Vec<usize> = unstaged(doc!(cx.editor));
-    if let Some(&line) = here.iter().filter(|&&line| line >= past).min() {
+    let near = match forward {
+        true => here.iter().filter(|&&line| line >= from).min(),
+        false => here.iter().filter(|&&line| line < from).max(),
+    };
+    if let Some(&line) = near {
         land_on_hunk(cx.editor, line);
         announce_hunk(cx.editor);
         return Ok(true);
@@ -2081,16 +2114,23 @@ fn next_unstaged_hunk(cx: &mut compositor::Context, past: usize) -> anyhow::Resu
     let start = current
         .as_ref()
         .and_then(|path| files.iter().position(|file| file == path));
-    let order = match start {
+    let mut order = match start {
         Some(idx) => files[idx + 1..]
             .iter()
             .chain(&files[..=idx])
             .collect::<Vec<_>>(),
         None => files.iter().collect(),
     };
+    if !forward {
+        // The previous files nearest first, still ending with the current one.
+        order.reverse();
+        if start.is_some() {
+            order.rotate_left(1);
+        }
+    }
     for file in order {
         if Some(file) == current.as_ref() {
-            if let Some(&line) = here.iter().min() {
+            if let Some(line) = first(&here) {
                 land_on_hunk(cx.editor, line);
                 announce_hunk(cx.editor);
                 return Ok(true);
@@ -2114,7 +2154,7 @@ fn next_unstaged_hunk(cx: &mut compositor::Context, past: usize) -> anyhow::Resu
         if let Err(err) = ensure_review(cx) {
             log::info!("not enabling review: {err:#}");
         }
-        if let Some(&line) = unstaged(doc!(cx.editor)).iter().min() {
+        if let Some(line) = first(&unstaged(doc!(cx.editor))) {
             land_on_hunk(cx.editor, line);
             announce_hunk(cx.editor);
             return Ok(true);
@@ -2484,27 +2524,69 @@ pub(crate) fn review_toggle_stage_key(cx: &mut Context) {
 }
 
 /// Toggles the staging of the hunks under the selections; when there is none to stage in a
-/// reviewed buffer, jumps to the next unstaged hunk instead, across files.
+/// reviewed buffer, jumps to the next unstaged hunk instead, across files. With everything since
+/// the baseline committed, only jumps, to the next changed block.
 fn toggle_or_jump(cx: &mut compositor::Context) -> anyhow::Result<()> {
-    let err = match stage_and_move_on(cx, Staging::Toggle) {
-        Err(err) if err.to_string() == NOTHING_TO_STAGE => err,
-        result => return result,
-    };
-    let doc = doc!(cx.editor);
-    if doc.review.is_none() || cx.editor.review_diff == Some(doc.id()) {
-        return Err(err);
+    if !reviewed(cx.editor) {
+        return stage_and_move_on(cx, Staging::Toggle);
     }
-    let (view, doc) = current_ref!(cx.editor);
-    let cursor = doc
-        .selection(view.id)
-        .primary()
-        .cursor_line(doc.text().slice(..));
-    if !next_unstaged_hunk(cx, cursor)? {
-        let commit = cx.editor.review_baseline.clone().unwrap_or_default();
-        bail!("nothing unstaged since {}", &commit[..8.min(commit.len())]);
+    let every = everything_committed(cx);
+    if !every {
+        match stage_and_move_on(cx, Staging::Toggle) {
+            Err(err) if err.to_string() == NOTHING_TO_STAGE => (),
+            result => return result,
+        }
+    }
+    jump_on(cx, true, every)
+}
+
+/// The Shift-Enter key: in a reviewed buffer, jumps back to the previous unstaged hunk, across
+/// files, or with everything since the baseline committed to the previous changed block.
+pub(crate) fn review_jump_prev(cx: &mut Context) {
+    let mut cx = compositor::Context {
+        editor: cx.editor,
+        jobs: cx.jobs,
+        scroll: None,
+    };
+    if !reviewed(cx.editor) {
+        return;
+    }
+    let every = everything_committed(&mut cx);
+    if let Err(err) = jump_on(&mut cx, false, every) {
+        cx.editor.set_error(format!("{err:#}"));
+    }
+}
+
+/// Whether the current buffer is reviewed, and is not the `:review-diff` buffer.
+fn reviewed(editor: &Editor) -> bool {
+    let doc = doc!(editor);
+    doc.review.is_some() && editor.review_diff != Some(doc.id())
+}
+
+/// Whether every change since the review baseline is committed.
+fn everything_committed(cx: &mut compositor::Context) -> bool {
+    changed_files(cx).is_ok_and(|(_, changes)| only_committed(cx.editor, &changes))
+}
+
+/// Enter's (and Shift-Enter's) jump: to the next (or previous) unstaged hunk across files, or with
+/// `every` change committed to the next (or previous) changed block; the status says where.
+fn jump_on(cx: &mut compositor::Context, forward: bool, every: bool) -> anyhow::Result<()> {
+    if every {
+        jump_change(cx, forward, 1)?;
+    } else {
+        let (view, doc) = current_ref!(cx.editor);
+        let cursor = doc
+            .selection(view.id)
+            .primary()
+            .cursor_line(doc.text().slice(..));
+        if !unstaged_hunk(cx, cursor, forward)? {
+            let commit = cx.editor.review_baseline.clone().unwrap_or_default();
+            bail!("nothing unstaged since {}", &commit[..8.min(commit.len())]);
+        }
     }
     if let Some((status, _)) = cx.editor.get_status() {
-        let status = format!("next: {}", status.replacen(": ", " ", 1));
+        let way = if forward { "next" } else { "previous" };
+        let status = format!("{way}: {}", status.replacen(": ", " ", 1));
         cx.editor.set_status(status);
     }
     Ok(())

@@ -184,6 +184,7 @@
 | `kill_to_line_end` | Delete till end of line | insert: `` <C-k> `` |
 | `undo` | Undo change | normal: `` u ``, select: `` u `` |
 | `review_stage_hunk` | Stage or unstage the review hunk under the cursor (only while reviewing) | normal: `` <ret> ``, select: `` <ret> `` |
+| `review_jump_prev` | Go back to the previous unstaged review hunk (only while reviewing) | normal: `` <S-ret> ``, select: `` <S-ret> `` |
 | `review_files_picker` | Pick a file changed since the review baseline | normal: `` <space>Af ``, select: `` <space>Af `` |
 | `review_diff_buffer` | Show the review as one diff | normal: `` <space>Ad ``, select: `` <space>Ad `` |
 | `review_diff_open_hunk` | Open the file of the review diff hunk under the cursor | normal: `` <space>Ag ``, select: `` <space>Ag `` |

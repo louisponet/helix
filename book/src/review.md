@@ -54,7 +54,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-pr <number\|url>` | Review a GitHub pull request: check it out with `gh pr checkout` and review every buffer against its merge base with the base branch. Refuses uncommitted changes and unsaved reviewed buffers. `close` leaves the pull request review and keeps the checkout. See [Reviewing pull requests](#reviewing-pull-requests). |
 | `:review-submit [approve\|request-changes\|comment] [summary]` | Post the pending pull request comments as one review (see [Reviewing pull requests](#reviewing-pull-requests)). `Space A m` opens it while reviewing a pull request. |
 | `:review-commit-all [subject]` | Stage every file changed since the baseline (modified, deleted and untracked, like `git add -A` limited to them), then hand back like `:review-commit`. Refuses unsaved reviewed buffers, and says `no changes since <commit>` when there is nothing. `Space A M` in the default keymap. |
-| `:review-next` | Go to the next changed block that is unstaged or staged, skipping hunks committed since the baseline; after the last one, open the next file changed since the baseline with such a block (`:review-files` order, wrapping around) at its first one. Shows `<file>: hunk 2 of 5`, counting only those blocks, or `no uncommitted changes since <commit>` when there are none. `Space A n` in the default keymap, which takes a count. |
+| `:review-next` | Go to the next changed block that is unstaged or staged, skipping hunks committed since the baseline; after the last one, open the next file changed since the baseline with such a block (`:review-files` order, wrapping around) at its first one. Shows `<file>: hunk 2 of 5`, counting only those blocks, or `no uncommitted changes since <commit>` when there are none. When nothing is staged or unstaged in any changed file (everything since the baseline is committed, as in a [pull request review](#reviewing-pull-requests) or with a baseline pinned at an older commit), it walks every changed block instead, committed ones included, and counts them all; the error then reads `no changes since <commit>`. `Space A n` in the default keymap, which takes a count. |
 | `:review-prev` | Like `:review-next` backwards, landing on the previous file's last block. `Space A N` in the default keymap. |
 | `:review-baseline-pick` | Pick the baseline from the first-parent history of `HEAD` (up to 300 commits: commit, age, author, subject), with `●` on the current baseline, `base` on the merge base with the base branch (the pull request's while reviewing one, else `origin/HEAD`, `develop`, `main` or `master`), `pi` on the baseline the pi hook last sent and `HEAD` marked; the current baseline is preselected. Choosing a commit works like `:review-baseline <commit>` and pins it as yours (`*`), except the `pi` row, which follows the hook again. `Space A b` in the default keymap; `Space A B` refreshes the buffer's review. |
 | `:review-older` | Move the baseline to its first parent (pinning `HEAD` first when none is set) and refresh every review; the status shows `Baseline <commit> <subject> (N behind HEAD)`. `Space A -` in the default keymap. |
@@ -218,7 +218,10 @@ like this:
    holds was committed after the baseline (by the agent, say): it gets its own
    colours (`diff.plus.review.committed`, `diff.minus.review.committed`, a muted
    tint in the default theme, falling back to the staged ones) and is counted as committed, and staging or unstaging it fails
-   with `already committed in <commit>`. A block that mixes committed lines
+   with `already committed in <commit>`, unless nothing is staged or unstaged
+   anywhere: then `Enter` jumps to the next changed block, committed or not, like
+   `:review-next`. `Shift-Enter` jumps back the same way, to the previous
+   unstaged hunk (or block), without staging. A block that mixes committed lines
    with newer edits next to them acts as one unit: `Enter` anywhere in it
    stages its uncommitted part (`Staged 1 hunk, 1 already committed`). While reviewing, `Enter` in
    normal mode is taken by this; elsewhere it does nothing.
@@ -265,7 +268,7 @@ on to it.
 These commands are built into the default keymap under `Space A` in normal mode
 (see [review mode](./keymap.md#review-mode)): `Space A f` picks a file, `Space A d` shows the
 diff, `Space A o` focuses old text, `Space A c` and `Space A a` send a comment to the agent (`Space A C` lists pending ones), `Space A s` stages, `Space A m` asks the agent
-to commit (`Space A M` stages everything first) and `Space A n` / `Space A N` move between changes not yet committed, on into the next or previous
+to commit (`Space A M` stages everything first) and `Space A n` / `Space A N` move between changes not yet committed (between all of them when everything is committed), on into the next or previous
 changed file (`:review-files` order, wrapping around) at its edge. Keys you map under
 `[keys.normal.space.A]` in `config.toml` are added to that menu.
 
@@ -305,7 +308,9 @@ when set, else `gh` on `PATH`), in the background: it looks the pull request
 up, runs `gh pr checkout` (which also works for forks), and pins the merge base
 of the base branch and the checked-out head as the review baseline, so every
 buffer, `:review-files`, `:review-diff` and `Space A n` show exactly the pull
-request's changes. The status reads `Reviewing PR #123 <title>: N files
+request's changes. As all of them are committed, `n` / `N` walk the pull
+request's hunks across its files (`file.rs: hunk 2 of 5`), and `Enter` /
+`Shift-Enter` jump to the next or previous one instead of staging. The status reads `Reviewing PR #123 <title>: N files
 against <base branch> at <merge base>`, and the `review` statusline element
 starts with `#123`. It refuses while the worktree has uncommitted changes.
 
