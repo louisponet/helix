@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, type FSWatcher, watch } from "node:fs";
-import { mkdir, readdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { constants, existsSync, type FSWatcher, watch } from "node:fs";
+import { access, mkdir, readdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -404,7 +404,7 @@ async function readGitEntry(path: string, baseline: Baseline): Promise<GitEntry>
 		({ stdout } = await run(
 			"git",
 			["--literal-pathspecs", "-c", "core.fsmonitor=", "-C", dirname(real), ...command, "--", name],
-			{ env, encoding: "utf8", timeout: 10_000, maxBuffer: 1024 * 1024, windowsHide: true },
+			{ env, encoding: "utf8", timeout: 10_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
 		));
 	} catch (error) {
 		const stderr = String((error as { stderr?: unknown }).stderr ?? "").trim().split("\n")[0];
@@ -522,6 +522,9 @@ interface Session {
 	id: string;
 	state: HookState;
 }
+
+/** Files larger than this get no line ownership. */
+const MAX_OWNED_BYTES = 1024 * 1024;
 
 /** How long a claimed batch of a session that is gone waits before it is put back in the outbox. */
 const STALE_CLAIM_MS = 10 * 60 * 1000;
@@ -658,6 +661,10 @@ class Hook {
 	private turnStart?: Record<string, string>;
 	/** Updates of the ownership ledger, one at a time. */
 	private ledger = Promise.resolve();
+	/** Paths whose failed attribution was already logged. */
+	private warned = new Set<string>();
+	/** What the last check for user edits saw: `git status` and the changed files' stats. */
+	private lastStatus?: string;
 	private watcher?: FSWatcher;
 	private timer?: NodeJS.Timeout;
 	private poller?: NodeJS.Timeout;
@@ -672,6 +679,9 @@ class Hook {
 	 */
 	private inode?: string;
 	private stopped = false;
+	/** The running (or last) poller tick, so stopping can wait for it. */
+	private polling = Promise.resolve();
+	private stopping?: Promise<void>;
 	private queue = Promise.resolve();
 	private seen = new Set<string>();
 
@@ -913,7 +923,10 @@ class Hook {
 		this.watcher = watch(this.outbox, (_event, name) => name && this.enqueue(name));
 		void readdir(this.outbox).then((names) => names.forEach((name) => this.enqueue(name)));
 		// Watches the socket: a new Helix (a new socket file) is attached to as soon as it appears.
-		this.poller = setInterval(() => void this.poll(), 2000);
+		this.poller = setInterval(() => {
+			// One tick at a time; a slow one delays the next instead of overlapping it.
+			this.polling = this.polling.then(() => this.poll()).catch(() => undefined);
+		}, 2000);
 		this.poller.unref();
 	}
 
@@ -935,17 +948,21 @@ class Hook {
 		}
 	}
 
-	stop(): void {
-		if (!this.stopped) {
+	/** Stops watching and polling, and resolves once the running poller tick and ledger updates are done. */
+	stop(): Promise<void> {
+		this.stopping ??= (async () => {
+			this.stopped = true;
+			this.watcher?.close();
+			clearTimeout(this.timer);
+			clearInterval(this.poller);
 			this.state.pid = undefined;
 			this.state.in_turn = undefined;
 			this.state.turn_started = undefined;
-			void this.save().catch(() => undefined);
-		}
-		this.stopped = true;
-		this.watcher?.close();
-		clearTimeout(this.timer);
-		clearInterval(this.poller);
+			await this.polling;
+			await this.ledger;
+			await this.save().catch(() => undefined);
+		})();
+		return this.stopping;
 	}
 
 	/** Starts a turn; `midTurn` for a hook opened during it, whose changes all count as the turn's. */
@@ -1083,16 +1100,23 @@ class Hook {
 
 	/** The blobs (`git hash-object -w`) of every file changed since the baseline, untracked ones included. */
 	private async changedFiles(): Promise<Record<string, string>> {
-		if (!this.state.baseline) return {};
+		const paths = await this.changedPaths();
+		const oids = paths.length ? (await git(this.repo, ["hash-object", "-w", "--no-filters", "--", ...paths])).split("\n") : [];
+		return Object.fromEntries(paths.map((path, i) => [path, oids[i]]));
+	}
+
+	/** The readable files changed since the baseline, untracked ones included. */
+	private async changedPaths(): Promise<string[]> {
+		if (!this.state.baseline) return [];
 		const changed = await git(this.repo, ["diff", "--name-only", "-z", this.state.baseline.commit_oid]);
 		const untracked = await git(this.repo, ["ls-files", "--others", "--exclude-standard", "-z"]);
 		const paths: string[] = [];
 		for (const name of new Set(`${changed}${untracked}`.split("\0").filter(Boolean))) {
 			const path = join(this.repo, name);
-			if (!this.isPiState(path) && (await stat(path).catch(() => undefined))?.isFile()) paths.push(path);
+			const readable = await access(path, constants.R_OK).then(() => true, () => false);
+			if (!this.isPiState(path) && readable && (await stat(path).catch(() => undefined))?.isFile()) paths.push(path);
 		}
-		const oids = paths.length ? (await git(this.repo, ["hash-object", "-w", "--no-filters", "--", ...paths])).split("\n") : [];
-		return Object.fromEntries(paths.map((path, i) => [path, oids[i]]));
+		return paths;
 	}
 
 	/** The repository's shared ownership ledger. */
@@ -1106,39 +1130,84 @@ class Hook {
 	 */
 	attribute(paths: string[] | undefined, writer: string): Promise<void> {
 		return this.withLedger(async (ownership) => {
-			const candidates = paths ?? [...new Set([...Object.keys(await this.changedFiles()), ...Object.keys(ownership.files)])];
+			const candidates = paths ?? [...new Set([...(await this.changedPaths()), ...Object.keys(ownership.files)])];
 			let changed = false;
 			for (const path of candidates) {
-				if (this.isPiState(path)) continue;
-				let entry = ownership.files[path];
-				if (!(await stat(path).catch(() => undefined))?.isFile()) {
-					if (entry) delete ownership.files[path];
-					changed ||= !!entry;
-					continue;
-				}
-				const blob = (await git(this.repo, ["hash-object", "-w", "--no-filters", "--", path])).trim();
-				if (entry?.blob === blob) continue;
-				const head = await this.headBlob(path);
-				if (!entry) {
-					// What differed from HEAD before this change is the user's.
-					entry = await this.changeEntry({ blob: head, ranges: [] }, this.turnStart?.[path] ?? head, "user");
-				}
-				entry = await this.pruneEntry(await this.changeEntry(entry, blob, writer), head);
-				if (entry.ranges.length > 0) ownership.files[path] = entry;
-				else delete ownership.files[path];
-				changed = true;
+				if (!this.owns(path)) continue;
+				await this.guarded(path, async () => {
+					let entry = ownership.files[path];
+					if (!(await this.attributable(path))) {
+						if (entry) delete ownership.files[path];
+						changed ||= !!entry;
+						return;
+					}
+					const blob = (await git(this.repo, ["hash-object", "-w", "--no-filters", "--", path])).trim();
+					if (entry?.blob === blob) return;
+					const head = await this.headBlob(path);
+					if (!entry) {
+						// What differed from HEAD before this change is the user's.
+						entry = await this.changeEntry({ blob: head, ranges: [] }, this.turnStart?.[path] ?? head, "user");
+					}
+					entry = await this.pruneEntry(await this.changeEntry(entry, blob, writer), head);
+					if (entry.ranges.length > 0) ownership.files[path] = entry;
+					else delete ownership.files[path];
+					changed = true;
+				});
 			}
 			return changed;
 		});
+	}
+
+	/** Whether `path` (resolved) is a file of this repository that ownership is kept for. */
+	private owns(path: string): boolean {
+		return path.startsWith(this.repo + sep) && !this.isPiState(path);
+	}
+
+	/** Whether `path` is a text file small enough to keep line ownership for. */
+	private async attributable(path: string): Promise<boolean> {
+		const info = await stat(path).catch(() => undefined);
+		if (!info?.isFile() || info.size > MAX_OWNED_BYTES) return false;
+		// Git's own test for binary content: a NUL byte in the first 8000 bytes.
+		return !(await readFile(path)).subarray(0, 8000).includes(0);
+	}
+
+	/** Runs the ledger update `body` of `path`; a failure skips that path, logged once per session. */
+	private async guarded(path: string, body: () => Promise<void>): Promise<void> {
+		try {
+			await body();
+		} catch (error) {
+			if (this.stopped || this.warned.has(path)) return;
+			this.warned.add(path);
+			console.warn(`helix-review: ownership of ${path} not updated: ${error}`);
+		}
+	}
+
+	/**
+	 * The ownership ledger, without entries for files outside the repository, gone, too large or
+	 * binary; written back when it held any.
+	 */
+	private async readLedger(): Promise<Ownership> {
+		const ownership = await readOwnership(this.ownershipFile);
+		let dropped = false;
+		for (const path of Object.keys(ownership.files)) {
+			// One that cannot be read stays: its update fails, and is logged, instead.
+			if (this.owns(path) && (await this.attributable(path).catch(() => true))) continue;
+			delete ownership.files[path];
+			dropped = true;
+		}
+		if (dropped) await writeOwnership(this.ownershipFile, ownership);
+		return ownership;
 	}
 
 	/** Drops the ranges a commit took in: the ledger only holds uncommitted work. */
 	private pruneOwnership(): Promise<void> {
 		return this.withLedger(async (ownership) => {
 			for (const [path, entry] of Object.entries(ownership.files)) {
-				const pruned = await this.pruneEntry(entry, await this.headBlob(path));
-				if (pruned.ranges.length > 0) ownership.files[path] = pruned;
-				else delete ownership.files[path];
+				await this.guarded(path, async () => {
+					const pruned = await this.pruneEntry(entry, await this.headBlob(path));
+					if (pruned.ranges.length > 0) ownership.files[path] = pruned;
+					else delete ownership.files[path];
+				});
 			}
 			return existsSync(this.ownershipFile);
 		});
@@ -1151,7 +1220,14 @@ class Hook {
 	private async attributeUserEdits(): Promise<void> {
 		if (this.state.in_turn || !this.state.baseline) return;
 		if ((await this.liveSessions()).some((s) => s.state.in_turn)) return;
-		// shortcut: hashes every changed file on each 2 s tick; watch the files if that gets slow.
+		// Only when `git status` or a changed file's size or time moved since the last check.
+		const status = await git(this.repo, ["status", "--porcelain", "-z", "--untracked-files=all"]);
+		const listed = status.split("\0").filter(Boolean).map((entry) => join(this.repo, entry.slice(3)));
+		const paths = [...new Set([...listed, ...Object.keys((await this.readLedger()).files)])];
+		const stats = await Promise.all(paths.map((path) => stat(path).then((s) => `${path}:${s.size}:${s.mtimeMs}`, () => path)));
+		const seen = [status, ...stats].join("\n");
+		if (seen === this.lastStatus) return;
+		this.lastStatus = seen;
 		await this.attribute(undefined, "user");
 	}
 
@@ -1167,10 +1243,14 @@ class Hook {
 	private withLedger(update: (ownership: Ownership) => Promise<boolean>): Promise<void> {
 		// shortcut: serialized per session only; two sessions updating at the same instant can lose one update.
 		const run = this.ledger.then(async () => {
-			const ownership = await readOwnership(this.ownershipFile);
-			if (await update(ownership)) await writeOwnership(this.ownershipFile, ownership);
+			// A stopped hook leaves the ledger alone: its repository may be gone already.
+			if (this.stopped) return;
+			const ownership = await this.readLedger();
+			if ((await update(ownership)) && !this.stopped) await writeOwnership(this.ownershipFile, ownership);
 		});
-		this.ledger = run.catch((error) => console.warn(`helix-review: ownership not updated: ${error}`));
+		this.ledger = run.catch((error) => {
+			if (!this.stopped) console.warn(`helix-review: ownership not updated: ${error}`);
+		});
 		return this.ledger;
 	}
 
@@ -1335,7 +1415,7 @@ class Hook {
 		);
 		if (inRepo.length > 0 && !inRepo.includes(true)) return "default";
 		const sessions = await this.liveSessions();
-		const ownership = await readOwnership(this.ownershipFile);
+		const ownership = await this.readLedger();
 		const labels = batch.comments.map((c) => this.liveLabel(ownerAt(ownership, c.path, c.currentLine), sessions) ?? this.lastEditor(c.path, sessions));
 		const committer = batch.request?.kind === "commit-staged" ? [...(await this.stagedOwners(sessions, ownership)).keys()][0] : undefined;
 		const owners = [...new Set([...labels, ...(committer ? [committer] : [])])];
@@ -1419,7 +1499,7 @@ class Hook {
 	 * in a chain the next owner continues.
 	 */
 	private async ownCommitPatch(batch: string): Promise<CommitPatch | undefined> {
-		const groups = await this.stagedOwners(await this.liveSessions(), await readOwnership(this.ownershipFile));
+		const groups = await this.stagedOwners(await this.liveSessions(), await this.readLedger());
 		const mine = groups.get(this.label);
 		if (!mine || groups.size < 2) return undefined;
 		const patch = join(this.dir, "commits", `${batch}-${this.label}.patch`);
@@ -1453,7 +1533,7 @@ class Hook {
 
 	/** After this session committed its share, asks the owner of the first remaining staged hunk to commit. */
 	private async passCommitOn(): Promise<void> {
-		const groups = await this.stagedOwners(await this.liveSessions(), await readOwnership(this.ownershipFile));
+		const groups = await this.stagedOwners(await this.liveSessions(), await this.readLedger());
 		const next = [...groups.keys()].find((label) => label !== this.label);
 		if (!next) return;
 		const batch = join(this.outbox, `${Date.now()}-${process.pid}-commit.json`);
@@ -1581,13 +1661,14 @@ export default function helixReview(pi: ExtensionAPI): void {
 	/** The hook of the repository at `dir`, opened and joined into the running turn if new. */
 	const hookFor = async (dir: string): Promise<Hook | undefined> => {
 		const top = await git(dir, ["rev-parse", "--show-toplevel"]).then((out) => realpath(out.trim()), () => undefined);
-		if (!top || top === hook?.repo) return hook;
+		if (!top) return undefined;
+		if (top === hook?.repo) return hook;
 		let other = others.get(top);
 		if (other) return other;
 		const opened = generation;
 		other = await Hook.open(pi, top, sessionId);
 		if (!other || opened !== generation || others.has(top)) {
-			other?.stop();
+			await other?.stop();
 			return others.get(top);
 		}
 		others.set(top, other);
@@ -1599,15 +1680,15 @@ export default function helixReview(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, ctx) => {
 		generation++;
-		for (const h of all()) h.stop();
+		await Promise.all(all().map((h) => h.stop()));
 		others = new Map();
 		sessionId = ctx.sessionManager.getSessionId();
 		hook = await Hook.open(pi, ctx.cwd, sessionId);
 		await hook?.start();
 		if (await hook?.attach()) await hook?.announceAttach();
 	});
-	pi.on("session_shutdown", () => {
-		for (const h of all()) h.stop();
+	pi.on("session_shutdown", async () => {
+		await Promise.all(all().map((h) => h.stop()));
 	});
 	pi.on("before_agent_start", (event) => {
 		const guidelines = all()

@@ -31,9 +31,16 @@ function git(cwd: string, ...args: string[]): string {
 const indexBase = (blob_oid: string) => ({ kind: "git-index", blob_oid });
 const commitBase = (commit_oid: string, blob_oid: string | null) => ({ kind: "git-commit", commit_oid, blob_oid });
 
+/** Shutdowns of the sessions the running test started; its workspace waits for them before it goes. */
+const shutdowns: (() => Promise<unknown>)[] = [];
+
 function workspace(t: TestContext) {
 	const root = mkdtempSync(join(tmpdir(), "pi-helix-review-"));
-	t.after(() => rmSync(root, { recursive: true, force: true }));
+	// After hooks run in order: the sessions stop (and their pollers and ledger updates finish) first.
+	t.after(async () => {
+		for (const shutdown of shutdowns.splice(0)) await shutdown();
+		rmSync(root, { recursive: true, force: true });
+	});
 	const repo = join(root, "repo");
 	mkdirSync(repo);
 	git(repo, "init", "-q");
@@ -92,6 +99,7 @@ function piSession(cwd: string, sessionId = "session-1") {
 		for (const h of handlers.get(type) ?? []) result = (await h({ type, ...event }, ctx)) ?? result;
 		return result;
 	};
+	shutdowns.push(() => emit("session_shutdown"));
 	return { sent, notes, messages, ctx, emit, run: (args: string) => handler!(args, ctx) };
 }
 
@@ -1409,6 +1417,60 @@ test("the ownership ledger tracks who changed which lines until they are committ
 	w.commit();
 	await until(() => owners().length === 1, "the poller to prune the committed ranges");
 	assert.deepEqual(owners(), [[1, 3, "pi-2", "pi-2"]]);
+});
+
+test("only readable text files of the repository are attributed, and a failing one is skipped with one warning", async (t) => {
+	const w = workspace(t);
+	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });
+	const repo = realpathSync(w.repo);
+	const [a, b] = [join(repo, "a.rs"), join(repo, "b.rs")];
+	w.stage("a.rs", "a\n");
+	w.stage("b.rs", "b\n");
+	w.commit();
+	const dir = join(repo, ".pi", "helix-review", "state");
+	const ledger = join(dir, "ownership.json");
+	const files = () => JSON.parse(readFileSync(ledger, "utf8")).files as Record<string, { ranges: { owner: string }[] }>;
+	const outside = join(w.root, "outside.txt");
+	writeFileSync(outside, "x\n");
+	// A ledger of an earlier version, with a file outside the repository and one since deleted.
+	mkdirSync(dir, { recursive: true });
+	const range = [{ start: 1, end: 2, owner: "pi-1", at: 1 }];
+	writeFileSync(ledger, JSON.stringify({ files: { [outside]: { blob: "0", ranges: range }, [join(repo, "gone.rs")]: { blob: "0", ranges: range } } }));
+	const warnings: string[] = [];
+	const warn = console.warn;
+	console.warn = (...args: unknown[]) => void warnings.push(args.join(" "));
+	t.after(() => {
+		console.warn = warn;
+	});
+
+	const session = piSession(repo);
+	t.after(() => session.emit("session_shutdown"));
+	await session.emit("session_start", { reason: "startup" });
+	await session.emit("agent_start");
+	assert.deepEqual(files(), {}, "the stale entries are dropped");
+
+	// Files outside the repository, and inside it too large, are not attributed.
+	const big = join(repo, "big.json");
+	writeFileSync(big, `${"x".repeat(2 * 1024 * 1024)}\n`);
+	for (const path of [outside, big]) {
+		writeFileSync(path, readFileSync(path, "utf8") + "y\n");
+		await session.emit("tool_result", { toolName: "edit", input: { path }, content: [], isError: false });
+	}
+	assert.deepEqual(Object.keys(files()), []);
+
+	// b.rs becomes unreadable: a.rs is still attributed, and b.rs is warned about once.
+	writeFileSync(b, "b edited\n");
+	await session.emit("tool_result", { toolName: "edit", input: { path: b }, content: [], isError: false });
+	chmodSync(b, 0o000);
+	writeFileSync(a, "a edited\n");
+	const bash = { toolName: "bash", input: { command: "sed" }, content: [], isError: false };
+	await session.emit("tool_result", bash);
+	await session.emit("tool_result", bash);
+	assert.deepEqual(Object.keys(files()).sort(), [a, b]);
+	assert.equal(files()[a].ranges[0].owner, "pi-1");
+	assert.equal(warnings.length, 1, warnings.join("\n"));
+	assert.ok(warnings[0].startsWith(`helix-review: ownership of ${b} not updated:`), warnings[0]);
+	await session.emit("agent_end", { messages: [] });
 });
 
 test("comments go to the owners of their hunks, and each owner commits only its staged hunks", async (t) => {

@@ -176,7 +176,11 @@ version moves into the first session's file. Ignore `.pi/` in Git.
   its turn; `user` when the 2 s check finds a change while no live session is
   in a turn (`in_turn` in the state files). A file seen for the first time
   gives what already differed from `HEAD` to `user`. Ranges a commit took in
-  are dropped, so the ledger only holds uncommitted work.
+  are dropped, so the ledger only holds uncommitted work. Only readable text
+  files inside the repository (outside `.pi/`, at most 1 MiB) are attributed;
+  other entries are dropped when the ledger is read, and a file whose update
+  fails is skipped with one warning per session. The 2 s check only runs when
+  `git status` or a changed file's size or time moved.
 - Routing by ownership: a batch without a `target` goes to the sessions owning
   the hunks its comments are on (the range's agent, for your own edits the
   agent you overwrote, else the session that last changed the file, else the
