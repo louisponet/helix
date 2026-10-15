@@ -9,7 +9,9 @@ use helix_core::doc_formatter::TextFormat;
 use helix_core::graphemes::prev_grapheme_boundary;
 use helix_core::line_ending::line_end_char_index;
 use helix_core::text_annotations::TextAnnotations;
-use helix_view::review::{OldFocus, Review, ReviewComment, ReviewRequest, ReviewSide};
+use helix_view::review::{
+    NavFile, OldFocus, Review, ReviewComment, ReviewNav, ReviewRequest, ReviewSide,
+};
 
 use helix_loader::workspace_trust::TrustQuery;
 use helix_vcs::FileChange;
@@ -134,57 +136,122 @@ pub(super) fn changed_files_since(
         .get_changed_files_since(&workspace, &commit, trust_full)
 }
 
-/// Whether every change since the baseline in `changes` is committed, nothing staged or unstaged
-/// in any of their files, as when reviewing a pull request.
-fn only_committed(editor: &Editor, changes: &[FileChange]) -> bool {
-    let trust_full = doc_trust_full(editor);
-    changes.iter().all(|change| match change {
-        FileChange::Deleted { .. } => {
-            !change.path().exists()
-                && editor
-                    .diff_providers
-                    .get_commit_base(change.path(), "HEAD", trust_full)
-                    .is_err()
-        }
-        _ => file_committed(editor, change.path(), trust_full),
-    })
+/// The size and modification time of `path`, `None` when it is gone.
+fn file_stamp(path: &Path) -> Option<(u64, SystemTime)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
 }
 
-/// Whether `file` is saved and its worktree and index content both match `HEAD`.
-fn file_committed(editor: &Editor, file: &Path, trust_full: bool) -> bool {
-    !editor
-        .document_by_path(file)
-        .is_some_and(Document::is_modified)
-        && editor
-            .diff_providers
-            .get_commit_base(file, "HEAD", trust_full)
-            .is_ok_and(|head| {
-                std::fs::read(file).is_ok_and(|worktree| head.data == worktree)
-                    && editor
-                        .diff_providers
-                        .get_index_base(file, trust_full)
-                        .is_ok_and(|(index, _)| index == head.data)
-            })
+/// The files changed since the review baseline and how they compare with `HEAD` and the git
+/// index, reused from the last call while the baseline, `HEAD`, the index and the files on disk
+/// (those changed, and those open in the editor) are unchanged.
+fn review_nav(cx: &mut compositor::Context) -> anyhow::Result<ReviewNav> {
+    let commit = review_baseline_or_head(cx)?;
+    let workspace = helix_loader::find_workspace().0;
+    let trust_full = doc_trust_full(cx.editor);
+    let repo_state = cx
+        .editor
+        .diff_providers
+        .repo_state(&workspace, trust_full)?;
+    let open: Vec<PathBuf> = cx
+        .editor
+        .documents()
+        .filter_map(|doc| doc.path().filter(|path| path.starts_with(&workspace)))
+        .map(|path| path.to_path_buf())
+        .collect();
+    if let Some(nav) = &cx.editor.review_nav {
+        let fresh = nav.commit == commit
+            && nav.repo_state == repo_state
+            && open
+                .iter()
+                .all(|path| nav.watched.iter().any(|(watched, _)| watched == path))
+            && nav
+                .watched
+                .iter()
+                .all(|(path, stamp)| file_stamp(path) == *stamp);
+        if fresh {
+            return Ok(nav.clone());
+        }
+    }
+    let changes = changed_files_since(cx.editor, &commit)?;
+    let mut watched: Vec<PathBuf> = changes
+        .iter()
+        .map(|change| change.path().to_path_buf())
+        .chain(open)
+        .collect();
+    watched.sort();
+    watched.dedup();
+    // Stamped before reading, so a write in between shows as a change next time.
+    let watched = watched
+        .into_iter()
+        .map(|path| {
+            let stamp = file_stamp(&path);
+            (path, stamp)
+        })
+        .collect();
+    let providers = &cx.editor.diff_providers;
+    let files = changes
+        .iter()
+        .map(|change| {
+            let path = change.path().to_path_buf();
+            let head = providers.get_commit_base(&path, "HEAD", trust_full);
+            if let FileChange::Deleted { .. } = change {
+                let in_head = !path.exists() && head.is_err();
+                return NavFile {
+                    path,
+                    deleted: true,
+                    added: false,
+                    in_head,
+                    in_index: in_head,
+                };
+            }
+            let worktree = std::fs::read(&path).ok();
+            let in_head = head
+                .is_ok_and(|head| head.blob_id.is_some() && worktree.as_ref() == Some(&head.data));
+            let in_index = providers
+                .get_index_base(&path, trust_full)
+                .is_ok_and(|(index, _)| worktree.as_ref() == Some(&index));
+            NavFile {
+                added: matches!(change, FileChange::Untracked { .. }),
+                path,
+                deleted: false,
+                in_head,
+                in_index,
+            }
+        })
+        .collect();
+    let nav = ReviewNav {
+        commit,
+        repo_state,
+        watched,
+        files,
+    };
+    cx.editor.review_nav = Some(nav.clone());
+    Ok(nav)
 }
 
 /// Moves to the next (or previous) changed block `count` times: within the current buffer, then
 /// on to the first (or last) block of the next (or previous) changed file, wrapping around. Only
 /// blocks not yet committed count, unless everything since the baseline is committed.
 fn jump_change(cx: &mut compositor::Context, forward: bool, count: usize) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    let result = jump_change_by(cx, forward, count);
+    log::debug!("review: jump took {} ms", started.elapsed().as_millis());
+    result
+}
+
+fn jump_change_by(cx: &mut compositor::Context, forward: bool, count: usize) -> anyhow::Result<()> {
     cx.editor.nav_mode = helix_view::editor::NavMode::Review;
-    let (commit, changes) = changed_files(cx)?;
-    let every = only_committed(cx.editor, &changes);
+    let nav = review_nav(cx)?;
+    let commit = &nav.commit;
+    let every = nav.all_committed(cx.editor);
     let blocks: fn(&Review) -> Vec<ops::Range<usize>> = if every {
         Review::hunk_lines
     } else {
         Review::uncommitted_hunk_lines
     };
     // Deleted files have nothing to land on.
-    let files: Vec<PathBuf> = changes
-        .iter()
-        .filter(|change| !matches!(change, FileChange::Deleted { .. }))
-        .map(|change| change.path().to_path_buf())
-        .collect();
+    let files: Vec<&NavFile> = nav.files.iter().filter(|file| !file.deleted).collect();
     ensure!(!files.is_empty(), "no changes since {}", &commit[..8]);
     if let Err(err) = ensure_review(cx) {
         log::info!("not enabling review: {err:#}");
@@ -209,7 +276,7 @@ fn jump_change(cx: &mut compositor::Context, forward: bool, count: usize) -> any
         // wrapping around.
         let current = doc
             .path()
-            .and_then(|path| files.iter().position(|file| file == path));
+            .and_then(|path| files.iter().position(|file| file.path == *path));
         let len = files.len();
         let order: Vec<usize> = match (current, forward) {
             (Some(idx), true) => (1..=len).map(|step| (idx + step) % len).collect(),
@@ -217,15 +284,18 @@ fn jump_change(cx: &mut compositor::Context, forward: bool, count: usize) -> any
             (None, true) => (0..len).collect(),
             (None, false) => (0..len).rev().collect(),
         };
-        let trust_full = doc_trust_full(cx.editor);
         let mut landed = false;
         for next in order {
-            let file = &files[next];
-            // A file that matches HEAD has only committed hunks: skip it without opening.
-            if !every && file_committed(cx.editor, file, trust_full) {
+            let file = files[next];
+            // A saved file that matches HEAD has only committed hunks: skip it without opening.
+            let modified = cx
+                .editor
+                .document_by_path(&file.path)
+                .is_some_and(Document::is_modified);
+            if !every && file.in_head && !modified {
                 continue;
             }
-            cx.editor.open(file, Action::Replace)?;
+            cx.editor.open(&file.path, Action::Replace)?;
             if let Err(err) = ensure_review(cx) {
                 log::info!("not enabling review: {err:#}");
             }
@@ -601,6 +671,7 @@ pub(super) fn review_refresh(
         "buffer has unsaved changes, write or undo them before :review-refresh"
     );
     let revision = review.baseline().revision().map(str::to_owned);
+    cx.editor.review_nav = None;
     start_review(cx, revision.as_deref())?;
     let baseline = doc!(cx.editor).review.as_ref().unwrap().baseline();
     cx.editor
@@ -1328,6 +1399,7 @@ pub(super) fn pin_review_baseline(editor: &mut Editor, revision: &str) -> anyhow
         .resolve_commit(&workspace, revision, trust_full)?;
     let refresh = editor.review_baseline.as_ref() == Some(&commit);
     editor.review_baseline = Some(commit.clone());
+    editor.review_nav = None;
 
     let doc_ids: Vec<_> = editor
         .documents()
@@ -2103,14 +2175,18 @@ fn unstaged_hunk(cx: &mut compositor::Context, from: usize, forward: bool) -> an
         announce_hunk(cx.editor);
         return Ok(true);
     }
-    let (_, changes) = changed_files(cx)?;
-    let trust_full = doc_trust_full(cx.editor);
-    let files: Vec<PathBuf> = changes
-        .iter()
-        .filter(|change| matches!(change, FileChange::Modified { .. }))
-        .map(|change| change.path().to_path_buf())
-        .collect();
+    let nav = review_nav(cx)?;
     let current = doc!(cx.editor).path().map(Path::to_path_buf);
+    let files: Vec<PathBuf> = nav
+        .files
+        .iter()
+        // Only a file whose worktree differs from the index has anything left to stage; the
+        // current one stays to order the others from.
+        .filter(|file| {
+            !file.deleted && !file.added && (!file.in_index || Some(&file.path) == current.as_ref())
+        })
+        .map(|file| file.path.clone())
+        .collect();
     let start = current
         .as_ref()
         .and_then(|path| files.iter().position(|file| file == path));
@@ -2135,19 +2211,6 @@ fn unstaged_hunk(cx: &mut compositor::Context, from: usize, forward: bool) -> an
                 announce_hunk(cx.editor);
                 return Ok(true);
             }
-            continue;
-        }
-        // Only a file whose worktree differs from the index has anything left to stage.
-        let pending = cx
-            .editor
-            .diff_providers
-            .get_index_base(file, trust_full)
-            .ok()
-            .zip(std::fs::read(file).ok())
-            .is_some_and(|((index, _), worktree)| {
-                !helix_vcs::line_hunks(&index, &worktree).is_empty()
-            });
-        if !pending {
             continue;
         }
         cx.editor.open(file, Action::Replace)?;
@@ -2288,6 +2351,7 @@ fn change_staging(editor: &mut Editor, staging: Staging) -> anyhow::Result<bool>
     editor
         .diff_providers
         .update_index_entry(&path, &content, &expected, trust_full)?;
+    editor.review_nav = None;
 
     let (count, total) = helix_vcs::staged_hunk_count(&base, &content, &worktree);
     if let Some(doc) = editor.document_by_path_mut(&path) {
@@ -2565,7 +2629,7 @@ fn reviewed(editor: &Editor) -> bool {
 
 /// Whether every change since the review baseline is committed.
 fn everything_committed(cx: &mut compositor::Context) -> bool {
-    changed_files(cx).is_ok_and(|(_, changes)| only_committed(cx.editor, &changes))
+    review_nav(cx).is_ok_and(|nav| nav.all_committed(cx.editor))
 }
 
 /// Enter's (and Shift-Enter's) jump: to the next (or previous) unstaged hunk across files, or with

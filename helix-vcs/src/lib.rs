@@ -248,6 +248,21 @@ impl DiffProviderRegistry {
         Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
     }
 
+    /// A summary of the repository containing `cwd` (its `HEAD` and git index file) that
+    /// changes with every commit, checkout and staging.
+    pub fn repo_state(&self, cwd: &Path, trust_full: bool) -> Result<String> {
+        let mut first_err = None;
+        for provider in &self.providers {
+            match provider.repo_state(cwd, trust_full) {
+                Ok(state) => return Ok(state),
+                Err(err) => {
+                    first_err.get_or_insert(err);
+                }
+            }
+        }
+        Err(first_err.unwrap_or_else(|| anyhow!("no diff provider available")))
+    }
+
     /// Resolves `revision` in the repository containing `cwd` to the hex id of a commit.
     pub fn resolve_commit(&self, cwd: &Path, revision: &str, trust_full: bool) -> Result<String> {
         let mut first_err = None;
@@ -449,6 +464,14 @@ impl DiffProvider {
         match self {
             #[cfg(feature = "git")]
             Self::Git => git::step_commit(cwd, commit, older, trust_full),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn repo_state(&self, cwd: &Path, trust_full: bool) -> Result<String> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::repo_state(cwd, trust_full),
             Self::None => bail!("No diff support compiled in"),
         }
     }

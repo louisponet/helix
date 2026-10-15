@@ -122,6 +122,48 @@ pub struct OldFocus {
     pub extend: bool,
 }
 
+/// The files changed since the review baseline as review navigation sees them, kept in
+/// `Editor::review_nav` while the repository and those files are unchanged on disk.
+#[derive(Debug, Clone)]
+pub struct ReviewNav {
+    /// The baseline these files changed since.
+    pub commit: String,
+    /// The repository's `HEAD` and git index when computed, see
+    /// [`helix_vcs::DiffProviderRegistry::repo_state`].
+    pub repo_state: String,
+    /// The paths whose content the files' state depends on, with their size and modification
+    /// time then.
+    pub watched: Vec<(PathBuf, Option<(u64, std::time::SystemTime)>)>,
+    pub files: Vec<NavFile>,
+}
+
+impl ReviewNav {
+    /// Whether everything changed since the baseline is committed: every file matches `HEAD` and
+    /// the git index, and none has unsaved changes in `editor`.
+    pub fn all_committed(&self, editor: &crate::Editor) -> bool {
+        self.files.iter().all(|file| {
+            file.in_head
+                && file.in_index
+                && !editor
+                    .document_by_path(&file.path)
+                    .is_some_and(crate::Document::is_modified)
+        })
+    }
+}
+
+/// A file changed since the review baseline.
+#[derive(Debug, Clone)]
+pub struct NavFile {
+    pub path: PathBuf,
+    pub deleted: bool,
+    /// Whether the file is new since the baseline.
+    pub added: bool,
+    /// Whether the file on disk matches `HEAD` (a deleted one: `HEAD` has none either).
+    pub in_head: bool,
+    /// Whether the file on disk matches the git index.
+    pub in_index: bool,
+}
+
 /// The GitHub pull request under review (`:review-pr`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequest {

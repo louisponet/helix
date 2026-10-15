@@ -2405,6 +2405,51 @@ async fn review_next_skips_committed_hunks_and_files() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn navigation_follows_staging_and_commits_made_outside_helix() -> anyhow::Result<()> {
+    let lines = (1..=12).map(|n| format!("{n}\n")).collect::<String>();
+    let changed = lines.replacen("3\n", "changed 3\n", 1);
+    let repo = Repo::new(&lines, &lines, &changed);
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    fs::write(dir.join("other.txt"), "x\ny\n")?;
+    git_ok(dir, &["add", "other.txt"]);
+    git_ok(dir, &["commit", "-m", "other"]);
+    let baseline = git_ok(dir, &["rev-parse", "HEAD"]);
+    // other.txt's change is staged; file.txt's line 3 is not.
+    fs::write(dir.join("other.txt"), "X\ny\n")?;
+    git_ok(dir, &["add", "other.txt"]);
+    let mut app = repo.app()?;
+    let status = |app: &Application| app.editor.get_status().unwrap().0.to_string();
+    let at = |app: &Application| {
+        let (view, doc) = current_ref!(app.editor);
+        let name = doc.path().unwrap().file_name().unwrap().to_owned();
+        let line = doc
+            .selection(view.id)
+            .primary()
+            .cursor_line(doc.text().slice(..));
+        (name.into_string().unwrap(), line)
+    };
+    send_keys(&mut app, &format!(":review-baseline {baseline}<ret>")).await?;
+
+    // Staging file.txt's hunk leaves nothing unstaged: Enter stays.
+    send_keys(&mut app, "3gg<ret>").await?;
+    assert_eq!(status(&app), "Staged 1 hunk; 1 of 1 staged in file.txt");
+    assert_eq!(at(&app), ("file.txt".to_owned(), 2));
+    // Unstaged outside Helix, other.txt's change is where Enter's jump goes.
+    git_ok(dir, &["reset", "-q", "--", "other.txt"]);
+    send_keys(&mut app, "gg<ret>").await?;
+    assert_eq!(at(&app), ("other.txt".to_owned(), 0));
+    assert_eq!(status(&app), "next: other.txt hunk 1 of 1");
+
+    // Committed outside Helix, every change is committed: n walks them all again.
+    git_ok(dir, &["commit", "-qam", "agent"]);
+    send_keys(&mut app, "<space>An").await?;
+    assert_eq!(at(&app), ("file.txt".to_owned(), 2));
+    assert_eq!(status(&app), "file.txt: hunk 1 of 1");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn commit_all_stages_every_changed_file_and_asks_for_a_commit() -> anyhow::Result<()> {
     let repo = Repo::new("a\n", "a\n", "A\n");
     let dir = repo.dir.path();

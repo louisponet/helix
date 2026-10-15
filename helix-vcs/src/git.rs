@@ -395,6 +395,17 @@ pub fn for_each_changed_file(
     status(&open_repo(cwd, trust_full)?.to_thread_local(), f)
 }
 
+/// The `HEAD` commit and the git index file's size and modification time of the repository
+/// containing `cwd`: they change with every commit, checkout and staging.
+pub fn repo_state(cwd: &Path, trust_full: bool) -> Result<String> {
+    let repo = open_repo(cwd, trust_full)?.to_thread_local();
+    let head = repo.head_id().map(|id| id.to_hex().to_string());
+    let index = std::fs::metadata(repo.index_path())
+        .ok()
+        .map(|meta| (meta.len(), meta.modified().ok()));
+    Ok(format!("{head:?} {index:?}"))
+}
+
 pub fn resolve_commit(cwd: &Path, revision: &str, trust_full: bool) -> Result<String> {
     let repo = open_repo(cwd, trust_full)?.to_thread_local();
     let commit = repo
@@ -612,6 +623,32 @@ fn open_repo(path: &Path, trust_full: bool) -> Result<ThreadSafeRepository> {
         .context("failed to discover git repo")?;
     let (git_dir, _work_dir) = repo_path.into_repository_and_work_tree_directories();
 
+    // Opening parses every config file, which review navigation would otherwise do dozens of
+    // times per key press. Refs, objects and the index are read from disk (or checked for
+    // staleness) on use, so a recently opened repository stays valid while its config does.
+    let config_time = |repo: &ThreadSafeRepository| {
+        // The objects directory is in the common directory, which linked worktrees share.
+        let common = repo.objects_dir().parent().unwrap_or(repo.git_dir());
+        std::fs::metadata(common.join("config"))
+            .and_then(|meta| meta.modified())
+            .ok()
+    };
+    let cached = OPENED.with_borrow_mut(|opened| {
+        let idx = opened.iter().position(|(dir, trust_full, _, _)| {
+            *dir == git_dir && *trust_full == (trust == gix::sec::Trust::Full)
+        })?;
+        let entry = opened.remove(idx);
+        if entry.2 != config_time(&entry.3) {
+            return None;
+        }
+        let repo = entry.3.clone();
+        opened.insert(0, entry);
+        Some(repo)
+    });
+    if let Some(repo) = cached {
+        return Ok(repo);
+    }
+
     let options = gix::open::Options::default()
         .permissions(permissions)
         // `git_dir` is the discovered `.git` directory (or a linked-worktree git dir), so open it
@@ -619,7 +656,33 @@ fn open_repo(path: &Path, trust_full: bool) -> Result<ThreadSafeRepository> {
         .open_path_as_is(true)
         .with(trust);
 
-    Ok(ThreadSafeRepository::open_opts(git_dir, options)?)
+    let repo = ThreadSafeRepository::open_opts(git_dir.clone(), options)?;
+    OPENED.with_borrow_mut(|opened| {
+        opened.insert(
+            0,
+            (
+                git_dir,
+                trust == gix::sec::Trust::Full,
+                config_time(&repo),
+                repo.clone(),
+            ),
+        );
+        opened.truncate(4);
+    });
+    Ok(repo)
+}
+
+type OpenedRepo = (
+    std::path::PathBuf,
+    bool,
+    Option<std::time::SystemTime>,
+    ThreadSafeRepository,
+);
+
+thread_local! {
+    /// The repositories this thread opened last, most recent first: by git dir and full trust,
+    /// with their config's modification time when opened.
+    static OPENED: std::cell::RefCell<Vec<OpenedRepo>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Emulates the result of running `git status` from the command line.

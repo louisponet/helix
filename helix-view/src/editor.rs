@@ -1323,6 +1323,8 @@ pub struct Editor {
     pub review_target: Option<String>,
     /// The scratch buffer `:review-diff` writes to.
     pub review_diff: Option<DocumentId>,
+    /// What review navigation last found changed since the baseline, while still valid.
+    pub review_nav: Option<crate::review::ReviewNav>,
 
     pub debug_adapters: dap::registry::Registry,
     pub breakpoints: HashMap<PathBuf, Vec<Breakpoint>>,
@@ -1512,6 +1514,7 @@ impl Editor {
             review_pr_comments: Vec::new(),
             socket_command: false,
             review_diff: None,
+            review_nav: None,
             debug_adapters: dap::registry::Registry::new(),
             breakpoints: HashMap::new(),
             syn_loader,
