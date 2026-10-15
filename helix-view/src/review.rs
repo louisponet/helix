@@ -5,6 +5,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::ops;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use helix_core::doc_formatter::TextFormat;
@@ -176,6 +177,11 @@ pub struct PullRequest {
     pub base_ref: String,
     /// The merge base of the base branch and the pull request, the review baseline.
     pub merge_base: String,
+    /// The branch (or detached commit) checked out before the pull request, checked out again
+    /// when its review ends.
+    pub previous: String,
+    /// The directory review batches are handed to gtc in, if gtc opened the pull request.
+    pub batch_dir: Option<PathBuf>,
 }
 
 /// The pi hook's ownership ledger, `<workspace>/.pi/helix-review/state/ownership.json`: who
@@ -263,6 +269,8 @@ pub struct Review {
     committed: Vec<bool>,
     /// The pull request's comment threads on this file, see `:review-pr`.
     threads: Vec<ReviewThread>,
+    /// The pending comments on this file with their kind (`pi`, `pr` or `reply`), oldest first.
+    comments: Vec<(&'static str, ReviewComment)>,
     /// The owners of each block, by its first 0-based document line, until the next edit.
     owners: Vec<(usize, String)>,
 }
@@ -296,6 +304,7 @@ impl Review {
             head: None,
             committed: Vec::new(),
             threads: Vec::new(),
+            comments: Vec::new(),
             owners: Vec::new(),
         };
         review.update_blocks();
@@ -487,9 +496,15 @@ impl Review {
         self.threads = threads;
     }
 
-    /// Keeps the threads of `previous`, the review this one replaces.
+    /// Keeps the threads and pending comments of `previous`, the review this one replaces.
     pub fn keep_threads(&mut self, previous: Review) {
         self.threads = previous.threads;
+        self.comments = previous.comments;
+    }
+
+    /// Shows `comments`, the pending comments on this file with their kind, oldest first.
+    pub fn set_comments(&mut self, comments: Vec<(&'static str, ReviewComment)>) {
+        self.comments = comments;
     }
 
     pub fn threads(&self) -> &[ReviewThread] {
@@ -595,6 +610,60 @@ impl Review {
         lines
     }
 
+    /// The block whose old lines `comment` is on, while they are shown.
+    fn comment_block(&self, comment: &ReviewComment) -> Option<&OldBlock> {
+        if comment.side != ReviewSide::Old || comment.baseline != self.baseline {
+            return None;
+        }
+        let line = comment.end_line.max(1) - 1;
+        self.blocks.iter().find(|block| block.old.contains(&line))
+    }
+
+    /// The document line `comment` is shown below unless it is under old lines: the last line it
+    /// covers, or for old text the line it is shown at.
+    fn comment_line(comment: &ReviewComment, len_lines: usize) -> usize {
+        let line = match comment.side {
+            ReviewSide::Current => comment.end_line,
+            ReviewSide::Old => comment.current_line,
+        };
+        (line.max(1) - 1).min(len_lines.saturating_sub(1))
+    }
+
+    /// The rows of the pending comments shown directly below document line `line` at text width
+    /// `width`.
+    pub fn comment_rows_below(&self, line: usize, len_lines: usize, width: usize) -> Vec<String> {
+        self.comments
+            .iter()
+            .filter(|(_, comment)| {
+                self.comment_block(comment).is_none()
+                    && Self::comment_line(comment, len_lines) == line
+            })
+            .flat_map(|(kind, comment)| comment.rows(kind, width))
+            .collect()
+    }
+
+    /// The rows of the pending comments on the old lines of `block`, shown below them.
+    pub fn block_comment_rows(&self, block: &OldBlock, width: usize) -> Vec<String> {
+        self.comments
+            .iter()
+            .filter(|(_, comment)| {
+                self.comment_block(comment)
+                    .is_some_and(|other| other.old == block.old)
+            })
+            .flat_map(|(kind, comment)| comment.rows(kind, width))
+            .collect()
+    }
+
+    /// The document lines pending comments are shown below.
+    pub fn comment_lines(&self, len_lines: usize) -> Vec<usize> {
+        (self.comments.iter())
+            .map(|(_, comment)| match self.comment_block(comment) {
+                Some(block) => block.anchor_line,
+                None => Self::comment_line(comment, len_lines),
+            })
+            .collect()
+    }
+
     /// The first document line of every unstaged hunk, removals included, in order.
     pub fn unstaged_hunk_lines(&self) -> Vec<usize> {
         (0..self.hunks.len())
@@ -698,14 +767,21 @@ impl Review {
                 .sum::<usize>()
     }
 
-    /// The first virtual row, counting its label, of block `index` below its anchor line.
-    pub fn block_row(&self, index: usize, text_fmt: &TextFormat) -> usize {
+    /// The first virtual row, counting its label, of block `index` below its anchor line in a
+    /// document of `len_lines` lines.
+    pub fn block_row(&self, index: usize, len_lines: usize, text_fmt: &TextFormat) -> usize {
         let block = &self.blocks[index];
-        self.blocks_at(block.anchor_line)
-            .iter()
-            .take_while(|other| other.old.start < block.old.start)
-            .map(|other| self.block_height(other, text_fmt))
-            .sum()
+        let width = text_fmt.viewport_width as usize;
+        self.comment_rows_below(block.anchor_line, len_lines, width)
+            .len()
+            + self
+                .blocks_at(block.anchor_line)
+                .iter()
+                .take_while(|other| other.old.start < block.old.start)
+                .map(|other| {
+                    self.block_height(other, text_fmt) + self.block_comment_rows(other, width).len()
+                })
+                .sum::<usize>()
     }
 
     pub fn focus(&self, view_id: ViewId) -> Option<OldFocus> {
@@ -763,6 +839,7 @@ impl Review {
     pub fn focus_position(
         &self,
         view_id: ViewId,
+        len_lines: usize,
         text_fmt: &TextFormat,
     ) -> Option<(usize, Position)> {
         let idx = self.focused_block_index(view_id)?;
@@ -770,7 +847,7 @@ impl Review {
         let text = self.snapshot.slice(..);
         let cursor = self.focus[&view_id].range.cursor(text);
         let line = text.char_to_line(cursor);
-        let mut row = self.block_row(idx, text_fmt);
+        let mut row = self.block_row(idx, len_lines, text_fmt);
         row += block.is_displaced() as usize;
         row += (block.old.start..line)
             .map(|line| self.old_line_height(line, text_fmt))
@@ -837,21 +914,23 @@ impl LineAnnotation for ReviewLines<'_> {
         {
             return Position::new(0, 0);
         }
+        let (len_lines, width) = (self.text.len_lines(), self.text_fmt.viewport_width as usize);
         let rows: usize = self
             .review
             .blocks_at(doc_line)
             .iter()
-            .map(|block| self.review.block_height(block, &self.text_fmt))
+            .map(|block| {
+                self.review.block_height(block, &self.text_fmt)
+                    + self.review.block_comment_rows(block, width).len()
+            })
             .sum();
-        let threads = self
-            .review
-            .thread_rows_below(
-                doc_line,
-                self.text.len_lines(),
-                self.text_fmt.viewport_width as usize,
-            )
+        let comments = (self.review)
+            .comment_rows_below(doc_line, len_lines, width)
             .len();
-        Position::new(rows + threads, 0)
+        let threads = (self.review)
+            .thread_rows_below(doc_line, len_lines, width)
+            .len();
+        Position::new(rows + comments + threads, 0)
     }
 }
 
@@ -883,6 +962,9 @@ pub struct ReviewComment {
     /// The pull request comment thread (its first comment's id) this comment replies to.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<u64>,
+    /// When the comment was made, ordering it among the comments of other kinds.
+    #[serde(skip)]
+    pub created: Instant,
 }
 
 impl ReviewComment {
@@ -915,7 +997,32 @@ impl ReviewComment {
             enclosing_text: None,
             comment,
             reply_to: None,
+            created: Instant::now(),
         }
+    }
+
+    pub const MAX_ROWS: usize = 8;
+
+    /// The rows of the comment of `kind` shown below its lines at text width `width`:
+    /// `▲ kind │ text`, wrapped, with continuation rows under the `│`, cut at
+    /// [`Self::MAX_ROWS`] rows.
+    pub fn rows(&self, kind: &str, width: usize) -> Vec<String> {
+        let first = format!("▲ {kind} │ ");
+        let next = format!("{}│ ", " ".repeat(first.chars().count() - 2));
+        let text_width = width.saturating_sub(first.chars().count()).max(1);
+        let mut rows: Vec<_> = (self.comment.replace('\t', "    ").lines())
+            .flat_map(|line| wrap_columns(line, text_width))
+            .enumerate()
+            .map(|(row, text)| format!("{}{text}", if row == 0 { &first } else { &next }))
+            .collect();
+        if rows.is_empty() {
+            rows.push(first);
+        }
+        if rows.len() > Self::MAX_ROWS {
+            rows.truncate(Self::MAX_ROWS - 1);
+            rows.push(format!("{next}…"));
+        }
+        rows
     }
 }
 

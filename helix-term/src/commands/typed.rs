@@ -4030,9 +4030,21 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     },
     TypableCommand {
         name: "review-comment",
-        aliases: &["review-ask"],
+        aliases: &[],
         doc: "Send a comment on every selection (or the selected old text) to the agent at once, writing the buffer first if modified; a leading @label addresses that pi session. While reviewing a pull request, add a pending pull request comment on the primary selection instead. Use %% for a literal %.",
         fun: review::review_comment,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (1, Some(1)),
+            raw_after: Some(0),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-ask",
+        aliases: &[],
+        doc: "Send a comment on every selection (or the selected old text) to the agent at once, writing the buffer first if modified, also while reviewing a pull request; a leading @label addresses that pi session. Use %% for a literal %.",
+        fun: review::review_ask,
         completer: CommandCompleter::none(),
         signature: Signature {
             positionals: (1, Some(1)),
@@ -4131,18 +4143,18 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "review-pr",
         aliases: &[],
-        doc: "Review a GitHub pull request (number or URL) with gh: check it out and review every buffer against its merge base with the base branch. `close` leaves the pull request review.",
+        doc: "Review a GitHub pull request (number or URL) with gh: check it out and review every buffer against its merge base with the base branch. An optional directory receives the review batch :review-submit hands to gtc. `close` leaves the pull request review and checks out the previous branch.",
         fun: review_pr::review_pr,
         completer: CommandCompleter::none(),
         signature: Signature {
-            positionals: (1, Some(1)),
+            positionals: (1, Some(2)),
             ..Signature::DEFAULT
         },
     },
     TypableCommand {
         name: "review-submit",
         aliases: &[],
-        doc: "Post the pending pull request comments as a review with gh: [approve|request-changes|comment] [summary]. Comments outside the pull request's diff become file-level comments quoting their lines; replies go to their threads.",
+        doc: "Hand the pending pull request comments and edits to reviewed buffers (as suggested changes) to gtc as a review batch in the directory given to :review-pr: [approve|request-changes|comment] [summary]. Without arguments, opens the submit dialog.",
         fun: review_pr::review_submit,
         completer: CommandCompleter::none(),
         signature: Signature {

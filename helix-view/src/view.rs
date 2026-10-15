@@ -398,7 +398,7 @@ impl View {
 
         let block_top = rows_to(line_end_char_index(&text, block.anchor_line))
             + 1
-            + review.block_row(idx, &text_fmt);
+            + review.block_row(idx, text.len_lines(), &text_fmt);
         let mut top = block_top;
         let mut bottom = block_top + review.block_height(block, &text_fmt) - 1;
         if !block.current.is_empty() {
@@ -445,7 +445,7 @@ impl View {
         let Some((line, focus_pos)) = doc
             .review
             .as_ref()
-            .and_then(|review| review.focus_position(self.id, &text_fmt))
+            .and_then(|review| review.focus_position(self.id, doc.text().len_lines(), &text_fmt))
         else {
             return;
         };

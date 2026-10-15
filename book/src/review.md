@@ -40,9 +40,9 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-old` | Focus the old text nearest the cursor. |
 | `:review-refresh` | Reload the buffer from disk; reread the index in index mode, or retain the selected commit in commit mode. Refuses unsaved changes. |
 | `:review-comment <text>` | Send a comment to the agent at once: one comment per selection, or on the selected old text while it is focused, then hands the review off (writing the buffer first if it is modified). Needs a handoff directory (`:review-handoff` or the pi mailbox). A leading `@label` (`:review-comment @pi-2 rename this`) addresses the pi session with that label. While reviewing a pull request it adds a pending pull request comment on the primary selection instead. Use `%%` for a literal `%`. |
-| `:review-ask <text>` | The same command as `:review-comment`. |
-| `:review-comments` | Pick a pending comment, or while reviewing a pull request one of its comment threads, by kind, author, place or text, and jump to its line in the current text. |
-| `:review-uncomment [count]` | Drop the latest pending comment, or the `count` latest ones, and show how many remain. |
+| `:review-ask <text>` | Like `:review-comment` outside a pull request review, also while reviewing one: the comment always goes to the agent and is never posted to GitHub. |
+| `:review-comments` | Pick a pending comment (kind `pi` for the agent, `pr` or `reply` for the pull request), or while reviewing a pull request one of its comment threads, by kind, author, place or text, and jump to its line in the current text. |
+| `:review-uncomment [count]` | Drop the latest pending comment of either kind, or the `count` latest ones, and show how many remain. |
 | `:review-export <path>` | Write all pending comments and reviewed files to a new JSON file. |
 | `:review-revert` | Replace the change under the cursor, or the focused old text's change, with the baseline's lines (added lines are deleted; removed lines shown below the cursor line are restored). One undoable edit; the file on disk is not touched. |
 | `:review-stage` | Stage the unstaged hunk (index to worktree) under the cursor in the git index, like `git add -p`: in a reviewed buffer every hunk any selection touches (a selection spanning several hunks stages them all) or the hunk of the focused old text, in the `:review-diff` buffer the hunk under the cursor. Refuses buffers with unsaved changes, a locked index (`index.lock`), and files git converts (filters, line endings). |
@@ -51,8 +51,8 @@ label such as `old lines 1-2 removed before line 1:`.
 | `Enter` | In normal mode, runs `:review-toggle-stage` while the buffer is reviewed or is the `:review-diff` buffer, and does nothing otherwise. |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept. Under a `:review-baseline`, the buffer is not reviewed again until a different baseline, `:review-baseline clear`, or an explicit `:review` on it. |
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. Refuses a commit that is not `HEAD` or one of its ancestors (`commit <commit> is not in this branch's history`), such as a branch tip a rebase rewrote. `clear` closes all reviews. `:review-baseline <revision> force` adopts the commit even over a baseline pinned by you, ending the pin (the pi hook sends it after a commit you asked for). |
-| `:review-pr <number\|url>` | Review a GitHub pull request: check it out with `gh pr checkout` and review every buffer against its merge base with the base branch. Refuses uncommitted changes and unsaved reviewed buffers. `close` leaves the pull request review and keeps the checkout. See [Reviewing pull requests](#reviewing-pull-requests). |
-| `:review-submit [approve\|request-changes\|comment] [summary]` | Post the pending pull request comments as one review (see [Reviewing pull requests](#reviewing-pull-requests)). `Space A m` opens it while reviewing a pull request. |
+| `:review-pr <number\|url> [dir]` | Review a GitHub pull request: check it out with `gh pr checkout` and review every buffer against its merge base with the base branch. `dir` is where `:review-submit` hands the review to gtc. Refuses uncommitted changes and unsaved reviewed buffers. `close` leaves the pull request review and checks out the branch that was checked out before, unless the worktree has uncommitted changes. See [Reviewing pull requests](#reviewing-pull-requests). |
+| `:review-submit [approve\|request-changes\|comment] [summary]` | Hand the pending pull request comments and your edits, as suggested changes, to gtc as one review batch, then leave the pull request review (see [Reviewing pull requests](#reviewing-pull-requests)). Without arguments it opens the submit dialog, as `Space A m` does while reviewing a pull request. |
 | `:review-commit-all [subject]` | Stage every file changed since the baseline (modified, deleted and untracked, like `git add -A` limited to them), then hand back like `:review-commit`. Refuses unsaved reviewed buffers, and says `no changes since <commit>` when there is nothing. `Space A M` in the default keymap. |
 | `:review-next` | Go to the next changed block that is unstaged or staged, skipping hunks committed since the baseline; after the last one, open the next file changed since the baseline with such a block (`:review-files` order, wrapping around) at its first one. Shows `<file>: hunk 2 of 5`, counting only those blocks, or `no uncommitted changes since <commit>` when there are none. When nothing is staged or unstaged in any changed file (everything since the baseline is committed, as in a [pull request review](#reviewing-pull-requests) or with a baseline pinned at an older commit), it walks every changed block instead, committed ones included, and counts them all; the error then reads `no changes since <commit>`. `Space A n` in the default keymap, which takes a count. |
 | `:review-prev` | Like `:review-next` backwards, landing on the previous file's last block. `Space A N` in the default keymap. |
@@ -232,7 +232,12 @@ like this:
    read its answer in pi. A comment that could not be sent (another reviewed
    buffer has unsaved changes, say) stays pending and goes with the next
    handoff: `:review-comments` lists pending comments and jumps to one;
-   `:review-uncomment [count]` drops the latest.
+   `:review-uncomment [count]` drops the latest. A pending comment is shown
+   below the last line it covers (below the old lines for a comment on old
+   text), pointing up at it: `▲ pi │ text` (`pr`, or `reply` for a reply to a
+   thread, for a pull request comment), at most 8 rows, in
+   `ui.review.comment`. It moves with its line as threads do and disappears
+   once handed off, submitted or dropped.
 8. Your own edits are ordinary worktree changes: save them as usual (auto-save
    included), and stage them like any other hunk. Saving tells the agent
    nothing.
@@ -317,11 +322,20 @@ starts with `#123`. It refuses while the worktree has uncommitted changes.
 The pull request's baseline stays pinned: the pi hook re-sending its own
 baseline only refreshes the reviews. `Space A -` / `Space A +` still step through history
 (`Space A +` from the merge base walks the pull request's commits). Running
-`:review-baseline` yourself leaves the pull request review, and so does
-`:review-pr close`, which keeps the checkout. After the branch was rebased onto
+`:review-baseline` yourself leaves the pull request review (keeping the checkout).
+
+`:review-pr` remembers what was checked out before (the branch, or the commit
+when detached), and `:review-pr close`, a successful `:review-submit` and quitting
+Helix during the review check it out again; the status ends with `; back on
+<branch>`. When the worktree has uncommitted changes to tracked files, the pull
+request's branch stays checked out instead: `kept <branch> checked out: the
+worktree has uncommitted changes`. Unmodified buffers are reloaded afterwards.
+
+After the branch was rebased onto
 a newer base, `:review-refresh` (`Space A B`) moves the baseline to the new merge
 base (`Baseline moved to <commit> after a rebase`). `:review-pr` also works over the
-command socket, so other tools can open a pull request in Helix.
+command socket, so other tools can open a pull request in Helix: gtc sends
+`review-pr <url> <dir>`, `dir` being the directory it takes reviews from.
 
 The pull request's existing review comments (`gh api .../pulls/<n>/comments`)
 are shown as threads above the line they are on, greyed
@@ -334,19 +348,50 @@ shown at its original line, tagged `(outdated)`. They reload with
 While reviewing a pull request, `Space A c` (`:review-comment`) collects comments
 for the pull request instead of for pi: they are kept out of the batches
 handed to pi (`:review-send`, `:review-commit`), and a comment on a
-line with a thread replies to it. `:review-ask` is the same command, so it does
-likewise.
+line with a thread replies to it. `:review-ask` (`Space A a`) is unaffected: its
+comment goes to the agent as outside a pull request review, and is never posted
+to GitHub.
 
-`:review-submit [approve|request-changes|comment] [summary]` (`Space A m` opens it
-while reviewing a pull request) posts them as one review on the pull request's
-head commit, with the summary as its body (`comment` by default). A comment on
-lines of the pull request's diff (changed lines and 3 lines around them, on
-their side) becomes a line comment, spanning lines when it covers several;
-any other becomes a file-level comment quoting its lines (`> 11: text`).
-Replies are posted to their threads. On success the pending comments are
-cleared, the threads reloaded, and the status reads `Submitted APPROVE on #7:
-2 comments, 1 reply, 1 file-level`; on failure everything stays pending and
-the status shows `gh`'s error.
+Helix does not post reviews itself: gtc does. `:review-submit
+[approve|request-changes|comment] [summary]` hands the review to gtc by writing
+one review batch, `review-<number>-<unix-ms>.json`, into the directory given to
+`:review-pr` (as `<name>.tmp` first, then renamed, so gtc never reads a partial
+file). The batch names the repository, the pull request and the head commit the
+review was made against, the verb (`COMMENT` by default, `APPROVE` or
+`REQUEST_CHANGES`), the summary as its body, and:
+
+- every pending comment, with its path relative to the workspace, its side
+  (`RIGHT` for the pull request's head, `LEFT` for its base), its first and last
+  line (1-based, inclusive) and, for a reply, the id of the thread's comment it
+  replies to;
+- every hunk of `git diff -U0 HEAD` of a reviewed file as a suggestion: the
+  inclusive range of head lines it replaces and the replacement text (empty for
+  a deletion). A pure insertion after line L is the replacement of line L by
+  that line followed by the new lines. A pending comment on exactly a hunk's
+  lines becomes that suggestion's comment instead of a comment of its own.
+
+gtc decides how each lands on GitHub (a line comment, a file-level comment or
+part of the review body, as lines outside the pull request's diff and its 3
+context lines cannot carry line comments), refuses a batch whose head is no
+longer the pull request's (review again then), and deletes the batch once
+posted. Reviewed buffers must be written first. Without a directory (the pull
+request was not opened from `gtc prs`) submitting fails with `no reviewer
+attached: open the pull request from gtc prs` and everything stays pending.
+
+`Space A m`, or `:review-submit` without arguments, opens a dialog titled
+`Review #<n> <title>`: a verb row (`[comment]  approve  request changes`;
+`Tab`, and `Left` / `Right` while the summary is empty, move the selection),
+the summary below it (`Alt-Enter` or `Shift-Enter` starts a new line; arrows,
+`Home`, `End`, `Backspace` and `Delete` edit it) and what will be posted
+(`3 comments, 1 reply, 2 suggestions`). `Enter` hands the review to gtc, `Esc`
+closes it and keeps everything pending.
+
+Once the batch is written the pending comments are cleared, the files the
+suggestions were made of are checked out again from the pull request's head and
+their buffers reloaded, the pull request review ends as with `:review-pr close`,
+and the status reads `Handed the review of #7 to gtc: 2 comments, 1 reply, 3
+suggestions; back on main`. When the batch cannot be written nothing changes,
+everything stays pending and the status shows the error.
 
 ### Troubleshooting
 

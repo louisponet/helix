@@ -2592,6 +2592,8 @@ struct PrFixture {
     merge_base: String,
     head: String,
     gh: FakeGh,
+    /// The directory gtc gives `:review-pr` for review batches.
+    batches: TempDir,
 }
 
 impl PrFixture {
@@ -2623,7 +2625,39 @@ pr\ checkout\ 7) git checkout -q feature;;
             merge_base,
             head,
             gh,
+            batches: tempfile::tempdir().unwrap(),
         }
+    }
+
+    /// The review batches written so far, oldest first, checking their names.
+    fn batches(&self) -> Vec<serde_json::Value> {
+        let mut names: Vec<_> = fs::read_dir(self.batches.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+            .iter()
+            .map(|name| {
+                let millis = name
+                    .strip_prefix("review-7-")
+                    .and_then(|name| name.strip_suffix(".json"))
+                    .unwrap_or_else(|| panic!("unexpected file {name}"));
+                assert!(millis.parse::<u128>().is_ok(), "{name}");
+                let text = fs::read_to_string(self.batches.path().join(name)).unwrap();
+                serde_json::from_str(&text).unwrap()
+            })
+            .collect()
+    }
+
+    /// Whether every `gh` call so far only read from GitHub.
+    fn only_read(&self) -> bool {
+        self.gh.calls().iter().all(|call| {
+            ["pr view 7 ", "repo view ", "pr checkout 7"]
+                .iter()
+                .any(|prefix| call.starts_with(prefix))
+                || call == "api repos/o/r/pulls/7/comments --paginate"
+        })
     }
 
     /// An app on file.txt with the review statusline element, in PR mode for pull request 7.
@@ -2634,9 +2668,14 @@ pr\ checkout\ 7) git checkout -q feature;;
             .with_file(&self.repo.file, None)
             .with_config(config)
             .build()?;
-        send_keys(&mut app, ":review-pr 7<ret>").await?;
+        send_keys(&mut app, &self.review_pr()).await?;
         wait_for(&mut app, |app| app.editor.review_pr.is_some()).await?;
         Ok(app)
+    }
+
+    /// The keys opening pull request 7 as gtc does, with the batch directory.
+    fn review_pr(&self) -> String {
+        format!(":review-pr 7 {}<ret>", self.batches.path().display())
     }
 }
 
@@ -2956,88 +2995,220 @@ async fn enter_stays_on_a_hunk_it_unstages() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn review_submit_posts_line_file_level_and_reply_comments() -> anyhow::Result<()> {
+async fn review_submit_hands_comments_and_replies_to_gtc() -> anyhow::Result<()> {
     let base: String = "abcdefghijkl".chars().map(|c| format!("{c}\n")).collect();
     let head = base.replacen("b\n", "B\n", 1);
     let threads = r#"[{"id":1,"in_reply_to_id":null,"path":"file.txt","line":8,"original_line":8,"start_line":null,"side":"RIGHT","body":"why h?","user":{"login":"alice"},"created_at":"t","commit_id":"c"}]"#;
-    // The posted JSON is kept next to the fake; a `fail` file there makes the review POST fail.
-    let extra = format!(
-        r#"api\ -X\ POST\ repos/o/r/pulls/7/reviews*) [ -e "$(dirname "$0")/fail" ] && {{ echo 'HTTP 422: line could not be resolved' >&2; exit 1; }}; cat > "$(dirname "$0")/review.json"; echo '{{}}';;
-api\ -X\ POST\ repos/o/r/pulls/7/comments*) cat >> "$(dirname "$0")/replies.json"; echo >> "$(dirname "$0")/replies.json"; echo '{{}}';;
-api\ repos/o/r/pulls/7/comments*) echo '{threads}';;"#
-    );
+    let extra = format!(r#"api\ repos/o/r/pulls/7/comments*) echo '{threads}';;"#);
     let fixture = PrFixture::new(&base, &head, &extra);
     let dir = fixture.repo.dir.path();
     let _cwd = Cwd::enter(dir);
-    let fake_dir = fixture.gh.log.parent().unwrap().to_path_buf();
     let mut app = fixture.open().await?;
     wait_for(&mut app, |app| app.editor.review_pr_threads.len() == 1).await?;
 
-    // A comment on the changed line 2, one on lines 3-4 (context), one far from the change on
-    // line 11, and a reply to the thread on line 8.
-    send_keys(&mut app, "2gg:review-comment fix B<ret>").await?;
-    send_keys(&mut app, "3ggxx:review-comment two lines<ret>").await?;
-    send_keys(&mut app, "<esc>11gg:review-comment far away<ret>").await?;
-    send_keys(&mut app, "8gg<space>Acthanks<ret>").await?;
-    assert_eq!(app.editor.review_pr_comments.len(), 4);
+    // A comment on lines 2-3 and a reply to the thread on line 8.
+    send_keys(&mut app, "2ggxx:review-comment two lines<ret>").await?;
+    send_keys(&mut app, "<esc>8gg<space>Acthanks<ret>").await?;
+    assert_eq!(app.editor.review_pr_comments.len(), 2);
 
-    // Space A m opens the submit prompt; a failing post keeps everything pending.
-    fs::write(fake_dir.join("fail"), "")?;
-    send_keys(&mut app, "<space>Amapprove looks good<ret>").await?;
-    wait_for(&mut app, |app| {
-        app.editor
-            .get_status()
-            .is_some_and(|(status, _)| status.contains("failed"))
-    })
-    .await?;
-    assert_error(&app, "HTTP 422: line could not be resolved");
-    assert_eq!(app.editor.review_pr_comments.len(), 4);
-
-    fs::remove_file(fake_dir.join("fail"))?;
+    // A batch that cannot be written keeps everything pending.
+    fs::remove_dir(fixture.batches.path())?;
     send_keys(&mut app, ":review-submit approve looks good<ret>").await?;
-    wait_for(&mut app, |app| app.editor.review_pr_comments.is_empty()).await?;
+    assert_error(&app, "writing the review batch to");
+    assert_eq!(app.editor.review_pr_comments.len(), 2);
+    assert!(app.editor.review_pr.is_some());
+
+    fs::create_dir(fixture.batches.path())?;
+    send_keys(&mut app, ":review-submit approve looks good<ret>").await?;
     assert_eq!(
         app.editor.get_status().unwrap().0,
-        "Submitted APPROVE on #7: 2 comments, 1 reply, 1 file-level"
+        "Handed the review of #7 to gtc: 1 comment, 1 reply, 0 suggestions; back on main"
     );
-    let review: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(fake_dir.join("review.json"))?)?;
     assert_eq!(
-        review,
-        serde_json::json!({
-            "commit_id": fixture.head,
+        fixture.batches(),
+        [serde_json::json!({
+            "version": 1,
+            "kind": "pull-request-review",
+            "repo": "o/r",
+            "number": 7,
+            "head": fixture.head,
             "event": "APPROVE",
             "body": "looks good",
             "comments": [
-                { "path": "file.txt", "line": 2, "side": "RIGHT", "body": "fix B" },
                 {
-                    "path": "file.txt", "line": 4, "side": "RIGHT",
-                    "start_line": 3, "start_side": "RIGHT", "body": "two lines"
+                    "path": "file.txt", "side": "RIGHT", "start_line": 2, "line": 3,
+                    "body": "two lines", "reply_to": null
                 },
-                { "path": "file.txt", "subject_type": "file", "body": "> 11: k\n\nfar away" },
+                {
+                    "path": "file.txt", "side": "RIGHT", "start_line": 8, "line": 8,
+                    "body": "thanks", "reply_to": 1
+                },
             ],
-        })
+            "suggestions": [],
+        })]
     );
-    let replies = fs::read_to_string(fake_dir.join("replies.json"))?;
-    let replies: Vec<serde_json::Value> = replies
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(serde_json::from_str)
-        .collect::<Result<_, _>>()?;
+    assert!(app.editor.review_pr_comments.is_empty());
+    assert!(app.editor.review_pr.is_none());
+    assert_eq!(git_ok(dir, &["symbolic-ref", "--short", "HEAD"]), "main");
+    assert!(fixture.only_read(), "{:?}", fixture.gh.calls());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn leaving_a_pull_request_review_checks_out_the_previous_branch() -> anyhow::Result<()> {
+    let fixture = PrFixture::new("a\nb\n", "a\nB\n", r#"api\ *) echo '[]';;"#);
+    let dir = fixture.repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let branch = |dir: &Path| git_ok(dir, &["symbolic-ref", "--short", "HEAD"]);
+
+    let mut app = fixture.open().await?;
+    assert_eq!(branch(dir), "feature");
+    send_keys(&mut app, ":review-pr close<ret>").await?;
     assert_eq!(
-        replies,
-        [serde_json::json!({ "body": "thanks", "in_reply_to": 1 })]
+        app.editor.get_status().unwrap().0,
+        "Stopped reviewing PR #7; back on main"
     );
-    // The threads are loaded again after the submit.
-    wait_for(&mut app, |_| {
-        let calls = fixture.gh.calls();
-        calls
-            .iter()
-            .filter(|call| call.starts_with("api repos/o/r/pulls/7/comments"))
-            .count()
-            == 2
-    })
+    assert_eq!(branch(dir), "main");
+    assert_eq!(doc!(app.editor).text().to_string(), "a\nb\n");
+
+    // Uncommitted changes keep the pull request's branch.
+    send_keys(&mut app, ":review-pr 7<ret>").await?;
+    wait_for(&mut app, |app| app.editor.review_pr.is_some()).await?;
+    fs::write(&fixture.repo.file, "a\nB\nx\n")?;
+    send_keys(&mut app, ":review-pr close<ret>").await?;
+    assert_eq!(
+        app.editor.get_status().unwrap().0,
+        "Stopped reviewing PR #7; kept feature checked out: the worktree has uncommitted changes"
+    );
+    assert_eq!(branch(dir), "feature");
+    git_ok(dir, &["checkout", "-q", "--", "file.txt"]);
+    git_ok(dir, &["checkout", "-q", "main"]);
+
+    // Quitting during a review goes back too.
+    send_keys(&mut app, ":reload<ret>:review-pr 7<ret>").await?;
+    wait_for(&mut app, |app| app.editor.review_pr.is_some()).await?;
+    assert_eq!(branch(dir), "feature");
+    send_keys(&mut app, ":q<ret>").await?;
+    assert!(app.close().await.is_empty());
+    assert_eq!(branch(dir), "main");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_submit_hands_your_edits_to_gtc_as_suggestions() -> anyhow::Result<()> {
+    let base: String = "abcdefghijkl".chars().map(|c| format!("{c}\n")).collect();
+    let head = base.replacen("b\n", "B\n", 1);
+    let fixture = PrFixture::new(&base, &head, r#"api\ *) echo '[]';;"#);
+    let dir = fixture.repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let mut app = fixture.open().await?;
+
+    // Lines 2-3 are replaced and a line is inserted after line 5; a comment sits on lines 2-3.
+    let edited = head
+        .replacen("B\nc\n", "B2\nC\n", 1)
+        .replacen("e\n", "e\nx\n", 1);
+    fs::write(&fixture.repo.file, &edited)?;
+    send_keys(&mut app, ":reload<ret>2ggxx:review-comment both<ret>").await?;
+
+    send_keys(&mut app, ":review-submit comment ok<ret>").await?;
+    assert_eq!(
+        app.editor.get_status().unwrap().0,
+        "Handed the review of #7 to gtc: 0 comments, 0 replies, 2 suggestions; back on main"
+    );
+    let batches = fixture.batches();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(
+        (
+            &batches[0]["event"],
+            &batches[0]["body"],
+            &batches[0]["comments"]
+        ),
+        (
+            &serde_json::json!("COMMENT"),
+            &serde_json::json!("ok"),
+            &serde_json::json!([])
+        )
+    );
+    assert_eq!(
+        batches[0]["suggestions"],
+        serde_json::json!([
+            {
+                "path": "file.txt", "start_line": 2, "line": 3,
+                "replacement": "B2\nC", "comment": "both"
+            },
+            {
+                "path": "file.txt", "start_line": 5, "line": 5,
+                "replacement": "e\nx", "comment": null
+            },
+        ])
+    );
+    // The edits were reverted before going back to main.
+    assert_eq!(git_ok(dir, &["status", "--porcelain"]), "");
+    assert_eq!(git_ok(dir, &["symbolic-ref", "--short", "HEAD"]), "main");
+    assert_eq!(doc!(app.editor).text().to_string(), base);
+    assert!(app.editor.review_pr_comments.is_empty());
+    assert!(app.editor.review_pr.is_none());
+    assert!(fixture.only_read(), "{:?}", fixture.gh.calls());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn space_a_m_opens_a_modal_to_pick_the_verb_and_write_the_summary() -> anyhow::Result<()> {
+    let fixture = PrFixture::new("a\nb\n", "a\nB\n", r#"api\ *) echo '[]';;"#);
+    let dir = fixture.repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let mut app = fixture.open().await?;
+    send_keys(&mut app, "2gg:review-comment fix<ret>").await?;
+
+    // Esc cancels: the keys typed went to the modal, nothing is written and the comment waits.
+    send_keys(&mut app, "<space>Amdd<esc>").await?;
+    assert_eq!(doc!(app.editor).text().to_string(), "a\nB\n");
+    assert!(fixture.batches().is_empty());
+    assert_eq!(app.editor.review_pr_comments.len(), 1);
+
+    // Tab selects approve.
+    send_keys(&mut app, "<space>Am<tab>fine<ret>").await?;
+    assert!(app.editor.review_pr.is_none());
+    let batches = fixture.batches();
+    assert_eq!(
+        (batches[0]["event"].as_str(), batches[0]["body"].as_str()),
+        (Some("APPROVE"), Some("fine"))
+    );
+    assert_eq!(batches[0]["comments"].as_array().map(Vec::len), Some(1));
+
+    // Enter hands over a comment review with the typed summary; Alt-Enter and Shift-Enter break
+    // lines.
+    send_keys(&mut app, &fixture.review_pr()).await?;
+    wait_for(&mut app, |app| app.editor.review_pr.is_some()).await?;
+    send_keys(
+        &mut app,
+        "<space>Amlgtm<A-ret>really<S-ret>x<backspace>y<ret>",
+    )
     .await?;
+    assert!(app.editor.review_pr.is_none());
+    let batches = fixture.batches();
+    assert_eq!(
+        (batches[1]["event"].as_str(), batches[1]["body"].as_str()),
+        (Some("COMMENT"), Some("lgtm\nreally\ny"))
+    );
+
+    // Without a batch directory there is nobody to hand the review to.
+    send_keys(&mut app, ":review-pr 7<ret>").await?;
+    wait_for(&mut app, |app| app.editor.review_pr.is_some()).await?;
+    send_keys(&mut app, "2gg:review-comment fix<ret><space>Am<ret>").await?;
+    assert_error(
+        &app,
+        "no reviewer attached: open the pull request from gtc prs",
+    );
+    send_keys(&mut app, ":review-submit approve fine<ret>").await?;
+    assert_error(
+        &app,
+        "no reviewer attached: open the pull request from gtc prs",
+    );
+    assert_eq!(app.editor.review_pr_comments.len(), 1);
+    assert!(app.editor.review_pr.is_some());
+    assert_eq!(fixture.batches().len(), 2);
+    assert!(fixture.only_read(), "{:?}", fixture.gh.calls());
     Ok(())
 }
 
@@ -4094,5 +4265,124 @@ async fn change_motions_follow_the_review_baseline_until_it_closes() -> anyhow::
     wait_for_hunks(&app, 0);
     send_keys(&mut app, "gg]g").await?;
     assert_eq!(cursor_line(&app), 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_comments_are_drawn_below_the_lines_they_are_on() -> anyhow::Result<()> {
+    let repo = Repo::new(
+        "a
+b
+c
+d
+e
+",
+        "a
+b
+c
+d
+e
+",
+        "a
+b
+C
+d
+e
+",
+    );
+    let _cwd = Cwd::enter(repo.dir.path());
+    let mut app = repo.app()?;
+    // Comments that cannot be sent stay pending.
+    break_handoff(&mut app, repo.dir.path()).await?;
+    let rows = |app: &Application| -> Vec<String> {
+        let mut rows: Vec<_> = render(app).into_iter().map(|(_, text)| text).collect();
+        while rows.last().is_some_and(String::is_empty) {
+            rows.pop();
+        }
+        rows
+    };
+
+    send_keys(&mut app, ":review<ret>ggxx:review-comment on a and b<ret>").await?;
+    assert_eq!(
+        rows(&app),
+        ["a", "b", "▲ pi │ on a and b", "c", "C", "d", "e"]
+    );
+
+    // A comment on old text is drawn below the old lines it is on.
+    send_keys(&mut app, ":review-old<ret>:review-comment old c<ret><esc>").await?;
+    assert_eq!(
+        rows(&app),
+        [
+            "a",
+            "b",
+            "▲ pi │ on a and b",
+            "c",
+            "▲ pi │ old c",
+            "C",
+            "d",
+            "e"
+        ]
+    );
+
+    send_keys(&mut app, ":review-uncomment<ret>").await?;
+    assert_eq!(
+        app.editor.get_status().unwrap().0,
+        "Dropped 1 review comment, 1 pending"
+    );
+    assert_eq!(
+        rows(&app),
+        ["a", "b", "▲ pi │ on a and b", "c", "C", "d", "e"]
+    );
+    send_keys(&mut app, ":review-uncomment<ret>").await?;
+    assert_eq!(rows(&app), ["a", "b", "c", "C", "d", "e"]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_ask_goes_to_the_agent_while_review_comment_goes_to_the_pull_request(
+) -> anyhow::Result<()> {
+    let fixture = PrFixture::new(
+        "a
+b
+c
+",
+        "a
+B
+c
+",
+        r#"api\ *) echo '[]';;"#,
+    );
+    let dir = fixture.repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let outbox = dir.join(".pi/helix-review/outbox");
+    fs::create_dir_all(&outbox)?;
+    let mut app = fixture.open().await?;
+    wait_for(&mut app, |_| fixture.gh.calls().len() == 4).await?;
+    let texts = |app: &Application| -> Vec<String> {
+        render(app).into_iter().map(|(_, text)| text).collect()
+    };
+
+    send_keys(&mut app, "gg:review-comment for the pr<ret>").await?;
+    assert_status_not_error(&app.editor);
+    send_keys(&mut app, "3gg:review-ask for pi<ret>").await?;
+    assert_status_not_error(&app.editor);
+    send_keys(&mut app, ":review-send<ret>").await?;
+    assert_status_not_error(&app.editor);
+
+    let sent: Vec<_> = take_batches(&outbox)
+        .iter()
+        .flat_map(|batch| batch["comments"].as_array().unwrap().clone())
+        .map(|comment| comment["comment"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(sent, ["for pi"]);
+    let pending: Vec<_> = (app.editor.review_pr_comments.iter())
+        .map(|comment| comment.comment.as_str())
+        .collect();
+    assert_eq!(pending, ["for the pr"]);
+    assert!(app.editor.review_batch.comments().is_empty());
+    // Only the pull request comment is still pending, so only it is drawn.
+    let rows = texts(&app);
+    assert_eq!(rows[..3], ["a", "▲ pr │ for the pr", "b"], "{rows:#?}");
+    assert!(!rows.iter().any(|row| row.contains("for pi")), "{rows:#?}");
     Ok(())
 }

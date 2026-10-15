@@ -1397,6 +1397,12 @@ impl Application {
             errs.push(err);
         }
 
+        if let Some(pr) = self.editor.review_pr.take() {
+            let restored =
+                crate::commands::review_pr::restore_branch(&pr, &helix_loader::find_workspace().0);
+            log::info!("leaving the review of PR #{}: {restored}", pr.number);
+        }
+
         self.editor.close_language_servers(None).await;
 
         errs

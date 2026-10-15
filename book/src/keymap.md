@@ -370,7 +370,7 @@ the [inline review](./review.md) and start one against `HEAD` when needed.
 | `g` | Open the file of the review diff hunk under the cursor       | `review_diff_open_hunk`  |
 | `o` | Focus the old review text nearest the cursor                 | `review_old_text`        |
 | `c` | Send a comment on the selections (opens `:review-comment `)  | `review_comment_prompt`  |
-| `a` | Same as `c` (opens `:review-comment `)                       | `review_ask_prompt`      |
+| `a` | Send a comment to the agent, also on a pull request (opens `:review-ask `) | `review_ask_prompt`      |
 | `C` | Pick a pending review comment                                | `review_comments_picker` |
 | `u` | Drop the latest pending review comment                       | `review_uncomment_latest`|
 | `s` | Stage or unstage the review hunks the selections touch       | `review_toggle_stage`    |

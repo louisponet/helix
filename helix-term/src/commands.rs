@@ -509,7 +509,7 @@ impl MappableCommand {
         review_baseline_older, "Move the review baseline one commit older",
         review_baseline_newer, "Move the review baseline one commit newer",
         review_comment_prompt, "Send a comment on the selections to the agent (a pending comment on a pull request)",
-        review_ask_prompt, "Send a comment on the selections to the agent (a pending comment on a pull request)",
+        review_ask_prompt, "Send a comment on the selections to the agent, also while reviewing a pull request",
         redo, "Redo change",
         earlier, "Move backward in history",
         later, "Move forward in history",
@@ -4897,8 +4897,11 @@ fn review_refresh_buffer(cx: &mut Context) {
 
 fn review_commit_staged(cx: &mut Context) {
     // While reviewing a pull request, the commit key submits the review instead.
-    if cx.editor.review_pr.is_some() {
-        typed::command_mode_with_line(cx, "review-submit ");
+    if let Some(pr) = cx.editor.review_pr.clone() {
+        match review_pr::SubmitModal::new(cx.editor, pr) {
+            Ok(modal) => cx.push_layer(Box::new(modal)),
+            Err(err) => cx.editor.set_error(format!("{err:#}")),
+        }
     } else {
         review::run_typed(cx, review::review_commit)
     }
@@ -4933,7 +4936,7 @@ fn review_comment_prompt(cx: &mut Context) {
 }
 
 fn review_ask_prompt(cx: &mut Context) {
-    typed::command_mode_with_line(cx, "review-comment ")
+    typed::command_mode_with_line(cx, "review-ask ")
 }
 
 fn redo(cx: &mut Context) {

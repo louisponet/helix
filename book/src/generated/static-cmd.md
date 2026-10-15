@@ -204,7 +204,7 @@
 | `review_baseline_older` | Move the review baseline one commit older | normal: `` <space>A<minus> ``, select: `` <space>A<minus> `` |
 | `review_baseline_newer` | Move the review baseline one commit newer | normal: `` <space>A+ ``, select: `` <space>A+ `` |
 | `review_comment_prompt` | Send a comment on the selections to the agent (a pending comment on a pull request) | normal: `` <space>Ac ``, select: `` <space>Ac `` |
-| `review_ask_prompt` | Send a comment on the selections to the agent (a pending comment on a pull request) | normal: `` <space>Aa ``, select: `` <space>Aa `` |
+| `review_ask_prompt` | Send a comment on the selections to the agent, also while reviewing a pull request | normal: `` <space>Aa ``, select: `` <space>Aa `` |
 | `redo` | Redo change | normal: `` U ``, select: `` U `` |
 | `earlier` | Move backward in history | normal: `` <A-u> ``, select: `` <A-u> `` |
 | `later` | Move forward in history | normal: `` <A-U> ``, select: `` <A-U> `` |

@@ -91,7 +91,8 @@
 | `:review-commits` | Choose a commit baseline from the latest 200 commits reachable from HEAD, then review against the current buffer. |
 | `:review-old` | Focus the old text nearest the cursor. It can be selected, yanked and commented on but not edited; Esc returns. |
 | `:review-refresh` | Reload an unmodified reviewed buffer from disk and refresh its index baseline or retain its selected commit. |
-| `:review-comment`, `:review-ask` | Send a comment on every selection (or the selected old text) to the agent at once, writing the buffer first if modified; a leading @label addresses that pi session. While reviewing a pull request, add a pending pull request comment on the primary selection instead. Use %% for a literal %. |
+| `:review-comment` | Send a comment on every selection (or the selected old text) to the agent at once, writing the buffer first if modified; a leading @label addresses that pi session. While reviewing a pull request, add a pending pull request comment on the primary selection instead. Use %% for a literal %. |
+| `:review-ask` | Send a comment on every selection (or the selected old text) to the agent at once, writing the buffer first if modified, also while reviewing a pull request; a leading @label addresses that pi session. Use %% for a literal %. |
 | `:review-comments` | Pick a pending review comment and jump to its line. |
 | `:review-uncomment` | Drop the most recently added pending review comment, or the given number of latest ones. |
 | `:review-export` | Write pending review comments and reviewed files as JSON to a new file. Reviewed buffers must be written first. |
@@ -100,8 +101,8 @@
 | `:review-unstage` | Unstage the staged hunks the selections touch (or the focused old text's, or the :review-diff hunk under the cursor): the index gets the baseline's lines back for them. |
 | `:review-toggle-stage` | Stage the hunks the selections touch, or unstage them all if all are already staged (Enter while reviewing). |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept for :review-export. |
-| `:review-pr` | Review a GitHub pull request (number or URL) with gh: check it out and review every buffer against its merge base with the base branch. `close` leaves the pull request review. |
-| `:review-submit` | Post the pending pull request comments as a review with gh: [approve|request-changes|comment] [summary]. Comments outside the pull request's diff become file-level comments quoting their lines; replies go to their threads. |
+| `:review-pr` | Review a GitHub pull request (number or URL) with gh: check it out and review every buffer against its merge base with the base branch. An optional directory receives the review batch :review-submit hands to gtc. `close` leaves the pull request review and checks out the previous branch. |
+| `:review-submit` | Hand the pending pull request comments and edits to reviewed buffers (as suggested changes) to gtc as a review batch in the directory given to :review-pr: [approve|request-changes|comment] [summary]. Without arguments, opens the submit dialog. |
 | `:review-commit-all` | Stage every file changed since the review baseline (modified, deleted and untracked, like git add -A limited to them), then hand back like :review-commit with an optional subject and a leading @label to address a pi session. |
 | `:review-next` | Go to the next changed block not yet committed (any block when everything is committed), continuing with the first block of the next file changed since the review baseline (in :review-files order, wrapping around). |
 | `:review-prev` | Go to the previous changed block not yet committed (any block when everything is committed), continuing with the last block of the previous file changed since the review baseline (wrapping around). |

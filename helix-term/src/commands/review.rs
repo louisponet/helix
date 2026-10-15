@@ -366,8 +366,11 @@ pub(super) fn typable_allowed(editor: &Editor, name: &str) -> bool {
 
 /// Formats `count` followed by `noun`, pluralized with a trailing "s" unless `count` is 1.
 pub(super) fn plural(count: usize, noun: &str) -> String {
-    let suffix = if count == 1 { "" } else { "s" };
-    format!("{count} {noun}{suffix}")
+    match (count, noun.strip_suffix('y')) {
+        (1, _) => format!("{count} {noun}"),
+        (_, Some(stem)) => format!("{count} {stem}ies"),
+        _ => format!("{count} {noun}s"),
+    }
 }
 
 fn record_reviewed_file(editor: &mut Editor) {
@@ -413,6 +416,7 @@ fn start_review(cx: &mut compositor::Context, revision: Option<&str>) -> anyhow:
     ensure!(!review.is_suspended(), Review::LIMIT_MESSAGE);
     let status = review.summary();
     doc.set_review(review);
+    cx.editor.share_review_comments();
     cx.editor.refresh_review_owners();
     let scrolloff = cx.editor.config().scrolloff;
     let (view, doc) = current!(cx.editor);
@@ -748,8 +752,9 @@ pub(super) fn review_revert(
     Ok(())
 }
 
-/// Outside a pull request review, hands every selection with `args` to the agent at once; while
-/// reviewing a pull request, adds a pending pull request comment or thread reply.
+/// Outside a pull request review, hands every selection with `args` to the agent at once (like
+/// `:review-ask`); while reviewing a pull request, adds a pending pull request comment or thread
+/// reply.
 pub(super) fn review_comment(
     cx: &mut compositor::Context,
     args: Args,
@@ -776,6 +781,7 @@ pub(super) fn review_comment(
     });
     let reply = comment.reply_to.is_some();
     cx.editor.review_pr_comments.push(comment);
+    cx.editor.share_review_comments();
     let pending = cx.editor.review_pr_comments.len();
     cx.editor.set_status(format!(
         "{}{}, :review-submit posts them",
@@ -783,6 +789,18 @@ pub(super) fn review_comment(
         plural(pending, "pending pull request comment")
     ));
     Ok(())
+}
+
+/// Hands every selection with `args` to the agent at once, also while reviewing a pull request.
+pub(super) fn review_ask(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    send_comments(cx, &args[0])
 }
 
 /// Comments with `text` on the focused old text, or on the primary selection (every selection
@@ -892,6 +910,7 @@ fn send_comments(cx: &mut compositor::Context, text: &str) -> anyhow::Result<()>
     for comment in comments {
         cx.editor.review_batch.add_comment(comment);
     }
+    cx.editor.share_review_comments();
     cx.editor.review_batch.set_request(ReviewRequest::Ask);
     if let Some(target) = target {
         cx.editor.review_batch.set_target(target);
@@ -930,15 +949,23 @@ struct CommentEntry {
     preview: (usize, usize),
 }
 
-/// The pending comments (for the pull request in PR mode) and the pull request's threads.
+/// The pending comments, for pi and for the pull request, and the pull request's threads.
 fn comment_entries(editor: &Editor) -> Vec<CommentEntry> {
-    let pending = match editor.review_pr {
-        Some(_) => &editor.review_pr_comments[..],
-        None => editor.review_batch.comments(),
-    };
+    let mut pending: Vec<_> = (editor.review_batch.comments().iter())
+        .map(|comment| ("pi", comment))
+        .chain(editor.review_pr_comments.iter().map(|comment| {
+            let kind = if comment.reply_to.is_some() {
+                "reply"
+            } else {
+                "pr"
+            };
+            (kind, comment)
+        }))
+        .collect();
+    pending.sort_by_key(|(_, comment)| comment.created);
     let mut entries: Vec<_> = pending
-        .iter()
-        .map(|comment| {
+        .into_iter()
+        .map(|(kind, comment)| {
             let author = comment
                 .reply_to
                 .and_then(|root| {
@@ -966,7 +993,7 @@ fn comment_entries(editor: &Editor) -> Vec<CommentEntry> {
                 ),
             };
             CommentEntry {
-                kind: "pending",
+                kind,
                 author,
                 path: comment.path.clone(),
                 lines,
@@ -1086,18 +1113,30 @@ pub(super) fn review_uncomment(
             .context("count must be a positive number")?,
         None => 1,
     };
-    let (removed, pending) = if cx.editor.review_pr.is_some() {
-        let comments = &mut cx.editor.review_pr_comments;
-        ensure!(!comments.is_empty(), "no pending review comments");
-        let removed = count.min(comments.len());
-        comments.truncate(comments.len() - removed);
-        (removed, comments.len())
-    } else {
-        let batch = &mut cx.editor.review_batch;
-        ensure!(!batch.comments().is_empty(), "no pending review comments");
-        let removed = batch.remove_latest_comments(count);
-        (removed, batch.comments().len())
-    };
+    let editor = &mut *cx.editor;
+    let pending =
+        |editor: &Editor| editor.review_batch.comments().len() + editor.review_pr_comments.len();
+    ensure!(pending(editor) > 0, "no pending review comments");
+    let mut removed = 0;
+    while removed < count && pending(editor) > 0 {
+        let latest_pi = editor
+            .review_batch
+            .comments()
+            .last()
+            .map(|comment| comment.created);
+        let latest_pr = editor
+            .review_pr_comments
+            .last()
+            .map(|comment| comment.created);
+        if latest_pr > latest_pi {
+            editor.review_pr_comments.pop();
+        } else {
+            editor.review_batch.remove_latest_comments(1);
+        }
+        removed += 1;
+    }
+    editor.share_review_comments();
+    let pending = pending(editor);
     cx.editor.set_status(format!(
         "Dropped {}, {pending} pending",
         plural(removed, "review comment")
@@ -1175,6 +1214,7 @@ pub(super) fn review_export(
     let comments = cx.editor.review_batch.comments().len();
     let files = cx.editor.review_batch.files().count();
     cx.editor.review_batch.export(&path, |_| true)?;
+    cx.editor.share_review_comments();
     cx.editor.set_status(format!(
         "Exported {} on {} to {}",
         plural(comments, "comment"),
@@ -1460,6 +1500,7 @@ pub(super) fn pin_review_baseline(editor: &mut Editor, revision: &str) -> anyhow
 
     // Keep an open :review-diff buffer in step with the files it shows.
     refresh_review_diff(editor);
+    editor.share_review_comments();
     editor.refresh_review_owners();
 
     let scrolloff = editor.config().scrolloff;
@@ -1756,6 +1797,7 @@ fn export_handoff(editor: &mut Editor, dir: &Path) -> anyhow::Result<PathBuf> {
     editor
         .review_batch
         .export(&temp, |file| !modified.contains(file))?;
+    editor.share_review_comments();
     std::fs::rename(&temp, &path)
         .with_context(|| format!("failed to rename {} to {}", temp.display(), path.display()))?;
     editor.review_target = target;

@@ -641,10 +641,8 @@ where
     if staged > 0 {
         text.push_str(&format!(" {staged} staged"));
     }
-    let comments = match context.editor.review_pr {
-        Some(_) => context.editor.review_pr_comments.len(),
-        None => context.editor.review_batch.comments().len(),
-    };
+    let comments =
+        context.editor.review_pr_comments.len() + context.editor.review_batch.comments().len();
     if comments > 0 {
         let suffix = if comments == 1 { "" } else { "s" };
         text.push_str(&format!(" {comments} comment{suffix}"));

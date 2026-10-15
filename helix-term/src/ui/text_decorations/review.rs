@@ -28,9 +28,11 @@ pub struct ReviewDecoration<'a> {
     cursor: Style,
     /// The style of pull request comment threads.
     thread: Style,
+    /// The style of pending comments.
+    comment: Style,
     /// The style of the owner labels at the end of each block's first line.
     owner: Style,
-    /// Document lines with old lines or threads below them, ascending.
+    /// Document lines with old lines, threads or pending comments below them, ascending.
     anchors: Vec<usize>,
     next_anchor: usize,
     /// Document line whose end was just rendered and that has old lines below it.
@@ -49,6 +51,7 @@ impl<'a> ReviewDecoration<'a> {
         let mut anchors: Vec<usize> = (review.blocks().iter())
             .map(|block| block.anchor_line)
             .chain(review.thread_lines(text.len_lines()))
+            .chain(review.comment_lines(text.len_lines()))
             .collect();
         anchors.sort_unstable();
         anchors.dedup();
@@ -66,6 +69,7 @@ impl<'a> ReviewDecoration<'a> {
             selection: theme.get("ui.selection.primary"),
             cursor: theme.get("ui.cursor.primary"),
             thread: theme.get("ui.review.thread"),
+            comment: theme.get("ui.review.comment"),
             owner: theme.get("ui.review.owner"),
             anchors,
             next_anchor: 0,
@@ -169,6 +173,31 @@ impl<'a> ReviewDecoration<'a> {
 }
 
 impl ReviewDecoration<'_> {
+    /// Draws `rows` of text in `style` starting at `row` and returns how many there are.
+    fn draw_rows(
+        &self,
+        renderer: &mut TextRenderer,
+        row: usize,
+        rows: Vec<String>,
+        style: Style,
+    ) -> usize {
+        for (idx, text) in rows.iter().enumerate() {
+            if is_visible(renderer, row + idx) {
+                self.fill_rows(renderer, row + idx, 1, style);
+                renderer.set_string_truncated(
+                    renderer.viewport.x,
+                    (row + idx) as u16,
+                    text,
+                    renderer.viewport.width as usize,
+                    |_| style,
+                    true,
+                    false,
+                );
+            }
+        }
+        rows.len()
+    }
+
     /// Right-aligns the owners of the block starting on `pos`'s line, when they fit after its
     /// `line_end` columns of text.
     fn draw_owners(&self, renderer: &mut TextRenderer, pos: LinePos, line_end: usize) {
@@ -221,7 +250,10 @@ impl Decoration for ReviewDecoration<'_> {
             return Position::new(0, 0);
         };
         let first_row = pos.visual_line as usize + virt_off.row;
+        let (len_lines, width) = (self.text.len_lines(), self.text_fmt.viewport_width as usize);
         let mut row = first_row;
+        let comments = self.review.comment_rows_below(line, len_lines, width);
+        row += self.draw_rows(renderer, row, comments, self.comment);
         for block in self.review.blocks_at(line) {
             let old = match self.review.block_stage(block) {
                 HunkStage::Unstaged => self.old,
@@ -246,26 +278,11 @@ impl Decoration for ReviewDecoration<'_> {
             for old_line in block.old.clone() {
                 row += self.draw_old_line(renderer, row, old_line, old);
             }
+            let comments = self.review.block_comment_rows(block, width);
+            row += self.draw_rows(renderer, row, comments, self.comment);
         }
-        let width = self.text_fmt.viewport_width as usize;
-        for text in self
-            .review
-            .thread_rows_below(line, self.text.len_lines(), width)
-        {
-            if is_visible(renderer, row) {
-                self.fill_rows(renderer, row, 1, self.thread);
-                renderer.set_string_truncated(
-                    renderer.viewport.x,
-                    row as u16,
-                    &text,
-                    renderer.viewport.width as usize,
-                    |_| self.thread,
-                    true,
-                    false,
-                );
-            }
-            row += 1;
-        }
+        let threads = self.review.thread_rows_below(line, len_lines, width);
+        row += self.draw_rows(renderer, row, threads, self.thread);
         Position::new(row - first_row, 0)
     }
 }

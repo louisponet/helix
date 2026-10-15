@@ -4,11 +4,13 @@ use std::process::Stdio;
 
 use serde::Deserialize;
 
-use helix_view::review::{
-    PullRequest, ReviewComment, ReviewSide, ReviewThread, ThreadComment, ThreadSide,
-};
+use helix_view::graphics::{CursorKind, Margin, Rect};
+use helix_view::review::{PullRequest, ReviewSide, ReviewThread, ThreadComment, ThreadSide};
+use tui::buffer::Buffer as Surface;
+use tui::widgets::{Block, Widget};
 
 use crate::job::Job;
+use crate::{alt, ctrl, key, shift};
 
 use super::review::{changed_files_since, ensure_reviews_saved, pin_review_baseline, plural};
 use super::*;
@@ -18,37 +20,20 @@ pub(super) fn gh_program() -> String {
     std::env::var("HELIX_GH").unwrap_or_else(|_| "gh".to_owned())
 }
 
-/// Runs `program` with `args` in `cwd`, feeding it `input`, and returns its stdout, or an error
-/// carrying its stderr.
-pub(super) async fn run(
-    program: &str,
-    args: &[&str],
-    cwd: &Path,
-    input: Option<Vec<u8>>,
-) -> anyhow::Result<String> {
-    use tokio::io::AsyncWriteExt;
-
-    let mut child = tokio::process::Command::new(program)
+/// Runs `program` with `args` in `cwd` and returns its stdout, or an error carrying its stderr.
+pub(super) async fn run(program: &str, args: &[&str], cwd: &Path) -> anyhow::Result<String> {
+    let output = tokio::process::Command::new(program)
         .args(args)
         .current_dir(cwd)
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stdin(Stdio::null())
+        .output()
+        .await
         .map_err(|err| match err.kind() {
             std::io::ErrorKind::NotFound => {
                 anyhow!("{program} not found: install the GitHub CLI or set HELIX_GH")
             }
             _ => anyhow!("failed to run {program}: {err}"),
         })?;
-    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
-        stdin.write_all(&input).await?;
-    }
-    let output = child.wait_with_output().await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let what: Vec<_> = args.iter().take(2).copied().collect();
@@ -61,7 +46,11 @@ const PR_FIELDS: &str =
     "number,title,url,headRefOid,baseRefName,baseRefOid,isCrossRepository,headRepositoryOwner";
 
 /// Looks up pull request `arg` (a number or URL), checks it out and finds its merge base.
-async fn fetch_and_checkout(arg: &str, cwd: &Path) -> anyhow::Result<PullRequest> {
+async fn fetch_and_checkout(
+    arg: &str,
+    batch_dir: Option<PathBuf>,
+    cwd: &Path,
+) -> anyhow::Result<PullRequest> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct View {
@@ -79,23 +68,19 @@ async fn fetch_and_checkout(arg: &str, cwd: &Path) -> anyhow::Result<PullRequest
     }
 
     let gh = gh_program();
-    let view: View = serde_json::from_str(
-        &run(&gh, &["pr", "view", arg, "--json", PR_FIELDS], cwd, None).await?,
-    )
-    .context("unexpected gh pr view output")?;
-    let repo: Repo = serde_json::from_str(
-        &run(&gh, &["repo", "view", "--json", "nameWithOwner"], cwd, None).await?,
-    )
-    .context("unexpected gh repo view output")?;
-    run(
-        &gh,
-        &["pr", "checkout", &view.number.to_string()],
-        cwd,
-        None,
-    )
-    .await?;
+    let view: View =
+        serde_json::from_str(&run(&gh, &["pr", "view", arg, "--json", PR_FIELDS], cwd).await?)
+            .context("unexpected gh pr view output")?;
+    let repo: Repo =
+        serde_json::from_str(&run(&gh, &["repo", "view", "--json", "nameWithOwner"], cwd).await?)
+            .context("unexpected gh repo view output")?;
+    let previous = match run("git", &["symbolic-ref", "--short", "-q", "HEAD"], cwd).await {
+        Ok(branch) => branch,
+        Err(_) => run("git", &["rev-parse", "HEAD"], cwd).await?,
+    };
+    run(&gh, &["pr", "checkout", &view.number.to_string()], cwd).await?;
     let merge_base = ["merge-base", view.base_ref_oid.as_str(), "HEAD"];
-    let merge_base = match run("git", &merge_base, cwd, None).await {
+    let merge_base = match run("git", &merge_base, cwd).await {
         Ok(oid) => oid,
         Err(_) => {
             // The base commit may not be fetched yet.
@@ -103,10 +88,9 @@ async fn fetch_and_checkout(arg: &str, cwd: &Path) -> anyhow::Result<PullRequest
                 "git",
                 &["fetch", "--quiet", "origin", &view.base_ref_oid],
                 cwd,
-                None,
             )
             .await?;
-            run("git", &merge_base, cwd, None).await?
+            run("git", &merge_base, cwd).await?
         }
     };
     Ok(PullRequest {
@@ -117,6 +101,8 @@ async fn fetch_and_checkout(arg: &str, cwd: &Path) -> anyhow::Result<PullRequest
         head_oid: view.head_ref_oid,
         base_ref: view.base_ref_name,
         merge_base: merge_base.trim().to_owned(),
+        previous: previous.trim().to_owned(),
+        batch_dir,
     })
 }
 
@@ -134,11 +120,9 @@ pub(super) fn review_pr(
             .review_pr
             .take()
             .context("not reviewing a pull request")?;
-        cx.editor.review_user_pin = None;
-        cx.editor.review_pr_threads.clear();
-        cx.editor.share_review_threads();
+        let restored = end_review(cx.editor, &pr);
         cx.editor
-            .set_status(format!("Stopped reviewing PR #{}", pr.number));
+            .set_status(format!("Stopped reviewing PR #{}; {restored}", pr.number));
         return Ok(());
     }
     let workspace = helix_loader::find_workspace().0;
@@ -158,10 +142,11 @@ pub(super) fn review_pr(
     }
     ensure_reviews_saved(cx.editor, ":review-pr")?;
     let arg = args[0].to_owned();
+    let batch_dir = args.get(1).map(helix_stdx::path::canonicalize);
     cx.editor
         .set_status(format!("Checking out pull request {arg}…"));
     cx.jobs.callback(async move {
-        let result = fetch_and_checkout(&arg, &workspace).await;
+        let result = fetch_and_checkout(&arg, batch_dir, &workspace).await;
         let callback = move |editor: &mut Editor| match result.and_then(|pr| start(editor, pr)) {
             Ok(pr) => Some(load_threads(pr)),
             Err(err) => {
@@ -236,9 +221,6 @@ pub(super) fn base_merge_base(editor: &Editor) -> Option<String> {
     })
 }
 
-/// Lines of context around a change that GitHub still accepts review comments on.
-const DIFF_CONTEXT: usize = 3;
-
 pub(super) fn review_submit(
     cx: &mut compositor::Context,
     args: Args,
@@ -253,161 +235,502 @@ pub(super) fn review_submit(
         .clone()
         .context("not reviewing a pull request, use :review-pr first")?;
     let text = args.first().unwrap_or_default().trim();
+    if text.is_empty() && !cx.editor.socket_command {
+        let modal = SubmitModal::new(cx.editor, pr)?;
+        cx.jobs.callback(async move {
+            let callback = move |_: &mut Editor, compositor: &mut Compositor| {
+                compositor.push(Box::new(modal));
+            };
+            Ok(Callback::EditorCompositor(Box::new(callback)))
+        });
+        return Ok(());
+    }
     let (event, summary) = match text.split_once(char::is_whitespace).unwrap_or((text, "")) {
         ("approve", rest) => ("APPROVE", rest.trim()),
         ("request-changes", rest) => ("REQUEST_CHANGES", rest.trim()),
         ("comment", rest) => ("COMMENT", rest.trim()),
         _ => ("COMMENT", text),
     };
-    let pending = cx.editor.review_pr_comments.clone();
-    ensure!(
-        !pending.is_empty() || !summary.is_empty() || event != "COMMENT",
-        "nothing to submit: no pending pull request comments and no summary"
-    );
-    let workspace = helix_loader::find_workspace().0;
-    let mut comments = Vec::new();
-    let mut replies = Vec::new();
-    let mut file_level = 0;
-    for comment in &pending {
-        if let Some(root) = comment.reply_to {
-            replies.push(serde_json::json!({ "body": comment.comment, "in_reply_to": root }));
-            continue;
-        }
-        let path = comment
-            .path
-            .strip_prefix(&workspace)
-            .unwrap_or(&comment.path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let side = match comment.side {
-            ReviewSide::Current => "RIGHT",
-            ReviewSide::Old => "LEFT",
-        };
-        if in_diff(cx.editor, &pr, comment)? {
-            let mut entry = serde_json::json!({
-                "path": path,
-                "line": comment.end_line,
-                "side": side,
-                "body": comment.comment,
-            });
-            if comment.start_line != comment.end_line {
-                entry["start_line"] = comment.start_line.into();
-                entry["start_side"] = side.into();
+    submit(cx.editor, &pr, event, summary)
+}
+
+/// What `:review-submit` hands to gtc: the pending comments and the suggested changes made of the
+/// reviewed buffers' differences from the pull request's head, as review batch entries.
+struct Submission {
+    comments: Vec<serde_json::Value>,
+    /// How many of `comments` reply to a thread.
+    replies: usize,
+    suggestions: Vec<serde_json::Value>,
+    /// The files the suggestions were made of.
+    files: Vec<PathBuf>,
+}
+
+impl Submission {
+    fn new(editor: &Editor) -> anyhow::Result<Submission> {
+        ensure_reviews_saved(editor, ":review-submit")?;
+        let workspace = helix_loader::find_workspace().0;
+        let pending = &editor.review_pr_comments;
+        let mut merged = vec![false; pending.len()];
+        let mut suggestions = Vec::new();
+        let mut files = Vec::new();
+        for doc in editor.documents().filter(|doc| doc.review.is_some()) {
+            let Some(path) = doc.path().filter(|path| path.starts_with(&workspace)) else {
+                continue;
+            };
+            let relative = relative_path(path, &workspace);
+            let diff = git(&["diff", "-U0", "HEAD", "--", &relative], &workspace)?;
+            let diff = String::from_utf8_lossy(&diff);
+            if diff.is_empty() {
+                continue;
             }
-            comments.push(entry);
-        } else {
-            file_level += 1;
-            comments.push(serde_json::json!({
-                "path": path,
-                "subject_type": "file",
-                "body": file_level_body(comment),
-            }));
+            let head = git(&["show", &format!("HEAD:{relative}")], &workspace)?;
+            let head_lines: Vec<_> = String::from_utf8_lossy(&head)
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            let old_line = |line: usize| head_lines.get(line - 1).cloned().unwrap_or_default();
+            for hunk in DiffHunk::parse(&diff) {
+                let (start, end, new) = match hunk.old_count {
+                    // A pure insertion replaces the line above it, or below at the top.
+                    0 if hunk.old_start == 0 => (1, 1, [hunk.added, vec![old_line(1)]].concat()),
+                    0 => (
+                        hunk.old_start,
+                        hunk.old_start,
+                        [vec![old_line(hunk.old_start)], hunk.added].concat(),
+                    ),
+                    count => (hunk.old_start, hunk.old_start + count - 1, hunk.added),
+                };
+                let comment = pending.iter().enumerate().position(|(idx, comment)| {
+                    !merged[idx]
+                        && comment.reply_to.is_none()
+                        && comment.side == ReviewSide::Current
+                        && comment.path == *path
+                        && (comment.start_line, comment.end_line) == (start, end)
+                });
+                if let Some(idx) = comment {
+                    merged[idx] = true;
+                }
+                suggestions.push(serde_json::json!({
+                    "path": relative,
+                    "start_line": start,
+                    "line": end,
+                    "replacement": new.join("\n"),
+                    "comment": comment.map(|idx| &pending[idx].comment),
+                }));
+            }
+            files.push(path.to_path_buf());
         }
-    }
-    let lines = comments.len() - file_level;
-    let review = (!comments.is_empty() || !summary.is_empty() || event != "COMMENT").then(|| {
-        serde_json::json!({
-            "commit_id": pr.head_oid,
-            "event": event,
-            "body": summary,
-            "comments": comments,
+
+        let unmerged: Vec<_> = pending
+            .iter()
+            .zip(merged)
+            .filter(|(_, merged)| !merged)
+            .map(|(comment, _)| comment)
+            .collect();
+        let comments = unmerged
+            .iter()
+            .map(|comment| {
+                serde_json::json!({
+                    "path": relative_path(&comment.path, &workspace),
+                    "side": match comment.side {
+                        ReviewSide::Current => "RIGHT",
+                        ReviewSide::Old => "LEFT",
+                    },
+                    "start_line": comment.start_line,
+                    "line": comment.end_line,
+                    "body": comment.comment,
+                    "reply_to": comment.reply_to,
+                })
+            })
+            .collect();
+        Ok(Submission {
+            comments,
+            replies: unmerged.iter().filter(|c| c.reply_to.is_some()).count(),
+            suggestions,
+            files,
         })
-    });
-    cx.editor
-        .set_status(format!("Submitting the review of #{}…", pr.number));
-    cx.jobs.callback(async move {
-        let result = post_review(&pr, review, replies.clone(), &workspace).await;
-        let callback = move |editor: &mut Editor| match result {
-            Ok(()) => {
-                editor
-                    .review_pr_comments
-                    .retain(|comment| !pending.contains(comment));
-                editor.set_status(format!(
-                    "Submitted {event} on #{}: {}, {}, {} file-level",
-                    pr.number,
-                    plural(lines, "comment"),
-                    plural(replies.len(), "reply"),
-                    file_level
-                ));
-                Some(load_threads(pr))
-            }
-            Err(err) => {
-                editor.set_error(format!("submitting the review failed: {err:#}"));
-                None
-            }
-        };
-        Ok(Callback::Followup(Box::new(callback)))
-    });
-    Ok(())
-}
-
-/// Posts `review` (if any) to the pull request, then each reply to its thread.
-async fn post_review(
-    pr: &PullRequest,
-    review: Option<serde_json::Value>,
-    replies: Vec<serde_json::Value>,
-    cwd: &Path,
-) -> anyhow::Result<()> {
-    let gh = gh_program();
-    if let Some(review) = review {
-        let endpoint = format!("repos/{}/pulls/{}/reviews", pr.repo, pr.number);
-        let args = ["api", "-X", "POST", &endpoint, "--input", "-"];
-        run(&gh, &args, cwd, Some(serde_json::to_vec(&review)?)).await?;
     }
-    let endpoint = format!("repos/{}/pulls/{}/comments", pr.repo, pr.number);
-    for reply in replies {
-        let args = ["api", "-X", "POST", &endpoint, "--input", "-"];
-        run(&gh, &args, cwd, Some(serde_json::to_vec(&reply)?)).await?;
+}
+
+/// `path` relative to `workspace` with `/` separators, as GitHub names files.
+fn relative_path(path: &Path, workspace: &Path) -> String {
+    path.strip_prefix(workspace)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// A hunk of `git diff -U0`: its 1-based old line range and the lines replacing it.
+struct DiffHunk {
+    old_start: usize,
+    old_count: usize,
+    added: Vec<String>,
+}
+
+impl DiffHunk {
+    fn parse(diff: &str) -> Vec<DiffHunk> {
+        let mut hunks: Vec<DiffHunk> = Vec::new();
+        for line in diff.lines() {
+            if let Some(header) = line.strip_prefix("@@ -") {
+                let old = header.split(' ').next().unwrap_or_default();
+                let (start, count) = old.split_once(',').unwrap_or((old, "1"));
+                hunks.push(DiffHunk {
+                    old_start: start.parse().unwrap_or(0),
+                    old_count: count.parse().unwrap_or(1),
+                    added: Vec::new(),
+                });
+            } else if let (Some(hunk), Some(added)) = (hunks.last_mut(), line.strip_prefix('+')) {
+                hunk.added.push(added.to_owned());
+            }
+        }
+        hunks
     }
-    Ok(())
 }
 
-/// Whether GitHub accepts a line comment on `comment`'s lines: they must be changed lines of the
-/// pull request (from its merge base), or within [`DIFF_CONTEXT`] lines of one, on their side.
-fn in_diff(editor: &Editor, pr: &PullRequest, comment: &ReviewComment) -> anyhow::Result<bool> {
-    let trust_full = editor
-        .workspace_trust
-        .query(
-            &helix_loader::find_workspace().0,
-            helix_loader::workspace_trust::TrustQuery::Git,
-        )
-        .is_trusted();
-    let base = editor
-        .diff_providers
-        .get_commit_base(&comment.path, &pr.merge_base, trust_full)
-        .map(|base| base.data)
-        .unwrap_or_default();
-    let current = match editor.document_by_path(&comment.path) {
-        Some(doc) => doc.text().to_string().into_bytes(),
-        None => std::fs::read(&comment.path).unwrap_or_default(),
-    };
-    let lines = comment.start_line - 1..comment.end_line;
-    Ok(helix_vcs::line_hunks(&base, &current).iter().any(|hunk| {
-        let changed = match comment.side {
-            ReviewSide::Current => hunk.after.start as usize..hunk.after.end as usize,
-            ReviewSide::Old => hunk.before.start as usize..hunk.before.end as usize,
-        };
-        let near = changed.start.saturating_sub(DIFF_CONTEXT)..changed.end + DIFF_CONTEXT;
-        near.start <= lines.start && lines.end <= near.end
-    }))
+/// Runs git with `args` in `cwd` on this thread and returns its stdout.
+fn git(args: &[&str], cwd: &Path) -> anyhow::Result<Vec<u8>> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.first().unwrap_or(&""),
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(output.stdout)
 }
 
-/// The body of a file-level comment for `comment`: its selected lines quoted with their line
-/// numbers, then the comment.
-fn file_level_body(comment: &ReviewComment) -> String {
-    let side = match comment.side {
-        ReviewSide::Current => "",
-        ReviewSide::Old => "old ",
+/// Checks out what was checked out before `pr` was, unless the worktree has uncommitted changes,
+/// and returns the status saying which.
+pub(crate) fn restore_branch(pr: &PullRequest, cwd: &Path) -> String {
+    let restore = || -> anyhow::Result<String> {
+        let status = git(&["status", "--porcelain"], cwd)?;
+        if String::from_utf8_lossy(&status)
+            .lines()
+            .any(|line| !line.starts_with("??"))
+        {
+            let branch = git(&["symbolic-ref", "--short", "-q", "HEAD"], cwd)
+                .map(|branch| String::from_utf8_lossy(&branch).trim().to_owned())
+                .unwrap_or_else(|_| pr.head_oid.clone());
+            return Ok(format!(
+                "kept {branch} checked out: the worktree has uncommitted changes"
+            ));
+        }
+        git(&["checkout", "-q", &pr.previous], cwd)?;
+        Ok(format!("back on {}", pr.previous))
     };
-    let mut body: String = comment
-        .selected_text
-        .lines()
-        .enumerate()
-        .map(|(idx, line)| format!("> {side}{}: {line}\n", comment.start_line + idx))
+    restore().unwrap_or_else(|err| format!("could not check out {}: {err:#}", pr.previous))
+}
+
+/// Leaves the review of `pr`, taken off the editor, checks out what was checked out before it and
+/// reloads the unmodified buffers, returning the status of the checkout.
+fn end_review(editor: &mut Editor, pr: &PullRequest) -> String {
+    editor.review_user_pin = None;
+    editor.review_pr_threads.clear();
+    editor.share_review_threads();
+    let restored = restore_branch(pr, &helix_loader::find_workspace().0);
+    let doc_ids: Vec<_> = editor
+        .documents()
+        .filter(|doc| !doc.is_modified() && doc.path().is_some_and(|path| path.exists()))
+        .map(Document::id)
         .collect();
-    body.push('\n');
-    body.push_str(&comment.comment);
-    body
+    for doc_id in doc_ids {
+        if let Err(err) = super::typed::reload_document(editor, doc_id) {
+            log::info!("not reloading a buffer after the pull request review: {err:#}");
+        } else if let Err(err) = editor.start_baseline_review(doc_id) {
+            log::info!("not reviewing a reloaded buffer: {err:#}");
+        }
+    }
+    restored
+}
+
+/// Hands the review of `pr` with `event` and `summary` to gtc as a review batch in the
+/// pull request's batch directory; then clears the pending comments, reverts the files the
+/// suggestions were made of and ends the pull request review.
+fn submit(editor: &mut Editor, pr: &PullRequest, event: &str, summary: &str) -> anyhow::Result<()> {
+    let dir = pr
+        .batch_dir
+        .as_deref()
+        .context("no reviewer attached: open the pull request from gtc prs")?;
+    let Submission {
+        comments,
+        replies,
+        suggestions,
+        files,
+    } = Submission::new(editor)?;
+    ensure!(
+        !comments.is_empty()
+            || !suggestions.is_empty()
+            || !summary.is_empty()
+            || event != "COMMENT",
+        "nothing to submit: no pending pull request comments, no edits and no summary"
+    );
+    let (comment_count, suggestion_count) = (comments.len() - replies, suggestions.len());
+    let batch = serde_json::json!({
+        "version": 1,
+        "kind": "pull-request-review",
+        "repo": pr.repo,
+        "number": pr.number,
+        "head": pr.head_oid,
+        "event": event,
+        "body": summary,
+        "comments": comments,
+        "suggestions": suggestions,
+    });
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis();
+    let path = dir.join(format!("review-{}-{millis}.json", pr.number));
+    let tmp = dir.join(format!("review-{}-{millis}.json.tmp", pr.number));
+    // The rename makes the batch appear whole to gtc.
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&batch)?)
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
+        .with_context(|| format!("writing the review batch to {} failed", dir.display()))?;
+
+    editor.review_pr_comments.clear();
+    if !files.is_empty() {
+        let workspace = helix_loader::find_workspace().0;
+        let mut args = vec!["checkout", "--"];
+        args.extend(files.iter().filter_map(|file| file.to_str()));
+        git(&args, &workspace).with_context(|| {
+            format!(
+                "handed the review of #{} to gtc, but reverting the suggested edits failed",
+                pr.number
+            )
+        })?;
+    }
+    editor.review_pr = None;
+    let restored = end_review(editor, pr);
+    editor.set_status(format!(
+        "Handed the review of #{} to gtc: {}, {}, {}; {restored}",
+        pr.number,
+        plural(comment_count, "comment"),
+        plural(replies, "reply"),
+        plural(suggestion_count, "suggestion")
+    ));
+    Ok(())
+}
+
+const VERBS: [(&str, &str); 3] = [
+    ("comment", "COMMENT"),
+    ("approve", "APPROVE"),
+    ("request changes", "REQUEST_CHANGES"),
+];
+
+/// The modal `:review-submit` opens: the review's verb, its summary and what it will post.
+pub(super) struct SubmitModal {
+    pr: PullRequest,
+    footer: String,
+    verb: usize,
+    summary: String,
+    /// The byte offset of the cursor in `summary`.
+    cursor: usize,
+    /// Where the summary was last rendered.
+    summary_area: Rect,
+}
+
+impl SubmitModal {
+    pub(super) fn new(editor: &Editor, pr: PullRequest) -> anyhow::Result<SubmitModal> {
+        let submission = Submission::new(editor)?;
+        let footer = format!(
+            "{}, {}, {} · Enter submits · Esc cancels",
+            plural(submission.comments.len() - submission.replies, "comment"),
+            plural(submission.replies, "reply"),
+            plural(submission.suggestions.len(), "suggestion")
+        );
+        Ok(SubmitModal {
+            pr,
+            footer,
+            verb: 0,
+            summary: String::new(),
+            cursor: 0,
+            summary_area: Rect::default(),
+        })
+    }
+
+    fn line_start(&self) -> usize {
+        self.summary[..self.cursor]
+            .rfind('\n')
+            .map_or(0, |idx| idx + 1)
+    }
+
+    fn line_end(&self) -> usize {
+        self.summary[self.cursor..]
+            .find('\n')
+            .map_or(self.summary.len(), |idx| self.cursor + idx)
+    }
+
+    fn insert(&mut self, text: &str) {
+        self.summary.insert_str(self.cursor, text);
+        self.cursor += text.len();
+    }
+
+    fn prev_char(&self) -> Option<usize> {
+        let ch = self.summary[..self.cursor].chars().next_back()?;
+        Some(self.cursor - ch.len_utf8())
+    }
+
+    fn next_char(&self) -> Option<usize> {
+        let ch = self.summary[self.cursor..].chars().next()?;
+        Some(self.cursor + ch.len_utf8())
+    }
+
+    /// Moves the cursor to the line before (or after) its own, keeping its column if it can.
+    fn move_line(&mut self, up: bool) {
+        let start = self.line_start();
+        let column = self.summary[start..self.cursor].chars().count();
+        let line = match up {
+            true if start > 0 => self.summary[..start - 1]
+                .rfind('\n')
+                .map_or(0, |idx| idx + 1),
+            false if self.line_end() < self.summary.len() => self.line_end() + 1,
+            _ => return,
+        };
+        let text = &self.summary[line..];
+        let text = &text[..text.find('\n').unwrap_or(text.len())];
+        self.cursor = line
+            + text
+                .char_indices()
+                .nth(column)
+                .map_or(text.len(), |(idx, _)| idx);
+    }
+}
+
+impl Component for SubmitModal {
+    fn handle_event(
+        &mut self,
+        event: &compositor::Event,
+        cx: &mut compositor::Context,
+    ) -> compositor::EventResult {
+        use compositor::EventResult;
+        use helix_view::keyboard::KeyModifiers;
+
+        let key = match event {
+            compositor::Event::Key(key) => *key,
+            compositor::Event::Paste(text) => {
+                self.insert(text);
+                return EventResult::Consumed(None);
+            }
+            compositor::Event::Resize(..) | compositor::Event::Mouse(_) => {
+                return EventResult::Consumed(None)
+            }
+            _ => return EventResult::Ignored(None),
+        };
+        let close = || {
+            EventResult::Consumed(Some(Box::new(|compositor: &mut Compositor, _: &mut _| {
+                compositor.pop();
+            })))
+        };
+        match key {
+            key!(Esc) | ctrl!('c') => return close(),
+            key!(Enter) => {
+                let summary = self.summary.trim().to_owned();
+                let event = VERBS[self.verb].1;
+                if let Err(err) = submit(cx.editor, &self.pr, event, &summary) {
+                    cx.editor.set_error(format!("{err:#}"));
+                }
+                return close();
+            }
+            alt!(Enter) | shift!(Enter) => self.insert("\n"),
+            key!(Tab) => self.verb = (self.verb + 1) % VERBS.len(),
+            shift!(Tab) => self.verb = (self.verb + VERBS.len() - 1) % VERBS.len(),
+            key!(Right) if self.summary.is_empty() => self.verb = (self.verb + 1).min(2),
+            key!(Left) if self.summary.is_empty() => self.verb = self.verb.saturating_sub(1),
+            key!(Right) => self.cursor = self.next_char().unwrap_or(self.cursor),
+            key!(Left) => self.cursor = self.prev_char().unwrap_or(self.cursor),
+            key!(Up) => self.move_line(true),
+            key!(Down) => self.move_line(false),
+            key!(Home) => self.cursor = self.line_start(),
+            key!(End) => self.cursor = self.line_end(),
+            key!(Backspace) => {
+                if let Some(prev) = self.prev_char() {
+                    self.summary.replace_range(prev..self.cursor, "");
+                    self.cursor = prev;
+                }
+            }
+            key!(Delete) => {
+                if let Some(next) = self.next_char() {
+                    self.summary.replace_range(self.cursor..next, "");
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Char(ch),
+                modifiers,
+            } if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                self.insert(ch.encode_utf8(&mut [0; 4]))
+            }
+            _ => (),
+        }
+        EventResult::Consumed(None)
+    }
+
+    fn render(&mut self, viewport: Rect, surface: &mut Surface, cx: &mut compositor::Context) {
+        let popup = cx.editor.theme.get("ui.popup");
+        let text = cx.editor.theme.get("ui.text");
+        let selected = cx.editor.theme.get("ui.menu.selected");
+        let rows = self.summary.split('\n').count().max(3) as u16;
+        let width = viewport.width.saturating_sub(4).min(80);
+        let height = (rows + 4).min(viewport.height);
+        let area = viewport.intersection(Rect::new(
+            viewport.x + (viewport.width - width) / 2,
+            viewport.y + (viewport.height - height) / 2,
+            width,
+            height,
+        ));
+        surface.clear_with(area, popup);
+        let title = format!("Review #{} {}", self.pr.number, self.pr.title);
+        let block = Block::bordered().title(title.as_str()).border_style(popup);
+        let inner = block.inner(area).inner(Margin::horizontal(1));
+        block.render(area, surface);
+        if inner.height < 3 {
+            return;
+        }
+
+        let mut verbs = Vec::new();
+        for (idx, (verb, _)) in VERBS.iter().enumerate() {
+            if idx > 0 {
+                verbs.push(Span::styled("  ", text));
+            }
+            verbs.push(match idx == self.verb {
+                true => Span::styled(format!("[{verb}]"), selected),
+                false => Span::styled(*verb, text),
+            });
+        }
+        surface.set_spans(inner.x, inner.y, &Spans::from(verbs), inner.width);
+        self.summary_area = Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 2);
+        for (row, line) in self.summary.split('\n').enumerate() {
+            let y = self.summary_area.y + row as u16;
+            if y < self.summary_area.bottom() {
+                surface.set_stringn(inner.x, y, line, inner.width as usize, text);
+            }
+        }
+        surface.set_stringn(
+            inner.x,
+            inner.bottom() - 1,
+            &self.footer,
+            inner.width as usize,
+            text,
+        );
+    }
+
+    fn cursor(&self, _area: Rect, editor: &Editor) -> (Option<Position>, CursorKind) {
+        use helix_core::unicode::width::UnicodeWidthStr;
+
+        let row = self.summary[..self.cursor].matches('\n').count();
+        let column = self.summary[self.line_start()..self.cursor].width();
+        (
+            Some(Position::new(
+                self.summary_area.y as usize + row,
+                self.summary_area.x as usize + column,
+            )),
+            editor.config().cursor_shape.from_mode(Mode::Insert),
+        )
+    }
 }
 
 /// A job loading the review comment threads of `pr` and showing them in the reviews.
@@ -446,13 +769,7 @@ async fn fetch_threads(pr: &PullRequest, workspace: &Path) -> anyhow::Result<Vec
         user: User,
     }
     let endpoint = format!("repos/{}/pulls/{}/comments", pr.repo, pr.number);
-    let output = run(
-        &gh_program(),
-        &["api", &endpoint, "--paginate"],
-        workspace,
-        None,
-    )
-    .await?;
+    let output = run(&gh_program(), &["api", &endpoint, "--paginate"], workspace).await?;
     // --paginate prints one JSON array per page.
     let mut comments = Vec::new();
     for page in serde_json::Deserializer::from_str(&output).into_iter::<Vec<Comment>>() {

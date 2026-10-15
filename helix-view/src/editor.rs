@@ -2293,6 +2293,36 @@ impl Editor {
                 );
             }
         }
+        self.share_review_comments();
+    }
+
+    /// Shows the pending comments, for pi and for the pull request, in the reviews of their files.
+    pub fn share_review_comments(&mut self) {
+        let mut comments: Vec<_> = (self.review_batch.comments().iter())
+            .map(|comment| ("pi", comment))
+            .chain(self.review_pr_comments.iter().map(|comment| {
+                let kind = if comment.reply_to.is_some() {
+                    "reply"
+                } else {
+                    "pr"
+                };
+                (kind, comment)
+            }))
+            .collect();
+        comments.sort_by_key(|(_, comment)| comment.created);
+        for doc in self.documents.values_mut() {
+            let Some(path) = doc.path().map(Path::to_path_buf) else {
+                continue;
+            };
+            if let Some(review) = doc.review.as_mut() {
+                review.set_comments(
+                    (comments.iter())
+                        .filter(|(_, comment)| comment.path == path)
+                        .map(|&(kind, comment)| (kind, comment.clone()))
+                        .collect(),
+                );
+            }
+        }
     }
 
     pub fn close(&mut self, id: ViewId) {
