@@ -216,7 +216,8 @@ Several pi sessions can be hooked to one repository. A session is live while
 the pid in its state file runs. Each session is labelled `pi-N`, the smallest
 number no other live session in the repository uses, kept in its state file
 and shown in its echoes (`pi-2: Agent turn started`, `pi-2 received your
-review: ...`, `pi hook attached as pi-2`). The baseline sent to Helix is the
+review: ...`, `pi hook attached as pi-2`) and in pi's footer (`hx:pi-2`, `hx:pi-2+1`
+with one worktree hook, `hx:pi-2 (no helix)` while no Helix answers). The baseline sent to Helix is the
 newest commit floor of the live sessions (the latest `HEAD` any of them saw),
 else the session's own baseline.
 

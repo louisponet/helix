@@ -679,6 +679,8 @@ class Hook {
 	 */
 	private inode?: string;
 	private stopped = false;
+	/** Called when the hook attaches to a Helix or loses it. */
+	onAttach?: () => void;
 	/** The running (or last) poller tick, so stopping can wait for it. */
 	private polling = Promise.resolve();
 	private stopping?: Promise<void>;
@@ -983,14 +985,27 @@ class Hook {
 		const baseline = await this.reviewBaseline();
 		if (baseline) commands.push(`review-baseline ${baseline}`);
 		const reachable = await this.send(commands);
-		if (reachable) this.inode = inode;
+		if (reachable) this.attachedTo(inode);
 		return reachable;
+	}
+
+	/** Whether a Helix answered on the socket last time. */
+	get attached(): boolean {
+		return this.inode !== undefined;
+	}
+
+	/** Records the socket attached to (`undefined`: none), telling `onAttach` when that changes. */
+	private attachedTo(inode: string | undefined): void {
+		if (inode === this.inode) return;
+		const was = this.attached;
+		this.inode = inode;
+		if (this.attached !== was) this.onAttach?.();
 	}
 
 	/** Sends `commands` to Helix; when no Helix listens, the poller attaches to the next one. */
 	private async send(commands: string[]): Promise<boolean> {
 		const reachable = await helix(this.socket, commands);
-		if (!reachable) this.inode = undefined;
+		if (!reachable) this.attachedTo(undefined);
 		return reachable;
 	}
 
@@ -1004,7 +1019,7 @@ class Hook {
 		await this.attributeUserEdits();
 		const info = await stat(this.socket).catch(() => undefined);
 		if (!info) {
-			this.inode = undefined;
+			this.attachedTo(undefined);
 			return;
 		}
 		if (socketId(info) === this.inode) {
@@ -1657,6 +1672,13 @@ export default function helixReview(pi: ExtensionAPI): void {
 	let sessionId = "";
 	let generation = 0;
 	const all = () => [...(hook ? [hook] : []), ...others.values()];
+	let ui: { setStatus(key: string, text: string | undefined): void } | undefined;
+	/** The session's Helix label in pi's footer: `hx:pi-2`, `+N` worktree hooks, `(no helix)`. */
+	const showStatus = () => {
+		const worktrees = others.size > 0 ? `+${others.size}` : "";
+		const text = hook && `hx:${hook.label}${worktrees}${hook.attached ? "" : " (no helix)"}`;
+		ui?.setStatus("helix-review", text);
+	};
 
 	/** The hook of the repository at `dir`, opened and joined into the running turn if new. */
 	const hookFor = async (dir: string): Promise<Hook | undefined> => {
@@ -1671,7 +1693,9 @@ export default function helixReview(pi: ExtensionAPI): void {
 			await other?.stop();
 			return others.get(top);
 		}
+		other.onAttach = showStatus;
 		others.set(top, other);
+		showStatus();
 		await other.start();
 		await other.begin(true);
 		await other.echo(`${other.label}: Agent turn started`);
@@ -1683,9 +1707,12 @@ export default function helixReview(pi: ExtensionAPI): void {
 		await Promise.all(all().map((h) => h.stop()));
 		others = new Map();
 		sessionId = ctx.sessionManager.getSessionId();
+		ui = ctx.ui;
 		hook = await Hook.open(pi, ctx.cwd, sessionId);
+		if (hook) hook.onAttach = showStatus;
 		await hook?.start();
 		if (await hook?.attach()) await hook?.announceAttach();
+		showStatus();
 	});
 	pi.on("session_shutdown", async () => {
 		await Promise.all(all().map((h) => h.stop()));

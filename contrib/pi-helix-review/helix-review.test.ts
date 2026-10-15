@@ -69,6 +69,7 @@ function workspace(t: TestContext) {
 function piSession(cwd: string, sessionId = "session-1") {
 	const sent: { content: unknown; options: unknown }[] = [];
 	const notes: { message: string; type?: string }[] = [];
+	const statuses: (string | undefined)[] = [];
 	const messages: { message: { customType: string; content: string; display: boolean; details: any }; options: unknown }[] = [];
 	const handlers = new Map<string, ((event: unknown, ctx: unknown) => unknown)[]>();
 	let handler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
@@ -89,7 +90,13 @@ function piSession(cwd: string, sessionId = "session-1") {
 	} as never);
 	const ctx = {
 		cwd,
-		ui: { notify: (message: string, type?: string) => void notes.push({ message, type }) },
+		ui: {
+			notify: (message: string, type?: string) => void notes.push({ message, type }),
+			setStatus: (key: string, text: string | undefined) => {
+				assert.equal(key, "helix-review");
+				statuses.push(text);
+			},
+		},
 		isIdle: () => true,
 		hasPendingMessages: () => false,
 		sessionManager: { getSessionId: () => sessionId },
@@ -100,7 +107,7 @@ function piSession(cwd: string, sessionId = "session-1") {
 		return result;
 	};
 	shutdowns.push(() => emit("session_shutdown"));
-	return { sent, notes, messages, ctx, emit, run: (args: string) => handler!(args, ctx) };
+	return { sent, notes, statuses, messages, ctx, emit, run: (args: string) => handler!(args, ctx) };
 }
 
 function simpleBatch(t: TestContext) {
@@ -1274,6 +1281,37 @@ test("a commit the reviewer asked for moves every session's review to it, past s
 	await two.emit("agent_end", { messages: [] });
 	assert.equal(sent(), `review-baseline ${ordinary}`);
 	assert.ok(lines.every((line) => !line.endsWith(" force")), "an ordinary turn never forces");
+});
+
+test("pi's footer shows the session's Helix label, its worktree hooks and a missing Helix", async (t) => {
+	const w = workspace(t);
+	const socket = join(w.root, "helix.sock");
+	withEnv(t, { HELIX_COMMAND_SOCKET: socket });
+	const repo = realpathSync(w.repo);
+	w.stage("a.rs", "a\n");
+	w.commit();
+	const dir = join(w.root, "wt");
+	git(repo, "worktree", "add", "-q", "-b", "wt", dir);
+	const file = join(realpathSync(dir), "b.rs");
+
+	let helix = await fakeHelix(t, socket);
+	const session = piSession(repo);
+	await session.emit("session_start", { reason: "startup" });
+	assert.equal(session.statuses.at(-1), "hx:pi-1");
+	// The poller notices the socket go and come back.
+	await helix.quit();
+	await until(() => session.statuses.at(-1) === "hx:pi-1 (no helix)", "the missing Helix");
+	helix = await fakeHelix(t, socket);
+	await until(() => session.statuses.at(-1) === "hx:pi-1", "the new Helix");
+	await session.emit("agent_start");
+	writeFileSync(file, "b\n");
+	await session.emit("tool_result", { toolName: "write", input: { path: file }, content: [], isError: false });
+	assert.equal(session.statuses.at(-1), "hx:pi-1+1");
+
+	// Outside a repository there is nothing to show.
+	const elsewhere = piSession(w.root, "session-2");
+	await elsewhere.emit("session_start", { reason: "startup" });
+	assert.deepEqual(elsewhere.statuses, [undefined]);
 });
 
 test("edits in a worktree of the repository get their own hook, Helix and mailbox", async (t) => {
