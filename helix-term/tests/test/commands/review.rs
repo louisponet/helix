@@ -5616,6 +5616,15 @@ async fn explicit_pr_review_edits_suggestion_buffers_without_writing_the_checkou
     assert_status_not_error(&app.editor);
     assert_eq!(doc!(app.editor).text(), "head\n");
     assert!(doc!(app.editor).review_draft);
+    let external = tempfile::tempdir()?;
+    let file = external.path().join("external.txt");
+    fs::write(&file, "external\n")?;
+    let location = serde_json::json!({"mode": "review", "filePath": file});
+    send_keys(&mut app, &format!(":review-open '{location}'<ret>")).await?;
+    assert_error(&app, "outside this worktree");
+    assert_eq!(doc!(app.editor).path(), Some(fixture.repo.file.as_path()));
+    assert!(app.editor.document_by_path(&file).is_none());
+    assert_eq!(fs::read_to_string(&file)?, "external\n");
     send_keys(&mut app, "ggcsuggested<esc>").await?;
     let draft = doc!(app.editor).text().to_string();
     assert!(draft.contains("suggested"));
@@ -5717,6 +5726,70 @@ async fn explicit_pr_review_ask_exports_draft_selection_without_saving() -> anyh
         .as_str()
         .unwrap()
         .contains("suggestion"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_work_opens_external_absolute_files_from_a_scratch_directory() -> anyhow::Result<()>
+{
+    use helix_view::editor::ReviewMode;
+    let scratch = tempfile::tempdir()?;
+    let external = tempfile::tempdir()?;
+    let file = external.path().join("external.txt");
+    fs::write(&file, "first\nsecond\n")?;
+    let _cwd = Cwd::enter(scratch.path());
+    let mut app = AppBuilder::new().build()?;
+    app.editor.review_mode = Some(ReviewMode::Work);
+    let location = serde_json::json!({
+        "mode": "work", "filePath": file, "worktreePath": scratch.path(),
+        "line": 2, "column": 2, "side": "new"
+    });
+    send_keys(&mut app, &format!(":review-open '{location}'<ret>")).await?;
+    assert_status_not_error(&app.editor);
+    {
+        let (view, doc) = current_ref!(app.editor);
+        assert_eq!(doc.path(), Some(file.as_path()));
+        assert_eq!(doc.text(), "first\nsecond\n");
+        assert_eq!(
+            doc.selection(view.id)
+                .primary()
+                .cursor(doc.text().slice(..)),
+            7
+        );
+        assert!(!doc.readonly);
+        assert!(!doc.review_draft);
+        assert!(doc.review.is_none());
+    }
+    send_keys(&mut app, "iEDIT<esc>:w<ret>").await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(fs::read_to_string(&file)?, "first\nsEDITecond\n");
+    assert!(app.editor.review_baseline.is_none());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_work_rejects_external_comparison_locations() -> anyhow::Result<()> {
+    use helix_view::editor::ReviewMode;
+    let repo = Repo::new("head\n", "head\n", "head\n");
+    let external = tempfile::tempdir()?;
+    let file = external.path().join("external.txt");
+    fs::write(&file, "external\n")?;
+    let _cwd = Cwd::enter(repo.dir.path());
+    let mut app = repo.app()?;
+    app.editor.review_mode = Some(ReviewMode::Work);
+    for location in [
+        serde_json::json!({"filePath": file, "baseline": "HEAD"}),
+        serde_json::json!({"filePath": file, "baseline": "HEAD", "revision": "HEAD"}),
+        serde_json::json!({"filePath": file, "side": "old", "line": 1}),
+    ] {
+        send_keys(&mut app, &format!(":review-open '{location}'<ret>")).await?;
+        assert_error(&app, "outside this worktree");
+        assert_eq!(doc!(app.editor).path(), Some(repo.file.as_path()));
+        assert!(app.editor.document_by_path(&file).is_none());
+        assert!(app.editor.review_baseline.is_none());
+        assert!(app.editor.review_snapshot.is_none());
+    }
+    assert_eq!(fs::read_to_string(&file)?, "external\n");
     Ok(())
 }
 

@@ -254,6 +254,11 @@ pub(super) fn open_terminal_location(
                 !path.is_empty() && !path.chars().any(char::is_control),
                 "invalid file path"
             );
+            let ordinary_absolute_file = cx.editor.review_mode == Some(ReviewMode::Work)
+                && location.baseline.is_none()
+                && location.revision.is_none()
+                && location.side != Some(LocationSide::Old)
+                && Path::new(path).is_absolute();
             if location.revision.is_some() {
                 let path = std::path::Path::new(path);
                 ensure!(
@@ -268,7 +273,7 @@ pub(super) fn open_terminal_location(
             }
             let candidate = helix_stdx::path::canonicalize(file_root.join(path));
             ensure!(
-                candidate.starts_with(file_root),
+                candidate.starts_with(file_root) || ordinary_absolute_file,
                 "file is outside this worktree"
             );
             if reviewing {
@@ -298,7 +303,7 @@ pub(super) fn open_terminal_location(
             if candidate.exists() {
                 let path = std::fs::canonicalize(candidate)?;
                 ensure!(
-                    path.starts_with(file_root) && path.is_file(),
+                    (path.starts_with(file_root) || ordinary_absolute_file) && path.is_file(),
                     "location is outside this worktree or is not a file"
                 );
                 return Ok(path);
