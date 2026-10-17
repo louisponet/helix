@@ -382,6 +382,10 @@ pub(super) fn write_impl(
     path: Option<&str>,
     options: WriteOptions,
 ) -> anyhow::Result<()> {
+    ensure!(
+        !doc!(cx.editor).review_draft,
+        "Suggestion drafts stay in HX; publish them from Review a PR"
+    );
     let config = cx.editor.config();
     let (view, doc) = current!(cx.editor);
     let doc_id = doc.id();
@@ -2846,6 +2850,10 @@ fn move_buffer_impl(
     new_path: PathBuf,
     options: MoveBufferOptions,
 ) -> anyhow::Result<()> {
+    ensure!(
+        cx.editor.review_mode != Some(helix_view::editor::ReviewMode::Review),
+        "Review a PR keeps checkout files unchanged"
+    );
     let doc = doc!(cx.editor);
     let old_path = doc
         .path()

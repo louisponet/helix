@@ -137,6 +137,8 @@ pub enum DocumentOpenError {
     IrregularFile,
     #[error(transparent)]
     IoError(#[from] io::Error),
+    #[error(transparent)]
+    Review(#[from] anyhow::Error),
 }
 
 pub struct Document {
@@ -223,6 +225,7 @@ pub struct Document {
     pub focused_at: std::time::Instant,
 
     pub readonly: bool,
+    pub review_draft: bool,
 
     pub previous_diagnostic_ids: HashMap<LanguageServerId, String>,
 
@@ -777,6 +780,7 @@ impl Document {
             review_opt_out: None,
             focused_at: std::time::Instant::now(),
             readonly: false,
+            review_draft: false,
             jump_labels: HashMap::new(),
             document_highlights: HashMap::new(),
             code_action_hints: HashSet::new(),
@@ -1016,6 +1020,10 @@ impl Document {
         impl Future<Output = Result<DocumentSavedEvent, anyhow::Error>> + 'static + Send,
         anyhow::Error,
     > {
+        anyhow::ensure!(
+            !self.review_draft,
+            "Suggestion drafts stay in HX; publish them from Review a PR"
+        );
         log::debug!(
             "submitting save of doc '{:?}'",
             self.path().map(|path| path.to_string_lossy())
@@ -1284,6 +1292,9 @@ impl Document {
 
     /// Whether saving would overwrite a newer external change. Missing or unreadable files fail.
     pub fn is_modified_on_disk(&self) -> Result<bool, Error> {
+        if self.review_draft {
+            return Ok(false);
+        }
         let path = self.path().ok_or_else(|| anyhow!("buffer has no path"))?;
         Ok(self.last_saved_time < path.metadata()?.modified()?)
     }
@@ -1304,6 +1315,10 @@ impl Document {
         provider_registry: &DiffProviderRegistry,
         trust_full: bool,
     ) -> Result<(), Error> {
+        anyhow::ensure!(
+            !self.review_draft,
+            "Suggestion drafts use the attached PR snapshot; reopen the review to reload it"
+        );
         let encoding = self.encoding;
         let path = match self.path() {
             None => return Ok(()),

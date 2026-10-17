@@ -157,7 +157,12 @@ Ask about selected code with `Space A a`, including deleted text focused with
 `:review-old`. Save corrections normally, then use `:review-send [instruction]`
 to hand them back. Replies appear in the T3 thread. `:review-commit [subject]`
 asks the agent to commit exactly the staged content. Saving alone sends nothing.
-The bridge retains its baseline across agent commits and editor restarts.
+This is **Work together** mode. The bridge retains its baseline across agent
+commits and editor restarts. **Review a PR** (`hx-t3 --mode review`, or `--pr <url>`)
+opens a separate editor whose code buffers are suggestion drafts based on the
+PR head. Editing them leaves checkout files unchanged; preview and publish
+comments and included suggestions through T3's review controls. Ask requests
+analysis and proposed code from the agent. Linking a PR does not change modes.
 See the integration's README for native T3 actions and connection options.
 
 ### Handing a review to pi

@@ -1315,6 +1315,7 @@ pub struct Editor {
     pub nav_mode: NavMode,
     /// The GitHub pull request under review, see `:review-pr`.
     pub review_pr: Option<crate::review::PullRequest>,
+    pub review_mode: Option<ReviewMode>,
     pub review_pr_loading: bool,
     /// The pull request's comment threads, shown in the reviews of their files.
     pub review_pr_threads: Vec<crate::review::ReviewThread>,
@@ -1456,6 +1457,13 @@ pub enum NavMode {
     Search,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewMode {
+    Work,
+    Review,
+}
+
 impl Editor {
     /// The directory review batches are exported to: the `:review-handoff` one, else the pi
     /// extension's `<workspace>/.pi/helix-review/outbox` mailbox when it exists and every
@@ -1516,6 +1524,11 @@ impl Editor {
             review_send_on_write: None,
             nav_mode: NavMode::Review,
             review_pr: None,
+            review_mode: match std::env::var("HELIX_REVIEW_MODE").as_deref() {
+                Ok("work") => Some(ReviewMode::Work),
+                Ok("review") => Some(ReviewMode::Review),
+                _ => None,
+            },
             review_pr_loading: false,
             review_pr_threads: Vec::new(),
             review_pr_comments: Vec::new(),
@@ -1714,6 +1727,12 @@ impl Editor {
     /// moves/renames a path, invoking any event handlers (currently only lsp)
     /// and calling `set_doc_path` if the file is open in the editor
     pub fn move_path(&mut self, old_path: &Path, new_path: &Path) -> io::Result<()> {
+        if self.review_mode == Some(ReviewMode::Review) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Review a PR keeps checkout files unchanged",
+            ));
+        }
         let new_path = canonicalize(new_path);
         // sanity check
         if old_path == new_path {
@@ -1768,6 +1787,12 @@ impl Editor {
     }
 
     pub fn create_path(&mut self, path: &Path, is_dir: bool) -> io::Result<()> {
+        if self.review_mode == Some(ReviewMode::Review) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Review a PR keeps checkout files unchanged",
+            ));
+        }
         let path = canonicalize(path);
         let language_servers: Vec<_> = self
             .language_servers
@@ -1813,6 +1838,12 @@ impl Editor {
     }
 
     pub fn delete_path(&mut self, path: &Path, recursive: bool) -> io::Result<()> {
+        if self.review_mode == Some(ReviewMode::Review) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Review a PR keeps checkout files unchanged",
+            ));
+        }
         let path = canonicalize(path);
         let is_dir = path.is_dir();
         let language_servers: Vec<_> = self
@@ -2130,6 +2161,7 @@ impl Editor {
 
     /// Generate an id for a new document and register it.
     fn new_document(&mut self, mut doc: Document) -> DocumentId {
+        doc.review_draft = self.review_mode == Some(ReviewMode::Review);
         let id = self.next_document_id;
         // Safety: adding 1 from 1 is fine, practically impossible to reach usize max
         self.next_document_id =
@@ -2215,6 +2247,13 @@ impl Editor {
             );
 
             let id = self.new_document(doc);
+            if self.review_mode == Some(ReviewMode::Review) && self.review_pr.is_some() {
+                if let Err(error) = self.initialize_review_draft(id) {
+                    self.documents.remove(&id);
+                    self.saves.remove(&id);
+                    return Err(error.into());
+                }
+            }
             self.launch_language_servers(id);
 
             helix_event::dispatch(DocumentDidOpen {
@@ -2232,6 +2271,50 @@ impl Editor {
         self.switch(id, action);
 
         Ok(id)
+    }
+
+    pub fn initialize_review_draft(&mut self, doc_id: DocumentId) -> anyhow::Result<()> {
+        let pr = self
+            .review_pr
+            .as_ref()
+            .ok_or_else(|| anyhow!("no pull request attached"))?;
+        let previous = &self.documents[&doc_id];
+        let path = previous
+            .path()
+            .ok_or_else(|| anyhow!("buffer has no path"))?
+            .to_owned();
+        let trust_full = self
+            .workspace_trust
+            .query(previous.workspace_root(), TrustQuery::Git)
+            .is_trusted();
+        let head = self
+            .diff_providers
+            .get_commit_base(&path, &pr.head_oid, trust_full)?;
+        let (text, encoding, has_bom) =
+            crate::document::from_reader(&mut head.data.as_slice(), None)?;
+        let mut doc = Document::from(
+            text,
+            Some((encoding, has_bom)),
+            self.config.clone(),
+            self.syn_loader.clone(),
+        );
+        doc.id = doc_id;
+        doc.set_path(Some(&path));
+        doc.detect_language(&self.syn_loader.load());
+        doc.detect_editor_config();
+        doc.detect_indent_and_line_ending();
+        doc.review_draft = true;
+        for view in previous.selections().keys() {
+            doc.ensure_view_init(*view);
+        }
+        let mut review = doc.load_review(&self.diff_providers, trust_full, Some(&pr.merge_base))?;
+        review.set_deleted_file(head.blob_id.is_none());
+        doc.set_review(review);
+        for server in previous.language_servers() {
+            server.text_document_did_close(previous.identifier());
+        }
+        self.documents.insert(doc_id, doc);
+        Ok(())
     }
 
     /// Starts reviewing the unmodified, unreviewed document `doc_id` against the review baseline

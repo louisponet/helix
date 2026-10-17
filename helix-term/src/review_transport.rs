@@ -4,6 +4,7 @@ use std::{collections::VecDeque, io::Write};
 
 use anyhow::{bail, ensure, Context as _};
 use helix_view::document::Mode;
+use helix_view::editor::ReviewMode;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -95,12 +96,14 @@ impl Session {
             return;
         }
         let controls = commands::review::review_controls(editor);
+        let reviewing = editor.review_mode == Some(ReviewMode::Review);
         if editor.review_pr.is_none() {
             self.mobile.clear();
         }
-        let state = json!({
+        let mut state = json!({
             "v": 1,
             "kind": "state",
+            "mode": editor.review_mode,
             "canStage": controls.can_stage,
             "canMarkReviewed": controls.can_mark_reviewed,
             "reviewed": controls.reviewed,
@@ -109,11 +112,14 @@ impl Session {
             "canOpenFile": true,
             "canOpenSnapshot": true,
             "canAsk": editor.review_handoff_dir().is_some() && helix_view::doc!(editor).path().is_some(),
-            "canSend": editor.review_handoff_dir().is_some() && editor.review_snapshot != Some(helix_view::doc!(editor).id()),
-            "canComment": editor.review_handoff_dir().is_some() && helix_view::doc!(editor).path().is_some(),
+            "canSend": !reviewing && editor.review_handoff_dir().is_some() && editor.review_snapshot != Some(helix_view::doc!(editor).id()),
+            "canComment": !reviewing && editor.review_handoff_dir().is_some() && helix_view::doc!(editor).path().is_some(),
             "pendingCommentCount": editor.review_batch.comments().len(),
-            "canReviewPr": editor.review_pr.is_some() && helix_view::doc!(editor).path().is_some(),
+            "canReviewPr": editor.review_mode != Some(ReviewMode::Work) && editor.review_pr.is_some() && helix_view::doc!(editor).path().is_some(),
         });
+        if editor.review_mode.is_none() {
+            state.as_object_mut().unwrap().remove("mode");
+        }
         if self.last_state.as_ref() != Some(&state) {
             self.emit(&state);
             self.last_state = Some(state);

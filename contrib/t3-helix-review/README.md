@@ -1,8 +1,10 @@
-# Review T3 Code work in HX
+# Work together and review PRs in HX
 
 Review an agent's changes, ask about selected code (including deleted lines),
 save corrections, and hand the work back to the same T3 thread. Replies appear in
-T3. The HX statusline keeps the destination thread visible.
+T3. **Work together** edits the checkout and sends feedback to the agent.
+**Review a PR** holds comments and code suggestions as drafts for GitHub, leaving
+checkout files unchanged. Each mode keeps its own editor session and buffers.
 
 ## Start
 
@@ -23,13 +25,13 @@ Use `--hx /absolute/path/to/hx` to select another executable.
 
 `hx-t3` picks among threads using the current checkout. To choose explicitly,
 copy a thread's link from T3 and run `hx-t3 --thread <link-or-id>`.
-The patched T3 frontend also exposes **Review in HX** in the thread's workspace
+The patched T3 frontend also exposes **Work together in HX** in the thread's workspace
 details and command palette. It opens a dedicated terminal in that thread's
-environment. On Android and iOS, choose **Review in HX** from the thread's
+environment. On Android and iOS, choose **Work together in HX** from the thread's
 **Terminal** menu. The installed T3 release needs the patched frontend to show this
 button; the terminal command works independently.
 
-## Everyday review
+## Work together
 
 1. Open HX before the next agent turn, or pass `--base main` (or a commit) to
    review work already committed. First use otherwise starts at `HEAD`.
@@ -49,26 +51,29 @@ In T3, choosing the action again focuses the running editor. After you quit HX,
 the action opens a fresh editor.
 
 In T3, **Comment** saves feedback on the current selection without waking the
-agent. **Undo comment** removes the latest pending comment. **Send** delivers the
-pending feedback; **Ask** immediately asks about the selection. Save corrections
+agent. **Undo comment** removes the latest pending comment. **Send to agent** delivers the
+pending feedback; **Ask agent** immediately asks about the selection. Save corrections
 before sending. Replies appear in the same T3 thread.
 
 Opening a source file also works outside Git or before the first commit. **Files**
 opens the ordinary file picker there; comparisons and agent feedback become
-available after the checkout has a commit and is reopened in review mode.
+available after the checkout has a commit and the editor is reopened.
 
-## Review a pull request from your phone
+## Review a pull request
 
-Open a PR with T3's **Work on PR**, let it prepare the thread's checkout, then
-choose **Terminal → Review in HX**. The launcher recognizes the attached PR and
-verifies that the checkout matches its current head without switching branches.
-For an existing thread, `hx-t3 --pr <GitHub PR URL>` selects the PR explicitly.
+Open a PR's code in T3 or select **Review a PR** in a thread with a linked PR.
+The launcher verifies that the checkout matches the PR head without switching
+branches. `hx-t3 --mode review` uses the linked PR;
+`hx-t3 --pr <GitHub PR URL>` selects it explicitly. Merely linking a PR never
+changes Work together into review mode.
 
-Use **PR Comment** to draft GitHub feedback on the selected lines, including deleted text.
-Use **Ask** when you want the agent to explain or change something. Its saved
-edits appear under **Review**, where you can inspect the original and proposed
-code and include each edit as a suggestion. Excluding a suggestion leaves the
-saved file alone. **Mark reviewed** tracks your progress independently.
+Use **Draft PR comment** for feedback on selected lines, including deleted text.
+Edit the code in HX to create suggestion drafts. The buffers start from the
+PR's exact head and cannot be written over source files, even with `:write!`.
+Inspect the original and proposed code in the review panel and include each
+suggestion you want to publish. **Ask agent** requests analysis or replacement
+code in the conversation without asking it to modify the checkout.
+**Mark reviewed** tracks your progress independently.
 
 In **PR Review**, edit or remove comments, choose Comment, Approve, or Request
 changes, and preview the combined review before submitting. Only included
@@ -76,15 +81,15 @@ suggestions are posted, against the PR commit you reviewed. GitHub edits that
 cannot be expressed as inline suggestions show a reason and cannot be included.
 Existing thread replies must be posted separately on the PR.
 
-Draft comments and included suggestions remain in the running HX session through
-phone reconnects; submit before quitting HX. Changing an edit clears its inclusion
-so you can inspect it again. Submission preserves local files, the Git index, and
-your branch. If submission cannot be confirmed, check the PR before trying again;
+Draft comments and suggestion buffers remain in the running HX session through
+mode switches and phone reconnects; publish before quitting HX. Changing an edit
+clears its inclusion so you can inspect it again. Submission preserves checkout
+files, the Git index, and your branch. If submission cannot be confirmed, check the PR before trying again;
 the app keeps the drafts and does not retry the GitHub write automatically.
 
 ## Delivery and review boundaries
 
-Each editor binds to one server, thread, worktree, and branch. Moving the thread
+Each editor binds to one server, thread, worktree, branch, and mode. Moving the thread
 or switching branches stops delivery and retains pending feedback. The bridge
 uses a private socket and mailbox, separate from Pi. An explicit `@target` for
 another session is refused.
@@ -93,7 +98,7 @@ Handoffs are frozen before sending and retried with the same T3 request ID.
 Accepted receipts survive restarts. A connection failure may mean T3 already
 accepted the message; reopening retries safely with that ID.
 
-The bridge observes saved files when it sees a completed agent turn. These are
+In Work together, the bridge observes saved files when it sees a completed agent turn. These are
 filesystem observations, not exact T3 checkpoints: simultaneous user and agent
 edits cannot always be separated into distinct hunks. Explicit handoffs still
 tell the agent to re-read and preserve your saved files. Keep unsaved edits in

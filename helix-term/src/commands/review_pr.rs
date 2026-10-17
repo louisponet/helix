@@ -4,6 +4,7 @@ use std::process::Stdio;
 
 use serde::Deserialize;
 
+use helix_view::editor::ReviewMode;
 use helix_view::graphics::{CursorKind, Margin, Rect};
 use helix_view::review::{PullRequest, ReviewSide, ReviewThread, ThreadComment, ThreadSide};
 use tui::buffer::Buffer as Surface;
@@ -57,6 +58,10 @@ pub(super) fn review_pr_attach(
     if event != PromptEvent::Validate {
         return Ok(());
     }
+    ensure!(
+        cx.editor.review_mode != Some(ReviewMode::Work),
+        "This is Work together; open a separate Review a PR session"
+    );
     ensure!(!cx.editor.review_pr_loading, LOADING_MESSAGE);
     let workspace = helix_loader::find_workspace().0;
     ensure!(
@@ -67,6 +72,7 @@ pub(super) fn review_pr_attach(
         "save or undo unsaved buffers before attaching a pull request"
     );
     let arg = args[0].to_owned();
+    ensure!(cx.editor.review_mode != Some(ReviewMode::Review) || cx.editor.review_pr.as_ref().is_none_or(|pr| pr.url == arg), "This Review a PR session keeps its attached snapshot; open another session for a different PR");
     if cx.editor.review_pr.as_ref().is_some_and(|pr| pr.url == arg) {
         let pr = cx.editor.review_pr.as_ref().unwrap();
         let head = git(&["rev-parse", "HEAD"], &workspace)?;
@@ -240,6 +246,7 @@ pub(super) fn review_pr(
     if event != PromptEvent::Validate {
         return Ok(());
     }
+    ensure!(cx.editor.review_mode.is_none(), "Open a separate Review a PR session to choose a pull request; this session keeps its checkout unchanged");
     ensure!(!cx.editor.review_pr_loading, LOADING_MESSAGE);
     if &args[0] == "close" {
         let pr = cx
@@ -293,6 +300,9 @@ pub(super) fn review_pr(
 /// Re-pins the pull request's baseline when its merge base with `HEAD` moved, as after the
 /// branch was rebased onto a newer base.
 pub(super) fn follow_merge_base(editor: &mut Editor) -> anyhow::Result<()> {
+    if editor.review_mode == Some(ReviewMode::Review) {
+        return Ok(());
+    }
     let Some(pr) = &editor.review_pr else {
         return Ok(());
     };
@@ -360,6 +370,10 @@ pub(super) fn review_submit(
     if event != PromptEvent::Validate {
         return Ok(());
     }
+    ensure!(
+        cx.editor.review_mode != Some(ReviewMode::Review),
+        "Use Publish review to submit suggestion drafts; this session keeps the checkout unchanged"
+    );
     let pr = cx
         .editor
         .review_pr
@@ -951,7 +965,28 @@ fn start(editor: &mut Editor, pr: PullRequest) -> anyhow::Result<PullRequest> {
     editor.nav_mode = helix_view::editor::NavMode::Review;
     editor.review_pr = None;
     editor.review_user_pin = None;
-    pin_review_baseline(editor, &pr.merge_base)?;
+    if editor.review_mode == Some(ReviewMode::Review) {
+        editor.review_pr = Some(pr.clone());
+        let workspace = helix_loader::find_workspace().0;
+        let docs: Vec<_> = editor
+            .documents()
+            .filter(|doc| doc.path().is_some_and(|path| path.starts_with(&workspace)))
+            .map(Document::id)
+            .collect();
+        for id in docs {
+            if let Err(error) = editor.initialize_review_draft(id) {
+                editor.review_pr = None;
+                editor.review_baseline = None;
+                editor.review_nav = None;
+                return Err(error);
+            }
+            editor.launch_language_servers(id);
+        }
+        editor.review_baseline = Some(pr.merge_base.clone());
+        editor.review_nav = None;
+    } else {
+        pin_review_baseline(editor, &pr.merge_base)?;
+    }
     let files = changed_files_since(editor, &pr.merge_base)?.len();
     editor.set_status(format!(
         "Reviewing PR #{} {}: {} against {} at {}",

@@ -12,6 +12,7 @@ export interface ReviewClient {
   readThread(id: string): Promise<T3ThreadInfo>;
   send(id: string, message: string, clientRequestId: string, mode?: "auto" | "queue"): Promise<T3SendResult>;
 }
+export type ReviewMode = "work" | "review";
 export interface BridgeOptions {
   client: ReviewClient;
   endpoint: string;
@@ -20,6 +21,7 @@ export interface BridgeOptions {
   socketPath?: string;
   baseline?: string;
   pullRequest?: string;
+  mode?: ReviewMode;
   onStatus?: (message: string) => void;
 }
 interface State {
@@ -32,6 +34,8 @@ interface State {
   lastRun?: string | null;
   snapshots: Record<string, string>;
   pullRequest?: string;
+  mode: ReviewMode;
+  reviewHead?: string;
 }
 interface Delivery { id: string; message: string; indexTree?: string; head?: string; attempted?: boolean }
 const active = new Set(["preparing", "queued", "starting", "running", "waiting"]);
@@ -118,17 +122,20 @@ export class ReviewBridge {
   get repo(): string { return this.state.repo; }
   get baseline(): string { return this.state.baseline; }
   get pullRequest(): string | undefined { return this.state.pullRequest; }
+  get mode(): ReviewMode { return this.state.mode; }
   get title(): string { return this.thread.title; }
 
   static async open(options: BridgeOptions): Promise<ReviewBridge> {
     const thread = await options.client.readThread(options.threadId);
+    const mode = options.mode ?? (options.pullRequest ? "review" : "work");
+    if (mode === "work" && options.pullRequest) throw new Error("Open Review a PR mode to attach a pull request.");
     if (thread.archived) throw new Error("This T3 thread is archived. Reopen it before reviewing.");
     const repo = await realpath((await git(thread.cwd, ["rev-parse", "--show-toplevel"])).trim());
     const branch = (await git(repo, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "")).trim();
     if (thread.branch !== null && thread.branch !== branch) {
       throw new Error(`This thread belongs to branch ${thread.branch}, but its checkout is on ${branch || "a detached HEAD"}. Restore the thread's branch before reviewing.`);
     }
-    const id = digest(`${options.endpoint}\0${thread.threadId}\0${thread.cwd}`).slice(0, 24);
+    const id = digest(`${options.endpoint}\0${thread.threadId}\0${thread.cwd}${mode === "review" ? "\0review" : ""}`).slice(0, 24);
     const root = options.stateRoot ?? join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "helix", "t3-review");
     const dir = join(root, id);
     await mkdir(dir, { recursive: true, mode: 0o700 });
@@ -145,15 +152,17 @@ export class ReviewBridge {
     const runtime = process.env.XDG_RUNTIME_DIR || join(tmpdir(), `helix-${process.getuid?.() ?? "user"}`);
     const socketPath = options.socketPath ?? join(runtime, "helix", `t3-${id}.sock`);
     if (Buffer.byteLength(socketPath) > 103) throw new Error("HX socket path is too long. Use --socket with a shorter private path.");
-    const prUrl = options.pullRequest ?? thread.linkedPullRequest?.url ?? previous?.pullRequest;
-    const state: State = { version: 1, threadId: thread.threadId, cwd: thread.cwd, repo, branch, baseline,
+    const prUrl = mode === "review" ? options.pullRequest ?? thread.linkedPullRequest?.url ?? previous?.pullRequest : undefined;
+    if (mode === "review" && !prUrl) throw new Error("Link a pull request to this thread or pass --pr <url> before opening Review a PR.");
+    const state: State = { version: 1, threadId: thread.threadId, cwd: thread.cwd, repo, branch, baseline, mode,
       ...(prUrl ? { pullRequest: pullRequestUrl(prUrl) } : {}),
+      ...(mode === "review" ? { reviewHead: (await git(repo, ["rev-parse", "HEAD"])).trim() } : {}),
       snapshots: previous?.snapshots ?? {}, lastRun: previous?.lastRun };
     const bridge = new ReviewBridge(options, thread, dir, socketPath, state);
     await bridge.acquireLock();
     try {
       for (const name of ["outbox", "deliveries", "receipts"]) await mkdir(join(dir, name), { mode: 0o700, recursive: true });
-      if (!previous && !isActive(thread)) {
+      if (mode === "work" && !previous && !isActive(thread)) {
         await bridge.snapshot();
         bridge.state.lastRun = thread.latestRunId;
       }
@@ -262,7 +271,7 @@ export class ReviewBridge {
         try { await this.deliver(name, true); }
         catch (error) { await this.announce(`T3: feedback kept — ${(error as Error).message}`); }
       }
-      if (!isActive(thread) && thread.latestRunId !== this.state.lastRun) {
+      if (this.mode === "work" && !isActive(thread) && thread.latestRunId !== this.state.lastRun) {
         await this.snapshot(); this.state.lastRun = thread.latestRunId; await this.save();
         await this.announce(`T3: ${thread.title} — ${thread.status}; review updated`);
       }
@@ -282,7 +291,8 @@ export class ReviewBridge {
     const newSocket = identity !== this.socketIdentity;
     const title = [...`T3: ${this.title.replace(/[\p{Cc}\u2028\u2029]/gu, " ")}`].slice(0, 120).join("");
     if (newSocket || title !== this.socketLabel) {
-      await sendCommands(this.socketPath, [`review-handoff ${quoteCommand(this.outbox)} ${quoteCommand(title)}`, `review-baseline ${this.baseline}`]);
+      await sendCommands(this.socketPath, [`review-handoff ${quoteCommand(this.outbox)} ${quoteCommand(title)}`,
+        ...(this.mode === "work" ? [`review-baseline ${this.baseline}`] : [])]);
       if (newSocket && this.state.pullRequest) {
         await sendCommands(this.socketPath, [`review-pr-attach ${quoteCommand(this.state.pullRequest)}`]);
       }
@@ -291,6 +301,7 @@ export class ReviewBridge {
       this.fingerprint = undefined;
       await this.announce(`${title} — connected; Space A a asks about your selection`);
     }
+    if (this.mode === "review") return;
     const paths = await this.paths();
     const files = await Promise.all(paths.map(async path => {
       const value = await stat(path).catch(() => undefined);
@@ -319,33 +330,36 @@ export class ReviewBridge {
     const deliveryPath = join(this.dir, "deliveries", `${id}.json`);
     let delivery = await readJson<Delivery>(deliveryPath);
     if (!delivery) {
-      const states = await batch.inspect();
-      for (const [file, state] of states) {
-        if (!state.problem) continue;
-        try { await stat(file); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
-        throw new Error(`Cannot verify ${file}: ${state.problem}. Feedback is kept; no deletion has been inferred.`);
-      }
-      const { warnings } = batch.render(path, states);
-      const handoff = await buildHandoff(batch, { repo: this.repo, snapshots: this.state.snapshots, baseline: this.baseline, strictCurrentReads: true });
-      let message: string;
-      if (handoff) message = handoff.content;
-      else if (batch.files.length) {
-        const files = batch.files.map(file => ({ path: file.path, baseline: file.baseline }));
-        message = `The user explicitly handed back these reviewed files from Helix. Re-read their saved contents and treat them as the user's intended version. No separate edit hunks could be distinguished from the bridge's observed snapshot; this does not mean the user made no corrections. Preserve the saved code and do not restore an earlier agent version. Report what remains to do.\n\n${JSON.stringify(files, null, 2)}`;
+      if (this.mode === "review") {
+        if (batch.request?.kind === "commit-staged") throw new Error("PR review drafts cannot request commits. Open Work together to change the checkout.");
+        const message = `You are helping the user review ${this.pullRequest} at commit ${this.state.reviewHead}. Read the reviewed files from that commit with git show; the current checkout may contain unrelated work. Analyze the PR and the selection below as a co-reviewer. Selected text may contain a proposed edit held only in an HX suggestion buffer; it is not a saved checkout change. Return findings, explanations, and suggested replacement code in this conversation. Do not edit checkout files, stage, commit, push, switch branches, or publish to GitHub. The user will turn proposals into HX drafts and explicitly publish their review.\n\n${JSON.stringify({ request: batch.request, selections: batch.comments }, null, 2)}`;
+        delivery = { id, message };
       } else {
-        if (!prepareOnly) { await rm(path); await this.announce("T3: review received; no changes or instructions to send"); }
-        return;
-      }
-      if (warnings.length) message += `\n\nReview freshness warnings (re-read before acting):\n${warnings.map(w => `- ${w}`).join("\n")}`;
-      if (this.state.pullRequest) {
-        message += `\n\nThis checkout is reviewing ${this.state.pullRequest}. Make requested edits as saved working-tree changes for the user to inspect and keep as GitHub suggestions. Do not commit, stage, push, or switch branches unless the user separately requests that. Keep HEAD at the reviewed PR commit.`;
-      }
-      delivery = { id, message };
-      if (batch.request?.kind === "commit-staged") {
-        delivery.indexTree = (await git(this.repo, ["write-tree"])).trim();
-        delivery.head = (await git(this.repo, ["rev-parse", "HEAD"])).trim();
-        delivery.message += `\n\nBefore committing, verify HEAD is ${delivery.head} and git write-tree is ${delivery.indexTree}. If either differs, stop and ask the user to review the staged content again. Do not stage other changes, push, or change branches.`;
+        const states = await batch.inspect();
+        for (const [file, state] of states) {
+          if (!state.problem) continue;
+          try { await stat(file); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
+          throw new Error(`Cannot verify ${file}: ${state.problem}. Feedback is kept; no deletion has been inferred.`);
+        }
+        const { warnings } = batch.render(path, states);
+        const handoff = await buildHandoff(batch, { repo: this.repo, snapshots: this.state.snapshots, baseline: this.baseline, strictCurrentReads: true });
+        let message: string;
+        if (handoff) message = handoff.content;
+        else if (batch.files.length) {
+          const files = batch.files.map(file => ({ path: file.path, baseline: file.baseline }));
+          message = `The user explicitly handed back these reviewed files from Helix. Re-read their saved contents and treat them as the user's intended version. No separate edit hunks could be distinguished from the bridge's observed snapshot; this does not mean the user made no corrections. Preserve the saved code and do not restore an earlier agent version. Report what remains to do.\n\n${JSON.stringify(files, null, 2)}`;
+        } else {
+          if (!prepareOnly) { await rm(path); await this.announce("T3: review received; no changes or instructions to send"); }
+          return;
+        }
+        if (warnings.length) message += `\n\nReview freshness warnings (re-read before acting):\n${warnings.map(w => `- ${w}`).join("\n")}`;
+        delivery = { id, message };
+        if (batch.request?.kind === "commit-staged") {
+          delivery.indexTree = (await git(this.repo, ["write-tree"])).trim();
+          delivery.head = (await git(this.repo, ["rev-parse", "HEAD"])).trim();
+          delivery.message += `\n\nBefore committing, verify HEAD is ${delivery.head} and git write-tree is ${delivery.indexTree}. If either differs, stop and ask the user to review the staged content again. Do not stage other changes, push, or change branches.`;
+        }
       }
       await writeJson(deliveryPath, delivery);
     }

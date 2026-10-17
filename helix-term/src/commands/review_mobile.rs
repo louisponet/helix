@@ -1,13 +1,14 @@
 //! Local, explicitly accepted PR review drafts for the phone transport.
 //!
-//! This module only reads Git and saved files. Publication belongs to the host; its
-//! acknowledgement removes the captured draft entries without touching local edits.
+//! Publication belongs to the host; acknowledgement removes captured draft entries
+//! without touching the checkout or later edits.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::path::Path;
 
 use anyhow::{ensure, Context, Result};
+use helix_view::editor::ReviewMode;
 use helix_view::review::{PullRequest, ReviewComment, ReviewSide};
 use helix_view::Editor;
 use serde::{Deserialize, Serialize};
@@ -86,6 +87,7 @@ pub(crate) struct Snapshot {
 pub(crate) struct Draft {
     key: Option<String>,
     accepted: HashSet<String>,
+    completed: HashSet<String>,
     snapshots: VecDeque<Snapshot>,
     comment_anchors: HashMap<String, (String, Anchor)>,
 }
@@ -133,31 +135,50 @@ impl Draft {
             self.key = Some(key);
         }
         let workspace = helix_loader::find_workspace().0;
-        ensure_head(pr, &workspace)?;
+        let reviewing = editor.review_mode == Some(ReviewMode::Review);
+        if !reviewing {
+            ensure_head(pr, &workspace)?;
+        }
         ensure!(
-            !editor.documents().any(|doc| doc.is_modified()
+            !editor.documents().any(|doc| !doc.review_draft
+                && doc.is_modified()
                 && doc.path().is_some_and(|path| path.starts_with(&workspace))),
             "save or undo the unsaved buffers before previewing a pull request review"
         );
 
-        let mut files = Files::new(pr, &workspace);
+        let mut files = Files::new(pr, &workspace, reviewing.then_some(editor));
         let mut suggestions = Vec::new();
         let mut versions = Vec::new();
-        let mut names = git(
-            &[
-                "diff",
-                "--name-only",
-                "-z",
-                "--no-renames",
-                &pr.head_oid,
-                "--",
-            ],
-            &workspace,
-        )?;
-        names.extend(git(
-            &["ls-files", "--others", "--exclude-standard", "-z"],
-            &workspace,
-        )?);
+        let names = if reviewing {
+            let mut names = Vec::new();
+            for doc in editor
+                .documents()
+                .filter(|doc| doc.review_draft && doc.is_modified())
+            {
+                if let Some(path) = doc.path() {
+                    names.extend(relative(path, &workspace)?.as_bytes());
+                    names.push(0);
+                }
+            }
+            names
+        } else {
+            let mut names = git(
+                &[
+                    "diff",
+                    "--name-only",
+                    "-z",
+                    "--no-renames",
+                    &pr.head_oid,
+                    "--",
+                ],
+                &workspace,
+            )?;
+            names.extend(git(
+                &["ls-files", "--others", "--exclude-standard", "-z"],
+                &workspace,
+            )?);
+            names
+        };
         let mut seen = HashSet::new();
         for name in names
             .split(|byte| *byte == 0)
@@ -171,7 +192,7 @@ impl Draft {
             match files.get(path) {
                 Ok(file) => {
                     let mut candidates = file.suggestions(pr, path)?;
-                    if candidates.is_empty() {
+                    if candidates.is_empty() && !reviewing {
                         candidates.push(Suggestion {
                             id: fingerprint(&(&pr.head_oid, path, "metadata-only"))?,
                             path: path.to_owned(), start_line: 1, line: 1,
@@ -208,6 +229,7 @@ impl Draft {
                 }
             }
         }
+        suggestions.retain(|suggestion| !self.completed.contains(&suggestion.id));
         self.accepted
             .retain(|id| suggestions.iter().any(|suggestion| suggestion.id == *id));
         for suggestion in &mut suggestions {
@@ -263,7 +285,9 @@ impl Draft {
                     code,
                 })
             });
-        ensure_head(pr, &workspace)?;
+        if !reviewing {
+            ensure_head(pr, &workspace)?;
+        }
         let pr = Pr {
             url: pr.url.clone(),
             repo: pr.repo.clone(),
@@ -410,12 +434,15 @@ impl Draft {
             .filter(|suggestion| suggestion.accepted)
         {
             self.accepted.remove(&suggestion.id);
+            if editor.review_mode == Some(ReviewMode::Review) {
+                self.completed.insert(suggestion.id.clone());
+            }
         }
         // Forget completed previews so a repeated ack cannot clear later re-created entries.
         self.snapshots
             .retain(|snapshot| snapshot.revision != request.revision);
         editor.share_review_comments();
-        editor.set_status("Published pull request review acknowledged; local edits kept");
+        editor.set_status("Published pull request review acknowledged; remaining drafts kept");
         Ok(())
     }
 
@@ -519,52 +546,66 @@ struct Files<'a> {
     pr: &'a PullRequest,
     workspace: &'a Path,
     entries: HashMap<String, File>,
+    editor: Option<&'a Editor>,
 }
 
 impl<'a> Files<'a> {
-    fn new(pr: &'a PullRequest, workspace: &'a Path) -> Self {
+    fn new(pr: &'a PullRequest, workspace: &'a Path, editor: Option<&'a Editor>) -> Self {
         Self {
             pr,
             workspace,
             entries: HashMap::new(),
+            editor,
         }
     }
 
     fn get(&mut self, path: &str) -> Result<&File> {
         if !self.entries.contains_key(path) {
             let full = self.workspace.join(path);
-            let saved = match std::fs::symlink_metadata(&full) {
-                Ok(metadata) => {
-                    ensure!(
-                        metadata.is_file() && metadata.len() <= MAX_FILE,
-                        "{path}: suggestions require a regular file no larger than 1 MiB"
-                    );
-                    ensure!(
-                        full.canonicalize()?
-                            .starts_with(self.workspace.canonicalize()?),
-                        "{path}: saved file resolves outside this workspace"
-                    );
-                    let mut saved = String::new();
-                    std::fs::File::open(&full)?
-                        .take(MAX_FILE + 1)
-                        .read_to_string(&mut saved)
-                        .with_context(|| format!("{path}: saved file is not UTF-8"))?;
-                    ensure!(
-                        saved.len() as u64 <= MAX_FILE,
-                        "{path}: saved file exceeds 1 MiB"
-                    );
-                    saved
+            let head = blob(&self.pr.head_oid, path, self.workspace)?;
+            let head_exists = head.is_some();
+            let head = head.unwrap_or_default();
+            let saved = if let Some(editor) = self.editor {
+                editor
+                    .document_by_path(&full)
+                    .filter(|doc| doc.review_draft)
+                    .map(|doc| doc.text().to_string())
+                    .unwrap_or_else(|| head.clone())
+            } else {
+                match std::fs::symlink_metadata(&full) {
+                    Ok(metadata) => {
+                        ensure!(
+                            metadata.is_file() && metadata.len() <= MAX_FILE,
+                            "{path}: suggestions require a regular file no larger than 1 MiB"
+                        );
+                        ensure!(
+                            full.canonicalize()?
+                                .starts_with(self.workspace.canonicalize()?),
+                            "{path}: saved file resolves outside this workspace"
+                        );
+                        let mut saved = String::new();
+                        std::fs::File::open(&full)?
+                            .take(MAX_FILE + 1)
+                            .read_to_string(&mut saved)
+                            .with_context(|| format!("{path}: saved file is not UTF-8"))?;
+                        ensure!(
+                            saved.len() as u64 <= MAX_FILE,
+                            "{path}: saved file exceeds 1 MiB"
+                        );
+                        saved
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+                    Err(err) => return Err(err.into()),
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-                Err(err) => return Err(err.into()),
             };
             ensure!(
                 !saved.contains('\0'),
                 "{path}: binary files cannot be review suggestions"
             );
-            let head = blob(&self.pr.head_oid, path, self.workspace)?;
-            let head_exists = head.is_some();
-            let head = head.unwrap_or_default();
+            ensure!(
+                saved.len() as u64 <= MAX_FILE,
+                "{path}: suggestion draft exceeds 1 MiB"
+            );
             ensure!(
                 head.len() as u64 <= MAX_FILE && !head.contains('\0'),
                 "{path}: PR head is too large or binary"

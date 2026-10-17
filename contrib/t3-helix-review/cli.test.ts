@@ -37,6 +37,13 @@ test("native launch requires authoritative terminal context instead of silently 
   await assert.rejects(f.run(["--environment-id", "dev", "--thread", "thread"]), /terminal did not supply its environment/u);
 });
 
+test("invalid or conflicting editor modes fail before connecting", async t => {
+  const f = await fixture(t);
+  await assert.rejects(f.run(["--mode", "other"]), /mode must be work or review/u);
+  await assert.rejects(f.run(["--mode", "review", "--location", JSON.stringify({ mode: "work" })]), /modes do not match/u);
+  await assert.rejects(f.run(["--mode", "review", "--base", "HEAD"]), /PR review uses the PR's base and head/u);
+});
+
 test("native environment mismatch stops before pairing or reading the thread", async t => {
   const f = await fixture(t); const server = await environment(t, "other");
   await writeFile(join(f.dir, "userdata", "server-runtime.json"), JSON.stringify({ version: 1, origin: new URL(server.endpoint).origin }));
@@ -63,12 +70,13 @@ test("each spawned HX gets a fresh env-only control token and a matching close o
   const f = await fixture(t);
   const program = join(f.dir, "fake-hx.cjs");
   const capture = join(f.dir, "capture.json");
-  await writeFile(program, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(capture)}, JSON.stringify({token:process.env.HELIX_REVIEW_ACTION_TOKEN,socket:process.env.HELIX_COMMAND_SOCKET,deferred:process.env.HELIX_REVIEW_DEFER_READY,args:process.argv.slice(2)}));\nprocess.exit(7);\n`, { mode: 0o700 });
+  await writeFile(program, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(capture)}, JSON.stringify({token:process.env.HELIX_REVIEW_ACTION_TOKEN,socket:process.env.HELIX_COMMAND_SOCKET,deferred:process.env.HELIX_REVIEW_DEFER_READY,mode:process.env.HELIX_REVIEW_MODE,args:process.argv.slice(2)}));\nprocess.exit(7);\n`, { mode: 0o700 });
   const environment = { ...f.env, HELIX_REVIEW_ACTION_TOKEN: "inherited-old-token" };
   const nonces: string[] = [];
   for (let i = 0; i < 2; i++) {
     const markers: string[] = [];
-    const editor = spawnReviewEditor(program, f.dir, "/private/hx.sock", environment, marker => markers.push(marker));
+    const mode = i === 0 ? "work" : "review";
+    const editor = spawnReviewEditor(program, f.dir, "/private/hx.sock", environment, marker => markers.push(marker), mode);
     assert.equal(await editor.done, 7);
     assert.equal(markers.length, 1);
     const marker = closedMarker(markers[0]);
@@ -78,6 +86,7 @@ test("each spawned HX gets a fresh env-only control token and a matching close o
     assert.deepEqual(marker.payload, { v: 1, kind: "closed" });
     assert.equal(observed.socket, "/private/hx.sock");
     assert.equal(observed.deferred, "1");
+    assert.equal(observed.mode, mode);
     assert.deepEqual(observed.args, ["-w", f.dir]);
     nonces.push(observed.token);
   }

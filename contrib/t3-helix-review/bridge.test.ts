@@ -35,12 +35,16 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
     },
   };
   const commands: string[] = [];
+  let attachError: string | undefined;
   const socketPath = join(dir, "hx.sock");
   const server = createServer(socket => {
     let pending = "";
     socket.on("data", bytes => {
       const lines = (pending + bytes.toString()).split("\n"); pending = lines.pop()!;
-      for (const line of lines) { commands.push(line); socket.write("ok\n"); }
+      for (const line of lines) {
+        commands.push(line);
+        socket.write(attachError && line.startsWith("review-pr-attach ") ? `error ${attachError}\n` : "ok\n");
+      }
     });
   });
   await new Promise<void>(done => server.listen(socketPath, done));
@@ -57,7 +61,8 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   };
   return { dir, repo, baseline, blob, thread, client, calls, commands, options, batch, writeBatch,
     get bridge() { return bridge; }, fail(value: boolean) { failure = value; },
-    async reopen() { await bridge.close(); bridge = await ReviewBridge.open(options); return bridge; } };
+    failAttach(message: string) { attachError = message; },
+    async reopen(mode: "work" | "review" = "work") { await bridge.close(); bridge = await ReviewBridge.open({ ...options, mode }); return bridge; } };
 }
 
 function handoffDetails(message: string) {
@@ -80,10 +85,10 @@ test("connects with a visible thread binding, refreshes edits, and retains basel
   assert(f.commands.filter(command => command.startsWith("review-baseline ")).every(command => command === `review-baseline ${f.baseline}`));
 });
 
-test("attaches a linked PR once without checkout and tells the agent to leave edits as suggestions", async t => {
+test("review mode attaches a linked PR once and asks the agent for proposals without checkout edits", async t => {
   const f = await fixture(t);
   f.thread.linkedPullRequest = { url: "https://github.com/team/project/pull/7", repository: "team/project", number: 7 };
-  await f.reopen();
+  await f.reopen("review");
   const index = await readFile(join(f.repo, ".git/index"));
   await f.bridge.tick();
   await f.bridge.tick();
@@ -93,9 +98,63 @@ test("attaches a linked PR once without checkout and tells the agent to leave ed
   assert.deepEqual(f.commands.filter(command => command.startsWith("review-pr-attach ")), ["review-pr-attach 'https://github.com/team/project/pull/7'"]);
   assert.deepEqual(await readFile(join(f.repo, ".git/index")), index);
   assert.equal((await git(f.repo, ["rev-parse", "HEAD"])).trim(), f.baseline);
+  await writeFile(join(f.repo, "file.txt"), "private unrelated working change\n");
   await f.batch(); await f.bridge.tick();
-  assert.match(f.calls[0].message, /Keep HEAD at the reviewed PR commit/u);
-  assert.match(f.calls[0].message, /GitHub suggestions/u);
+  assert.match(f.calls[0].message, /co-reviewer/u);
+  assert(f.calls[0].message.includes(`at commit ${f.baseline}`));
+  assert.match(f.calls[0].message, /Do not edit checkout files/u);
+  assert.match(f.calls[0].message, /old check/u);
+  assert.doesNotMatch(f.calls[0].message, /private unrelated working change/u);
+  assert.equal(await readFile(join(f.repo, "file.txt"), "utf8"), "private unrelated working change\n");
+});
+
+test("linking a PR does not turn work mode into PR review", async t => {
+  const f = await fixture(t);
+  f.thread.linkedPullRequest = { url: "https://github.com/team/project/pull/7", repository: "team/project", number: 7 };
+  await f.reopen();
+  await f.bridge.tick();
+  assert.equal(f.bridge.mode, "work");
+  assert.equal(f.bridge.pullRequest, undefined);
+  assert.equal(f.commands.filter(command => command.startsWith("review-pr-attach ")).length, 0);
+  await f.batch(); await f.bridge.tick();
+  assert.match(f.calls[0].message, /Why remove this check/u);
+  assert.doesNotMatch(f.calls[0].message, /co-reviewer|GitHub suggestions/u);
+});
+
+test("startup fails on a stale attached PR before delivering review feedback", async t => {
+  const f = await fixture(t);
+  f.thread.linkedPullRequest = { url: "https://github.com/team/project/pull/7", repository: "team/project", number: 7 };
+  await f.reopen("review");
+  await f.batch();
+  f.failAttach("the checked-out commit changed since the pull request was attached");
+  await assert.rejects(f.bridge.refresh(), /checked-out commit changed/u);
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(await readdir(join(f.bridge.dir, "deliveries")), []);
+  assert.deepEqual(await f.bridge.pending(), ["review.json"]);
+});
+
+test("work and review retain separate locks, sockets and pending feedback for the same thread", async t => {
+  const f = await fixture(t);
+  f.thread.linkedPullRequest = { url: "https://github.com/team/project/pull/7", repository: "team/project", number: 7 };
+  await f.batch();
+  const review = await ReviewBridge.open({ ...f.options, mode: "review", socketPath: undefined });
+  t.after(() => review.close());
+  assert.notEqual(review.dir, f.bridge.dir);
+  assert.notEqual(review.socketPath, f.bridge.socketPath);
+  assert.deepEqual(await review.pending(), []);
+  assert.deepEqual(await f.bridge.pending(), ["review.json"]);
+  await assert.rejects(ReviewBridge.open({ ...f.options, mode: "review", socketPath: undefined }), /already has an HX review open/u);
+});
+
+test("review mode requires a PR and never forwards a commit request", async t => {
+  const f = await fixture(t);
+  await assert.rejects(ReviewBridge.open({ ...f.options, mode: "review" }), /Link a pull request/u);
+  f.thread.linkedPullRequest = { url: "https://github.com/team/project/pull/7", repository: "team/project", number: 7 };
+  await f.reopen("review");
+  await f.batch("commit.json", { kind: "commit-staged" });
+  await f.bridge.tick();
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(await f.bridge.pending(), ["commit.json"]);
 });
 
 

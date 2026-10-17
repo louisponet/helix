@@ -5594,3 +5594,220 @@ async fn conversation_checkpoint_reports_review_limits_without_blocking_plain_fi
     assert_eq!(repo.disk(), oversized);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_pr_review_edits_suggestion_buffers_without_writing_the_checkout(
+) -> anyhow::Result<()> {
+    use helix_view::editor::ReviewMode;
+    let fixture = PrFixture::new("base\n", "head\n", r#"api\ *) echo '[]';;"#);
+    let dir = fixture.repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    git_ok(dir, &["checkout", "-q", "feature"]);
+    fixture.repo.write("staged work\n");
+    git_ok(dir, &["add", "file.txt"]);
+    fixture.repo.write("saved work\n");
+    fs::write(dir.join("new.txt"), "other saved work\n")?;
+    let index = git_ok(dir, &["diff", "--cached"]);
+    let status = git_ok(dir, &["status", "--porcelain"]);
+    let mut app = fixture.repo.app()?;
+    app.editor.review_mode = Some(ReviewMode::Review);
+    send_keys(&mut app, ":review-pr-attach 7<ret>").await?;
+    wait_for(&mut app, |app| !app.editor.review_pr_loading).await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(doc!(app.editor).text(), "head\n");
+    assert!(doc!(app.editor).review_draft);
+    send_keys(&mut app, "ggcsuggested<esc>").await?;
+    let draft = doc!(app.editor).text().to_string();
+    assert!(draft.contains("suggested"));
+    assert!(doc!(app.editor).is_modified());
+    send_keys(&mut app, ":w<ret>").await?;
+    assert_error(&app, "Suggestion drafts stay in HX");
+    send_keys(&mut app, ":w!<ret>").await?;
+    assert_error(&app, "Suggestion drafts stay in HX");
+    let alternate = dir.join("must-not-exist.txt");
+    send_keys(&mut app, &format!(":w! {}<ret>", alternate.display())).await?;
+    assert_error(&app, "Suggestion drafts stay in HX");
+    assert!(!alternate.exists());
+    assert_eq!(doc!(app.editor).path(), Some(fixture.repo.file.as_path()));
+    let destination = dir.join("new-parent/renamed.txt");
+    send_keys(&mut app, &format!(":mv! {}<ret>", destination.display())).await?;
+    assert_error(&app, "keeps checkout files unchanged");
+    assert!(!destination.parent().unwrap().exists());
+    assert!(app
+        .editor
+        .move_path(&fixture.repo.file, &destination)
+        .is_err());
+    assert!(app.editor.create_path(&alternate, false).is_err());
+    assert!(app
+        .editor
+        .create_path(&dir.join("created-directory"), true)
+        .is_err());
+    assert!(app.editor.delete_path(&fixture.repo.file, false).is_err());
+    assert!(!alternate.exists());
+    assert!(!dir.join("created-directory").exists());
+    assert!(statusline(&app).contains("PR DRAFT"));
+    let doc = app
+        .editor
+        .documents_mut()
+        .find(|doc| doc.path() == Some(fixture.repo.file.as_path()))
+        .unwrap();
+    assert!(doc.save(Some(&alternate), true).is_err());
+    send_keys(&mut app, ":open new.txt<ret>").await?;
+    assert_eq!(doc!(app.editor).text(), "new\n");
+    send_keys(&mut app, ":open file.txt<ret>").await?;
+    assert_eq!(doc!(app.editor).text().to_string(), draft);
+    for command in [
+        ":review-stage<ret>",
+        ":review-commit<ret>",
+        ":review-commit-all<ret>",
+        ":review-submit approve<ret>",
+    ] {
+        send_keys(&mut app, command).await?;
+        assert!(app
+            .editor
+            .get_status()
+            .is_some_and(|(_, severity)| *severity == Severity::Error));
+    }
+    send_keys(&mut app, ":reload<ret>").await?;
+    assert_error(&app, "attached PR snapshot");
+    assert_eq!(doc!(app.editor).text().to_string(), draft);
+    assert_eq!(fixture.repo.disk(), "saved work\n");
+    assert_eq!(
+        fs::read_to_string(dir.join("new.txt"))?,
+        "other saved work\n"
+    );
+    assert_eq!(git_ok(dir, &["diff", "--cached"]), index);
+    assert_eq!(git_ok(dir, &["status", "--porcelain"]), status);
+    assert_eq!(git_ok(dir, &["branch", "--show-current"]), "feature");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_pr_review_ask_exports_draft_selection_without_saving() -> anyhow::Result<()> {
+    use helix_view::editor::ReviewMode;
+    let fixture = PrFixture::new("base\n", "head\n", r#"api\ *) echo '[]';;"#);
+    let dir = fixture.repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    git_ok(dir, &["checkout", "-q", "feature"]);
+    let outbox = tempfile::tempdir()?;
+    let mut app = fixture.repo.app()?;
+    app.editor.review_mode = Some(ReviewMode::Review);
+    send_keys(&mut app, ":review-pr-attach 7<ret>").await?;
+    wait_for(&mut app, |app| !app.editor.review_pr_loading).await?;
+    send_keys(
+        &mut app,
+        &format!(":review-handoff {}<ret>", outbox.path().display()),
+    )
+    .await?;
+    send_keys(
+        &mut app,
+        "ggcsuggestion<esc>ggx:review-ask Explain this proposal<ret>",
+    )
+    .await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(fixture.repo.disk(), "head\n");
+    assert!(doc!(app.editor).is_modified());
+    assert!(app.editor.review_send_on_write.is_none());
+    let batches: Vec<_> = fs::read_dir(outbox.path())?.collect::<Result<_, _>>()?;
+    assert_eq!(batches.len(), 1);
+    let batch: serde_json::Value = serde_json::from_slice(&fs::read(batches[0].path())?)?;
+    assert_eq!(batch["request"]["kind"], "ask");
+    assert_eq!(batch["comments"].as_array().unwrap().len(), 1);
+    assert!(batch["comments"][0]["selected_text"]
+        .as_str()
+        .unwrap()
+        .contains("suggestion"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_work_rejects_pr_attachment_and_other_mode_locations() -> anyhow::Result<()> {
+    use helix_view::editor::ReviewMode;
+    let fixture = PrFixture::new("base\n", "head\n", r#"api\ *) echo '[]';;"#);
+    let _cwd = Cwd::enter(fixture.repo.dir.path());
+    let mut app = fixture.repo.app()?;
+    app.editor.review_mode = Some(ReviewMode::Work);
+    send_keys(&mut app, ":review-pr-attach 7<ret>").await?;
+    assert_error(&app, "open a separate Review a PR session");
+    assert!(app.editor.review_pr.is_none());
+    let location = serde_json::json!({"mode": "review", "filePath": "file.txt"});
+    send_keys(&mut app, &format!(":review-open '{location}'<ret>")).await?;
+    assert_error(&app, "open a separate Work together or Review a PR session");
+    assert!(fixture.gh.calls().is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_pr_review_opens_missing_checkout_files_and_preserves_their_drafts(
+) -> anyhow::Result<()> {
+    use helix_view::editor::ReviewMode;
+    let fixture = PrFixture::new("base\n", "head\n", r#"api\ *) echo '[]';;"#);
+    let dir = fixture.repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    git_ok(dir, &["checkout", "-q", "feature"]);
+    fs::remove_file(&fixture.repo.file)?;
+    fs::remove_file(dir.join("new.txt"))?;
+    let status = git_ok(dir, &["status", "--porcelain"]);
+    let mut app = fixture.repo.app()?;
+    app.editor.review_mode = Some(ReviewMode::Review);
+    send_keys(&mut app, ":review-open '{\"mode\":\"review\"}'<ret>").await?;
+    assert_status_not_error(&app.editor);
+    assert!(app.editor.review_pr.is_none());
+    send_keys(&mut app, ":review-pr-attach 7<ret>").await?;
+    wait_for(&mut app, |app| !app.editor.review_pr_loading).await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(doc!(app.editor).text(), "head\n");
+    send_keys(&mut app, "ggiproposal <esc>").await?;
+    let draft = doc!(app.editor).text().to_string();
+    let draft_id = doc!(app.editor).id();
+    let nested = dir.join("apps/server");
+    fs::create_dir_all(&nested)?;
+    let _nested_cwd = Cwd::enter(&nested);
+    for (file, expected) in [("new.txt", "new\n"), ("file.txt", draft.as_str())] {
+        let location =
+            serde_json::json!({"mode": "review", "filePath": file, "worktreePath": nested});
+        send_keys(&mut app, &format!(":review-open '{location}'<ret>")).await?;
+        assert_status_not_error(&app.editor);
+        assert_eq!(doc!(app.editor).text(), expected);
+    }
+    let snapshot = serde_json::json!({"mode": "review", "baseline": fixture.merge_base, "revision": fixture.head, "filePath": "file.txt", "worktreePath": nested});
+    send_keys(&mut app, &format!(":review-open '{snapshot}'<ret>")).await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(app.editor.review_snapshot, Some(doc!(app.editor).id()));
+    assert!(doc!(app.editor).text().to_string().contains("+head"));
+    assert!(app.editor.review_pr.is_some());
+    let current =
+        serde_json::json!({"mode": "review", "filePath": "file.txt", "worktreePath": nested});
+    send_keys(&mut app, &format!(":review-open '{current}'<ret>")).await?;
+    assert_eq!(doc!(app.editor).id(), draft_id);
+    assert_eq!(doc!(app.editor).text().to_string(), draft);
+    assert!(!fixture.repo.file.exists());
+    assert!(!dir.join("new.txt").exists());
+    assert_eq!(git_ok(dir, &["status", "--porcelain"]), status);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_pr_review_failed_snapshot_never_leaves_a_pr_attached() -> anyhow::Result<()> {
+    use helix_view::editor::ReviewMode;
+    let oversized = "head\n".repeat(helix_view::review::Review::MAX_LINES + 1);
+    let fixture = PrFixture::new("base\n", &oversized, r#"api\ *) echo '[]';;"#);
+    let dir = fixture.repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    git_ok(dir, &["checkout", "-q", "feature"]);
+    fixture.repo.write("saved work\n");
+    let mut app = fixture.repo.app()?;
+    app.editor.review_mode = Some(ReviewMode::Review);
+    for _ in 0..2 {
+        send_keys(&mut app, ":review-pr-attach 7<ret>").await?;
+        wait_for(&mut app, |app| !app.editor.review_pr_loading).await?;
+        assert_error(&app, "review limit exceeded");
+        assert!(app.editor.review_pr.is_none());
+        assert!(app.editor.review_baseline.is_none());
+        let location = serde_json::json!({"mode": "review", "filePath": "file.txt"});
+        send_keys(&mut app, &format!(":review-open '{location}'<ret>")).await?;
+        assert_error(&app, "Attach the requested pull request");
+    }
+    assert_eq!(fixture.repo.disk(), "saved work\n");
+    Ok(())
+}

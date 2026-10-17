@@ -187,7 +187,12 @@ where
         Mode::Normal => &modenames.normal,
     };
     let content = if visible {
-        format!(" {mode_str} ")
+        let review_mode = match context.editor.review_mode {
+            Some(helix_view::editor::ReviewMode::Work) => " WORK",
+            Some(helix_view::editor::ReviewMode::Review) => " PR DRAFT",
+            None => "",
+        };
+        format!(" {mode_str}{review_mode} ")
     } else {
         // If not focused, explicitly leave an empty space instead of returning None.
         " ".repeat(mode_str.width() + 2)
