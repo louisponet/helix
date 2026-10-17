@@ -5340,3 +5340,257 @@ async fn review_pr_attach_rejects_an_unrelated_checkout_without_switching_branch
     assert_eq!(fixture.gh.calls().len(), 1);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn conversation_checkpoint_opens_editable_current_file_and_keeps_its_pin(
+) -> anyhow::Result<()> {
+    let repo = Repo::new(
+        "head\nkeep\nold\n",
+        "pre-turn\nkeep\nold\n",
+        "pre-turn\nkeep\nnew\n",
+    );
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let tree = git_ok(dir, &["write-tree"]);
+    let checkpoint = git_ok(
+        dir,
+        &["commit-tree", &tree, "-p", "HEAD", "-m", "checkpoint"],
+    );
+    let reference = "refs/t3/orchestration-v2/checkpoints/thread/turn";
+    git_ok(dir, &["update-ref", reference, &checkpoint]);
+    assert!(
+        !git(dir, &["merge-base", "--is-ancestor", &checkpoint, "HEAD"])
+            .status
+            .success()
+    );
+    let mut app = repo.app()?;
+    let nested = dir.join("apps/server");
+    fs::create_dir_all(&nested)?;
+    let _nested_cwd = Cwd::enter(&nested);
+    let location =
+        serde_json::json!({"baseline": reference, "filePath": "file.txt", "worktreePath": nested});
+    let open = format!(":review-open '{location}'<ret>");
+    send_keys(&mut app, &open).await?;
+    assert_eq!(
+        app.editor.review_baseline.as_deref(),
+        Some(checkpoint.as_str())
+    );
+    {
+        let (view, doc) = current_ref!(app.editor);
+        assert_eq!(doc.path(), Some(repo.file.as_path()));
+        assert!(!doc.readonly);
+        assert_eq!(doc.text().to_string(), "pre-turn\nkeep\nnew\n");
+        let review = doc.review.as_ref().unwrap();
+        assert_eq!(review.first_change_line(), Some(2));
+        assert_eq!(
+            doc.selection(view.id)
+                .primary()
+                .cursor_line(doc.text().slice(..)),
+            2
+        );
+    }
+    send_keys(&mut app, "gg").await?;
+    send_keys(&mut app, &open).await?;
+    {
+        let (view, doc) = current_ref!(app.editor);
+        assert_eq!(
+            doc.selection(view.id)
+                .primary()
+                .cursor_line(doc.text().slice(..)),
+            2
+        );
+    }
+    let explicit = serde_json::json!({"baseline": reference, "filePath": "file.txt", "line": 3, "column": 2, "side": "new"});
+    send_keys(&mut app, &format!(":review-open '{explicit}'<ret>")).await?;
+    {
+        let (view, doc) = current_ref!(app.editor);
+        assert_eq!(
+            doc.selection(view.id)
+                .primary()
+                .cursor(doc.text().slice(..)),
+            15
+        );
+    }
+    let old = serde_json::json!({"baseline": reference, "filePath": "file.txt", "line": 3, "side": "old"});
+    send_keys(&mut app, &format!(":review-open '{old}'<ret>")).await?;
+    {
+        let (view, doc) = current_ref!(app.editor);
+        assert!(doc.review.as_ref().unwrap().focus(view.id).is_some());
+    }
+    app.editor.socket_command = true;
+    send_keys(&mut app, &open).await?;
+    {
+        let (view, doc) = current_ref!(app.editor);
+        assert!(doc.review.as_ref().unwrap().focus(view.id).is_none());
+    }
+    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+    app.editor.socket_command = false;
+    assert_eq!(
+        app.editor.review_baseline.as_deref(),
+        Some(checkpoint.as_str())
+    );
+    assert_eq!(
+        app.editor.review_user_pin.as_deref(),
+        Some(checkpoint.as_str())
+    );
+    send_keys(&mut app, "iEDIT<esc>").await?;
+    assert!(
+        doc!(app.editor).is_modified(),
+        "text: {} status: {:?}",
+        doc!(app.editor).text(),
+        app.editor.get_status()
+    );
+    let edited = doc!(app.editor).text().to_string();
+    let other_ref = "refs/t3/orchestration-v2/checkpoints/thread/other";
+    git_ok(dir, &["update-ref", other_ref, "HEAD"]);
+    let other = serde_json::json!({"baseline": other_ref, "filePath": "file.txt"});
+    send_keys(&mut app, &format!(":review-open '{other}'<ret>")).await?;
+    assert_error(&app, "unsaved changes under another review baseline");
+    assert_eq!(doc!(app.editor).text().to_string(), edited);
+    assert_eq!(
+        app.editor.review_baseline.as_deref(),
+        Some(checkpoint.as_str())
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn conversation_checkpoint_rejects_non_checkpoint_refs_outside_history() -> anyhow::Result<()>
+{
+    let repo = Repo::new("head\n", "before\n", "after\n");
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let tree = git_ok(dir, &["write-tree"]);
+    let checkpoint = git_ok(
+        dir,
+        &["commit-tree", &tree, "-p", "HEAD", "-m", "checkpoint"],
+    );
+    git_ok(dir, &["update-ref", "refs/heads/checkpoint", &checkpoint]);
+    let mut app = repo.app()?;
+    for baseline in ["refs/heads/checkpoint", checkpoint.as_str()] {
+        let location = serde_json::json!({"baseline": baseline, "filePath": "file.txt"});
+        send_keys(&mut app, &format!(":review-open '{location}'<ret>")).await?;
+        assert_error(&app, "baseline is not in this branch's history");
+    }
+    send_keys(&mut app, &format!(":review-baseline {checkpoint}<ret>")).await?;
+    assert_error(&app, "not in this branch");
+    assert!(app.editor.review_baseline.is_none());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn conversation_checkpoint_opens_deleted_current_file_without_recreating_it(
+) -> anyhow::Result<()> {
+    let repo = Repo::new("head\n", "pre-turn\n", "pre-turn\n");
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let tree = git_ok(dir, &["write-tree"]);
+    let checkpoint = git_ok(
+        dir,
+        &["commit-tree", &tree, "-p", "HEAD", "-m", "checkpoint"],
+    );
+    let reference = "refs/t3/orchestration-v2/checkpoints/thread/deletion";
+    git_ok(dir, &["update-ref", reference, &checkpoint]);
+    fs::remove_file(&repo.file)?;
+    let mut app = AppBuilder::new().build()?;
+    let location = serde_json::json!({"baseline": reference, "filePath": "file.txt"});
+    send_keys(&mut app, &format!(":review-open '{location}'<ret>")).await?;
+    let doc = doc!(app.editor);
+    assert_eq!(doc.path(), Some(repo.file.as_path()));
+    assert!(doc.review.is_some());
+    assert!(!repo.file.exists());
+    assert!(!doc.is_modified());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn conversation_checkpoint_leaves_attached_pr_and_preserves_drafts() -> anyhow::Result<()> {
+    let fixture = PrFixture::new(
+        "head\nkeep\nold\n",
+        "head\nkeep\nnew\n",
+        r#"api\ *) echo '[]';;"#,
+    );
+    let repo = &fixture.repo;
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let mut app = fixture.open().await?;
+    wait_for(&mut app, |_| fixture.gh.calls().len() == 4).await?;
+    send_keys(&mut app, "3gg:review-comment keep draft<ret>").await?;
+    assert_eq!(app.editor.review_pr_comments.len(), 1);
+    repo.write("pre-turn\nkeep\nold\n");
+    repo.stage();
+    let tree = git_ok(dir, &["write-tree"]);
+    let checkpoint = git_ok(
+        dir,
+        &["commit-tree", &tree, "-p", "HEAD", "-m", "checkpoint"],
+    );
+    let reference = "refs/t3/orchestration-v2/checkpoints/thread/pr";
+    git_ok(dir, &["update-ref", reference, &checkpoint]);
+    repo.write("pre-turn\nkeep\nnew\n");
+    let location = serde_json::json!({"baseline": reference, "filePath": "file.txt"});
+    let open = format!(":review-open '{location}'<ret>");
+    app.editor.review_pr_loading = true;
+    send_keys(&mut app, &open).await?;
+    assert_error(&app, "loading");
+    assert!(app.editor.review_pr.is_some());
+    assert_eq!(
+        app.editor.review_baseline.as_deref(),
+        Some(fixture.merge_base.as_str())
+    );
+    app.editor.review_pr_loading = false;
+    send_keys(&mut app, &open).await?;
+    assert_status_not_error(&app.editor);
+    assert!(app.editor.review_pr.is_none());
+    assert!(app.editor.review_pr_threads.is_empty());
+    assert_eq!(app.editor.review_pr_comments.len(), 1);
+    assert_eq!(app.editor.review_pr_comments[0].comment, "keep draft");
+    assert_eq!(
+        app.editor.review_baseline.as_deref(),
+        Some(checkpoint.as_str())
+    );
+    let (view, doc) = current_ref!(app.editor);
+    assert_eq!(doc.text().to_string(), "pre-turn\nkeep\nnew\n");
+    assert!(!doc.readonly);
+    assert_eq!(
+        doc.selection(view.id)
+            .primary()
+            .cursor_line(doc.text().slice(..)),
+        2
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn conversation_checkpoint_reports_review_limits_without_blocking_plain_file_opens(
+) -> anyhow::Result<()> {
+    use helix_view::review::Review;
+
+    let oversized = "x".repeat(Review::MAX_BYTES + 1);
+    let repo = Repo::new("head\n", "pre-turn\n", &oversized);
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let tree = git_ok(dir, &["write-tree"]);
+    let checkpoint = git_ok(
+        dir,
+        &["commit-tree", &tree, "-p", "HEAD", "-m", "checkpoint"],
+    );
+    let reference = "refs/t3/orchestration-v2/checkpoints/thread/large";
+    git_ok(dir, &["update-ref", reference, &checkpoint]);
+    let mut app = AppBuilder::new().build()?;
+    let plain = serde_json::json!({"filePath": "file.txt"});
+    send_keys(&mut app, &format!(":review-open '{plain}'<ret>")).await?;
+    assert_status_not_error(&app.editor);
+    let location = serde_json::json!({"baseline": reference, "filePath": "file.txt"});
+    send_keys(&mut app, &format!(":review-open '{location}'<ret>")).await?;
+    assert_error(&app, Review::LIMIT_MESSAGE);
+    assert_eq!(
+        app.editor.review_baseline.as_deref(),
+        Some(checkpoint.as_str())
+    );
+    let doc = doc!(app.editor);
+    assert!(doc.review.is_none());
+    assert!(!doc.readonly);
+    assert_eq!(doc.text().to_string(), oversized);
+    assert_eq!(repo.disk(), oversized);
+    Ok(())
+}

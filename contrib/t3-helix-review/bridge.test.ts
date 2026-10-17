@@ -87,6 +87,9 @@ test("attaches a linked PR once without checkout and tells the agent to leave ed
   const index = await readFile(join(f.repo, ".git/index"));
   await f.bridge.tick();
   await f.bridge.tick();
+  f.thread.title = "Renamed while reviewing a conversation checkpoint";
+  await f.bridge.tick();
+  assert(f.commands.some(command => command.endsWith("'T3: Renamed while reviewing a conversation checkpoint'")));
   assert.deepEqual(f.commands.filter(command => command.startsWith("review-pr-attach ")), ["review-pr-attach 'https://github.com/team/project/pull/7'"]);
   assert.deepEqual(await readFile(join(f.repo, ".git/index")), index);
   assert.equal((await git(f.repo, ["rev-parse", "HEAD"])).trim(), f.baseline);

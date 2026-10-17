@@ -279,10 +279,11 @@ export class ReviewBridge {
     const info = await stat(this.socketPath).catch(() => undefined);
     if (!info) { this.socketIdentity = undefined; return; }
     const identity = `${info.ino}:${info.ctimeMs}`;
+    const newSocket = identity !== this.socketIdentity;
     const title = [...`T3: ${this.title.replace(/[\p{Cc}\u2028\u2029]/gu, " ")}`].slice(0, 120).join("");
-    if (identity !== this.socketIdentity || title !== this.socketLabel) {
+    if (newSocket || title !== this.socketLabel) {
       await sendCommands(this.socketPath, [`review-handoff ${quoteCommand(this.outbox)} ${quoteCommand(title)}`, `review-baseline ${this.baseline}`]);
-      if (this.state.pullRequest) {
+      if (newSocket && this.state.pullRequest) {
         await sendCommands(this.socketPath, [`review-pr-attach ${quoteCommand(this.state.pullRequest)}`]);
       }
       this.socketIdentity = identity;

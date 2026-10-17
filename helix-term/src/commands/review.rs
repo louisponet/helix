@@ -203,6 +203,16 @@ pub(super) fn open_terminal_location(
     } else {
         workspace.clone()
     };
+    let file_root = if location.revision.is_none()
+        && location
+            .baseline
+            .as_deref()
+            .is_some_and(|baseline| baseline.starts_with("refs/t3/orchestration-v2/checkpoints/"))
+    {
+        &repo
+    } else {
+        &workspace
+    };
     let path = location
         .file_path
         .as_ref()
@@ -223,15 +233,15 @@ pub(super) fn open_terminal_location(
                 ensure!(path.starts_with(&repo), "file is outside this worktree");
                 return Ok(path);
             }
-            let candidate = helix_stdx::path::canonicalize(workspace.join(path));
+            let candidate = helix_stdx::path::canonicalize(file_root.join(path));
             ensure!(
-                candidate.starts_with(&workspace),
+                candidate.starts_with(file_root),
                 "file is outside this worktree"
             );
             if candidate.exists() {
                 let path = std::fs::canonicalize(candidate)?;
                 ensure!(
-                    path.starts_with(&workspace) && path.is_file(),
+                    path.starts_with(file_root) && path.is_file(),
                     "location is outside this worktree or is not a file"
                 );
                 return Ok(path);
@@ -241,7 +251,7 @@ pub(super) fn open_terminal_location(
                 .find(|path| path.exists())
                 .context("file has no existing parent")?;
             ensure!(
-                std::fs::canonicalize(ancestor)?.starts_with(&workspace),
+                std::fs::canonicalize(ancestor)?.starts_with(file_root),
                 "file is outside this worktree"
             );
             let baseline = location
@@ -304,14 +314,38 @@ pub(super) fn open_terminal_location(
             .editor
             .diff_providers
             .resolve_commit(&repo, baseline, trust_full)?;
+        let checkpoint =
+            if path.is_some() && baseline.starts_with("refs/t3/orchestration-v2/checkpoints/") {
+                let output = std::process::Command::new("git")
+                    .current_dir(&repo)
+                    .args(["show-ref", "--verify", "--hash", baseline])
+                    .output()?;
+                output.status.success() && String::from_utf8(output.stdout)?.trim() == commit
+            } else {
+                false
+            };
         ensure!(
-            cx.editor
-                .diff_providers
-                .is_in_head_history(&repo, &commit, trust_full)?,
+            checkpoint
+                || cx
+                    .editor
+                    .diff_providers
+                    .is_in_head_history(&repo, &commit, trust_full)?,
             "baseline is not in this branch's history"
         );
         if let Some(path) = &path {
             ensure!(!cx.editor.document_by_path(path).is_some_and(|doc| doc.is_modified() && doc.review.as_ref().is_none_or(|review| review.baseline().revision() != Some(commit.as_str()))), "this file has unsaved changes under another review baseline; save or preserve them before changing its review scope");
+        }
+        if checkpoint {
+            ensure!(
+                !cx.editor.review_pr_loading,
+                super::review_pr::LOADING_MESSAGE
+            );
+            if cx.editor.review_pr.is_some() {
+                cx.editor.review_pr = None;
+                cx.editor.review_user_pin = None;
+                cx.editor.review_pr_threads.clear();
+                cx.editor.share_review_threads();
+            }
         }
         pin_review_baseline(cx.editor, &commit)?;
         set_user_pin(cx.editor, &commit);
@@ -343,6 +377,9 @@ pub(super) fn open_terminal_location(
                 },
                 &commit,
             )?;
+        }
+        if location.baseline.is_some() {
+            ensure_review(cx)?;
         }
         if location.side == Some(LocationSide::Old) {
             ensure_review(cx)?;
@@ -376,8 +413,12 @@ pub(super) fn open_terminal_location(
         let text = doc.text().slice(..);
         let line = location
             .line
-            .unwrap_or(1)
-            .saturating_sub(1)
+            .map(|line| line - 1)
+            .or_else(|| {
+                location.baseline.as_ref()?;
+                doc.review.as_ref()?.first_change_line()
+            })
+            .unwrap_or(0)
             .min(text.len_lines().saturating_sub(1));
         let start = text.line_to_char(line);
         let end = line_end_char_index(&text, line);
