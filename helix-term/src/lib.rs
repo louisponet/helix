@@ -12,6 +12,7 @@ pub mod health;
 pub mod job;
 pub mod keymap;
 pub mod logging;
+mod review_transport;
 pub mod ui;
 
 #[cfg(not(windows))]

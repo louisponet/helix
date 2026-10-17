@@ -1,0 +1,136 @@
+# Review T3 Code work in HX
+
+Review an agent's changes, ask about selected code (including deleted lines),
+save corrections, and hand the work back to the same T3 thread. Replies appear in
+T3. The HX statusline keeps the destination thread visible.
+
+## Start
+
+Requires this Helix build with review commands and its command socket, Node
+23.6 or newer, and T3 Code with HTTP MCP enabled. Run on the workspace host
+(Linux/macOS, or inside WSL). Keep this directory and its sibling
+`../helix-review` in the checkout; the launcher runs directly from source.
+
+```sh
+cargo build -p helix-term
+node contrib/t3-helix-review/cli.ts install
+hx-t3 setup
+hx-t3
+```
+
+Ensure `hx` points to the build and `~/.local/bin` is on your terminal's PATH.
+Use `--hx /absolute/path/to/hx` to select another executable.
+
+`hx-t3` picks among threads using the current checkout. To choose explicitly,
+copy a thread's link from T3 and run `hx-t3 --thread <link-or-id>`.
+The patched T3 frontend also exposes **Review in HX** in the thread's workspace
+details and command palette. It opens a dedicated terminal in that thread's
+environment. On Android and iOS, choose **Review in HX** from the thread's
+**Terminal** menu. The installed T3 release needs the patched frontend to show this
+button; the terminal command works independently.
+
+## Everyday review
+
+1. Open HX before the next agent turn, or pass `--base main` (or a commit) to
+   review work already committed. First use otherwise starts at `HEAD`.
+2. Use `Space A f` to pick a changed file and `Space A b` to inspect another
+   baseline. The bridge retains its opening baseline across agent commits and
+   restarts; use `--base` to change the retained range.
+3. Select code and press `Space A a` to ask a question. `:review-old` focuses
+   deleted text; `Esc` returns to the working file.
+4. Edit and save corrections normally. Saving alone sends no agent message.
+   Use `:review-send <instruction>` when ready to hand the saved work back.
+5. Stage selected uncommitted hunks with `Enter`, then `:review-commit [subject]` to ask
+   the agent to commit the staged content. It waits for an active turn to
+   finish and requires the same HEAD and staged tree before committing.
+
+Quit HX to stop the bridge. Reopen the same thread to resume retained feedback.
+In T3, choosing the action again focuses the running editor. After you quit HX,
+the action opens a fresh editor.
+
+In T3, **Comment** saves feedback on the current selection without waking the
+agent. **Undo comment** removes the latest pending comment. **Send** delivers the
+pending feedback; **Ask** immediately asks about the selection. Save corrections
+before sending. Replies appear in the same T3 thread.
+
+Opening a source file also works outside Git or before the first commit. **Files**
+opens the ordinary file picker there; comparisons and agent feedback become
+available after the checkout has a commit and is reopened in review mode.
+
+## Review a pull request from your phone
+
+Open a PR with T3's **Work on PR**, let it prepare the thread's checkout, then
+choose **Terminal → Review in HX**. The launcher recognizes the attached PR and
+verifies that the checkout matches its current head without switching branches.
+For an existing thread, `hx-t3 --pr <GitHub PR URL>` selects the PR explicitly.
+
+Use **PR Comment** to draft GitHub feedback on the selected lines, including deleted text.
+Use **Ask** when you want the agent to explain or change something. Its saved
+edits appear under **Review**, where you can inspect the original and proposed
+code and include each edit as a suggestion. Excluding a suggestion leaves the
+saved file alone. **Mark reviewed** tracks your progress independently.
+
+In **PR Review**, edit or remove comments, choose Comment, Approve, or Request
+changes, and preview the combined review before submitting. Only included
+suggestions are posted, against the PR commit you reviewed. GitHub edits that
+cannot be expressed as inline suggestions show a reason and cannot be included.
+Existing thread replies must be posted separately on the PR.
+
+Draft comments and included suggestions remain in the running HX session through
+phone reconnects; submit before quitting HX. Changing an edit clears its inclusion
+so you can inspect it again. Submission preserves local files, the Git index, and
+your branch. If submission cannot be confirmed, check the PR before trying again;
+the app keeps the drafts and does not retry the GitHub write automatically.
+
+## Delivery and review boundaries
+
+Each editor binds to one server, thread, worktree, and branch. Moving the thread
+or switching branches stops delivery and retains pending feedback. The bridge
+uses a private socket and mailbox, separate from Pi. An explicit `@target` for
+another session is refused.
+
+Handoffs are frozen before sending and retried with the same T3 request ID.
+Accepted receipts survive restarts. A connection failure may mean T3 already
+accepted the message; reopening retries safely with that ID.
+
+The bridge observes saved files when it sees a completed agent turn. These are
+filesystem observations, not exact T3 checkpoints: simultaneous user and agent
+edits cannot always be separated into distinct hunks. Explicit handoffs still
+tell the agent to re-read and preserve your saved files. Keep unsaved edits in
+HX until ready to save; freshness warnings accompany changed selections.
+
+Staged commit requests freeze HEAD and the Git index. If you change either
+before delivery, the request stays pending instead of committing new content.
+No push is requested. To cancel held feedback, quit HX, run `hx-t3 pending`
+in its worktree, then `hx-t3 discard --batch <name>`. This keeps an archive of
+the original batch. Reopen HX to retry remaining feedback or make a new request.
+
+## Connection and troubleshooting
+
+Local setup uses T3's official CLI and OAuth pairing and saves a private MCP
+login. Run `hx-t3 setup` when it expires; revoke **Helix review** in T3
+Settings → Connections. `--base-dir` selects another T3 home; `--t3` selects
+its CLI. Never point a development server at your live T3 state.
+
+The native button checks the destination environment's identity before loading
+credentials or reading a thread. It keeps a separate login for each environment.
+Conflicting explicit MCP credentials produce an error instead of redirecting
+your feedback to another server.
+
+For a remote workspace, run the launcher on that host. Explicit
+`HX_T3_MCP_URL` and `HX_T3_MCP_TOKEN` can supply an existing MCP connection.
+Keep tokens out of shell history and checked-in configuration.
+
+Use `hx-t3 --help` for socket, state-directory, and existing-editor attachment
+options. Private delivery state lives under
+`${XDG_STATE_HOME:-~/.local/state}/helix/t3-review`.
+After a crashed bridge, tiny `bridge.lock.stale-*` directories may remain.
+They allow safe concurrent recovery and do not prevent reopening. An incomplete
+lock reports its exact path; close all editors for that thread before removing
+that lock and reopening.
+
+Focused checks:
+
+```sh
+node --test contrib/t3-helix-review/*.test.ts contrib/helix-review/*.test.ts
+```

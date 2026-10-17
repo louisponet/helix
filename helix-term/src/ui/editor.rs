@@ -61,6 +61,12 @@ pub enum InsertEvent {
 }
 
 impl EditorView {
+    pub(crate) fn review_action_ready(&self) -> bool {
+        self.on_next_key.is_none()
+            && self.pseudo_pending.is_empty()
+            && self.keymaps.pending().is_empty()
+    }
+
     pub fn new(keymaps: Keymaps) -> Self {
         Self {
             keymaps,

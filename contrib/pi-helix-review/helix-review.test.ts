@@ -17,8 +17,10 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
+import fs from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { type TestContext, test } from "node:test";
 import helixReview from "./index.ts";
 
@@ -66,7 +68,7 @@ function workspace(t: TestContext) {
 }
 
 // The public command against a recording Pi transport; filesystem and Git stay real.
-function piSession(cwd: string, sessionId = "session-1") {
+function piSession(cwd: string, sessionId = "session-1", mode: "tui" | "rpc" | "json" | "print" = "tui") {
 	const sent: { content: unknown; options: unknown }[] = [];
 	const notes: { message: string; type?: string }[] = [];
 	const statuses: (string | undefined)[] = [];
@@ -90,6 +92,8 @@ function piSession(cwd: string, sessionId = "session-1") {
 	} as never);
 	const ctx = {
 		cwd,
+		mode,
+		hasUI: mode === "tui" || mode === "rpc",
 		ui: {
 			notify: (message: string, type?: string) => void notes.push({ message, type }),
 			setStatus: (key: string, text: string | undefined) => {
@@ -649,6 +653,12 @@ function withEnv(t: TestContext, vars: Record<string, string | undefined>) {
 	t.after(() => apply(saved));
 }
 
+/** A rename claims a batch before delivery; wait for the claim to be deleted as well. */
+function consumed(path: string): boolean {
+	const prefix = basename(path, ".json") + ".";
+	return !existsSync(path) && !readdirSync(dirname(path)).some((name) => name.startsWith(prefix) && name.endsWith(".claimed"));
+}
+
 async function until(condition: () => boolean, what: string) {
 	for (let i = 0; i < 200 && !condition(); i++) await new Promise((wake) => setTimeout(wake, 25));
 	assert.ok(condition(), `timed out waiting for ${what}`);
@@ -741,7 +751,7 @@ test("hook mode drives Helix over its socket and turns a saved review into one s
 		}),
 	);
 	renameSync(`${batch}.tmp`, batch);
-	await until(() => !existsSync(batch), "the batch to be consumed");
+	await until(() => consumed(batch), "the batch to be consumed");
 
 	assert.equal(session.messages.length, 1);
 	const { message, options } = session.messages[0];
@@ -884,7 +894,7 @@ test("any commit moves the baseline to HEAD; a requested one forces it over a pi
 	const batch = join(outbox, "9-1.json");
 	writeFileSync(`${batch}.tmp`, JSON.stringify({ format: "helix-review-batch", version: 2, files: [], comments: [], request: { kind: "commit-staged" } }));
 	renameSync(`${batch}.tmp`, batch);
-	await until(() => !existsSync(batch), "the batch to be consumed");
+	await until(() => consumed(batch), "the batch to be consumed");
 	assert.equal(session.messages.length, 1);
 
 	// The turn it starts commits; its end moves the baseline to the commit and says so.
@@ -960,11 +970,13 @@ test("an ask handoff instructs the agent with every selection and nothing is sen
 		JSON.stringify({ format: "helix-review-batch", version: 2, files: [], comments: [comment], request: { kind: "ask" } }),
 	);
 	renameSync(`${batch}.tmp`, batch);
-	await until(() => !existsSync(batch), "the batch to be consumed");
+	await until(() => consumed(batch), "the batch to be consumed");
 	assert.equal(session.messages.length, 1);
 	const content = session.messages[0].message.content;
 	assert.match(content, /User request:\nThe user selected code in Helix and asked about it\. Do what the message asks\.\nSelection 1:/);
-	assert.match(content, new RegExp(`Selection 1: ${file}, line 2\nSelected text:\n\`\`\`\n    let x = 1;\n\`\`\`\nEnclosing code:\n\`\`\`\nfn a\\(\\) \\{\n    let x = 1;\n\\}\n\`\`\`\nMessage:\n\`\`\`\nrename x to count\n\`\`\`$`));
+	assert.ok(content.endsWith(`Selection 1: ${file}, line 2\nSelected text:\n\`\`\`\n    let x = 1;\n\`\`\`\nMessage:\n\`\`\`\nrename x to count\n\`\`\``), content);
+	assert.ok(!content.includes("Enclosing code:"));
+	assert.deepEqual(session.messages[0].message.details.files[0].review_comments[0].context_hunks, { hunks: [], truncated: false });
 
 	// The turn it starts edits; its end refreshes and gives the ordinary summary, no reply.
 	await session.emit("agent_start");
@@ -977,6 +989,63 @@ test("an ask handoff instructs the agent with every selection and nothing is sen
 		`review-baseline ${head}`,
 		`echo pi-1: Agent turn done, 1 file changed since ${head.slice(0, 8)} (:review-files)`,
 	]);
+});
+
+test("a comment handoff contains only the closest hunks, while an explicit message keeps the full review", async (t) => {
+	const w = workspace(t);
+	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });
+	const repo = realpathSync(w.repo);
+	const file = join(repo, "a.rs");
+	const other = join(repo, "other.rs");
+	const base = Array.from({ length: 100 }, (_, i) => `original-${i + 1}\n`);
+	const blob = w.stage("a.rs", base.join(""));
+	const otherBlob = w.stage("other.rs", "other base\n");
+	const head = w.commit();
+	const session = piSession(repo);
+	await session.emit("session_start", { reason: "startup" });
+	await session.emit("agent_start");
+	const current = [...Array.from({ length: 20 }, (_, i) => `INSERTED_PREFIX_${i}\n`), ...base];
+	current[29] = "AGENT_NEAR\n";
+	current[79] = "AGENT_FAR\n";
+	writeFileSync(file, current.join(""));
+	writeFileSync(other, "other agent\n");
+	await session.emit("agent_end", { messages: [] });
+	current[29] = "USER_NEAR\n";
+	current[79] = "USER_FAR\n";
+	writeFileSync(file, current.join(""));
+	writeFileSync(other, "USER_OTHER\n");
+	const files = [{ path: file, baseline: commitBase(head, blob) }, { path: other, baseline: commitBase(head, otherBlob) }];
+	const near = { path: file, side: "current", baseline: commitBase(head, blob), start_line: 30, end_line: 30, current_line: 30, selected_text: "USER_NEAR\n", context_before: "original-9\n", context_after: "original-11\n", enclosing_text: "DO_NOT_SEND_WHOLE_FUNCTION\n" + current.join(""), comment: "fix nearby" };
+	let batch = 0;
+	const send = async (comments: object[], request: object) => {
+		const before = session.messages.length;
+		const path = join(repo, ".pi", "helix-review", "outbox", `${++batch}.json`);
+		writeFileSync(`${path}.tmp`, JSON.stringify({ format: "helix-review-batch", version: 2, files, comments, request, target: "session-1" }));
+		renameSync(`${path}.tmp`, path);
+		await until(() => session.messages.length > before && !existsSync(path), "the scoped handoff");
+		return session.messages.at(-1)!.message;
+	};
+	for (const comment of [near, { ...near, start_line: 10, end_line: 10, current_line: 10 }, { ...near, side: "old", start_line: 10, end_line: 10, selected_text: "original-10\n" }, { ...near, start_line: 50, end_line: 50, current_line: 50, selected_text: "original-30\n" }]) {
+		const message = await send([comment], { kind: "ask" });
+		assert.deepEqual(message.details.files.map((f: { path: string }) => f.path), [file]);
+		const context = message.details.files[0];
+		assert.match(context.review_comments[0].context_hunks.hunks.join(""), /USER_NEAR/);
+		assert.match(context.user_edits.hunks.join(""), /AGENT_NEAR[\s\S]*USER_NEAR/);
+		assert.ok(!message.content.includes("USER_FAR"));
+		assert.ok(!message.content.includes("AGENT_FAR"));
+		assert.ok(!message.content.includes("USER_OTHER"));
+		assert.ok(!message.content.includes(other));
+		assert.ok(!message.content.includes("INSERTED_PREFIX"));
+		assert.ok(!message.content.includes("DO_NOT_SEND_WHOLE_FUNCTION"));
+		assert.equal(context.review_comments[0].enclosing_text, undefined);
+	}
+	const multiple = await send([near, { ...near, start_line: 80, end_line: 80, current_line: 80, selected_text: "USER_FAR\n" }], { kind: "ask" });
+	assert.match(multiple.details.files[0].user_edits.hunks.join(""), /USER_NEAR[\s\S]*USER_FAR/);
+	assert.ok(!multiple.content.includes(other));
+	const explicit = await send([], { kind: "message", text: "handle the full review" });
+	assert.deepEqual(explicit.details.files.map((f: { path: string }) => f.path), [file, other]);
+	assert.match(explicit.content, /USER_FAR/);
+	assert.match(explicit.content, /USER_OTHER/);
 });
 
 test("a Helix started after pi, or restarted, is attached once its socket appears", async (t) => {
@@ -1034,7 +1103,7 @@ test("a batch about files outside the repository is dropped without a turn or a 
 			request: { kind: "message", text: "not for this agent" },
 		}),
 	);
-	await until(() => !existsSync(batch), "the batch to be dropped");
+	await until(() => consumed(batch), "the batch to be dropped");
 	await new Promise((wake) => setTimeout(wake, 100));
 	assert.equal(session.messages.length, 0);
 	assert.deepEqual(lines, [], "no receipt is echoed");
@@ -1102,7 +1171,7 @@ test("several sessions in one repository each take only the batches meant for th
 	const handled = () => got(one).length + got(two).length;
 	for (const [i, path] of [() => send("1-1.json", a), () => send("1-2.json", b), () => send("1-3.json", b, { target: "session-1" })].entries()) {
 		path();
-		await until(() => handled() === i + 1, `handoff ${i + 1}`);
+		await until(() => handled() === i + 1 && readdirSync(outbox).length === 0, `handoff ${i + 1} and receipt`);
 	}
 	assert.deepEqual(got(one), ["1-1.json", "1-3.json"], "the editor of a.rs, then the target");
 	assert.deepEqual(got(two), ["1-2.json"], "the longest idle session");
@@ -1120,9 +1189,262 @@ test("several sessions in one repository each take only the batches meant for th
 	const three = piSession(repo, "session-3");
 	t.after(() => three.emit("session_shutdown"));
 	await three.emit("session_start", { reason: "startup" });
-	await until(() => got(three).length === 1, "the swept batch");
+	await until(() => got(three).length === 1 && consumed(join(outbox, "1-4.json")), "the swept batch and receipt");
 	assert.deepEqual(got(three), ["1-4.json"]);
 	assert.deepEqual(readdirSync(outbox), ["1-5.session-9.claimed"]);
+});
+
+test("non-TUI sessions never attach or import handoffs, including after worktree edits", async (t) => {
+	const w = workspace(t);
+	const repo = realpathSync(w.repo);
+	w.stage("a.rs", "a\n");
+	w.commit();
+	const worktree = join(w.root, "worktree");
+	git(repo, "worktree", "add", "-q", "-b", "other", worktree);
+	const socket = join(w.root, "helix.sock");
+	withEnv(t, { HELIX_COMMAND_SOCKET: socket });
+	const { lines } = await fakeHelix(t, socket);
+	const batch = w.batch({ format: "helix-review-batch", version: 2, files: [], comments: [], request: { kind: "message", text: "do not import" } });
+	for (const mode of ["rpc", "json", "print"] as const) {
+		const session = piSession(repo, mode, mode);
+		await session.emit("session_start", { reason: "startup" });
+		await session.emit("agent_start");
+		const path = join(worktree, "a.rs");
+		writeFileSync(path, "changed\n");
+		await session.emit("tool_result", { toolName: "edit", input: { path }, content: [], isError: false });
+		await session.emit("agent_end", { messages: [] });
+		await session.run(batch);
+		assert.equal(session.messages.length, 0);
+		assert.equal(session.sent.length, 0);
+		assert.match(session.notes[0].message, /require an interactive TUI session/);
+		assert.ok(session.statuses.every((status) => status === undefined));
+	}
+	assert.ok(!existsSync(join(repo, ".pi", "helix-review")));
+	assert.ok(!existsSync(join(worktree, ".pi", "helix-review")));
+	assert.deepEqual(lines, []);
+});
+
+test("only TUI sessions receive comments, messages and commits owned by a headless session", async (t) => {
+	const w = workspace(t);
+	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });
+	const repo = realpathSync(w.repo);
+	const file = join(repo, "a.rs");
+	w.stage("a.rs", "a\n");
+	const head = w.commit();
+	const blob = w.stage("a.rs", "A\n");
+	const session = piSession(repo, "tui-session");
+	const dir = join(repo, ".pi", "helix-review");
+	const states = join(dir, "state");
+	mkdirSync(states, { recursive: true });
+	for (const [id, label, capability] of [["headless-session", "pi-1", { tui: false }], ["legacy-session", "pi-2", {}]] as const) {
+		writeFileSync(join(states, `${id}.json`), JSON.stringify({ snapshots: {}, pid: process.pid, label, last_active: 0, edited: { [file]: Date.now() + 10000 }, ...capability }));
+	}
+	await session.emit("session_start", { reason: "startup" });
+	const state = JSON.parse(readFileSync(join(states, "tui-session.json"), "utf8"));
+	assert.equal(state.tui, true);
+	assert.equal(state.label, "pi-3", "alive ineligible sessions keep their labels reserved");
+	writeFileSync(join(states, "ownership.json"), JSON.stringify({ files: { [file]: { blob, ranges: [{ start: 1, end: 2, owner: "pi-1", agent: "pi-1", at: Date.now() }] } } }));
+	const send = (name: string, extra: object) => {
+		const path = join(dir, "outbox", `${name}.json`);
+		writeFileSync(`${path}.tmp`, JSON.stringify({ format: "helix-review-batch", version: 2, files: [], comments: [], ...extra }));
+		renameSync(`${path}.tmp`, path);
+		return path;
+	};
+	const comment = { path: file, side: "current", baseline: commitBase(head, blob), start_line: 1, end_line: 1, current_line: 1, selected_text: "A", context_before: "", context_after: "", comment: "handle this" };
+	send("1-comment", { comments: [comment], request: { kind: "ask" } });
+	await until(() => session.messages.length === 1, "the TUI to receive the headless owner's comment");
+	assert.equal(session.messages[0].message.details.files[0].review_comments[0].comment, "handle this");
+	send("2-message", { request: { kind: "message", text: "fallback" } });
+	await until(() => session.messages.length === 2, "the TUI to receive the unattributed message");
+	send("3-commit", { request: { kind: "commit-staged" } });
+	await until(() => session.messages.length === 3, "the TUI to receive the headless owner's commit request");
+	assert.equal(session.messages[2].message.details.request.kind, "commit-staged");
+	assert.equal(session.messages[2].message.details.commit_patch, undefined);
+
+	for (const target of ["headless-session", "pi-1", "legacy-session", "pi-2"]) {
+		const path = send(`4-target-${target}`, { target, request: { kind: "message", text: "stay pending" } });
+		// A later handoff has been processed only after the targeted batch was inspected.
+		send(`5-barrier-${target}`, { target: "tui-session", request: { kind: "message", text: "barrier" } });
+		const count = session.messages.length;
+		await until(() => session.messages.length > count, "the TUI-targeted handoff");
+		assert.ok(existsSync(path), "an ineligible explicit target stays pending");
+	}
+	assert.equal(session.messages.length, 7);
+
+	// A mode change must also stop a previously interactive hook.
+	session.ctx.mode = "rpc";
+	await session.emit("session_start", { reason: "reload" });
+	assert.equal(JSON.parse(readFileSync(join(states, "tui-session.json"), "utf8")).pid, undefined);
+	assert.equal(session.statuses.at(-1), undefined);
+});
+
+test("switching out of TUI mode leaves queued handoffs pending", async (t) => {
+	const w = workspace(t);
+	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });
+	w.stage("a.rs", "a\n");
+	w.commit();
+	const repo = realpathSync(w.repo);
+	const session = piSession(repo);
+	await session.emit("session_start", { reason: "startup" });
+	const outbox = join(repo, ".pi", "helix-review", "outbox");
+	let transition: Promise<unknown> | undefined;
+	const push = session.messages.push.bind(session.messages);
+	session.messages.push = (...messages) => {
+		const count = push(...messages);
+		if (count === 1) {
+			session.ctx.mode = "rpc";
+			transition = session.emit("session_start", { reason: "reload" });
+		}
+		return count;
+	};
+	for (let i = 0; i < 12; i++) {
+		writeFileSync(join(outbox, `${i}.json`), JSON.stringify({ format: "helix-review-batch", version: 2, files: [], comments: [], target: "session-1", request: { kind: "message", text: `${i}` } }));
+	}
+	await until(() => transition !== undefined, "the first delivery and mode switch");
+	await transition;
+	assert.equal(session.messages.length, 1);
+	const pending = readdirSync(outbox);
+	assert.equal(pending.length, 11);
+	assert.ok(pending.every((name) => name.endsWith(".json")), "no undelivered claim is stranded");
+});
+
+test("switching out of TUI mode restores a claimed handoff before delivery", async (t) => {
+	const w = workspace(t);
+	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });
+	const repo = realpathSync(w.repo);
+	const file = join(repo, "a.rs");
+	const oid = w.stage("a.rs", "a\n");
+	const head = w.commit();
+	const session = piSession(repo);
+	await session.emit("session_start", { reason: "startup" });
+	let release!: () => void;
+	let reached!: () => void;
+	const held = new Promise<void>((resolve) => { release = resolve; });
+	const paused = new Promise<void>((resolve) => { reached = resolve; });
+	const read = fs.readFile;
+	const probe = t.mock.method(fs, "readFile", async (...args: Parameters<typeof read>) => {
+		if (args[0] === file) { reached(); await held; }
+		return read(...args);
+	});
+	syncBuiltinESMExports();
+	t.after(() => { probe.mock.restore(); syncBuiltinESMExports(); });
+	const path = join(repo, ".pi", "helix-review", "outbox", "1.json");
+	writeFileSync(path, JSON.stringify({ format: "helix-review-batch", version: 2, files: [{ path: file, baseline: commitBase(head, oid) }], comments: [], target: "session-1", request: { kind: "message", text: "pending" } }));
+	await paused;
+	session.ctx.mode = "rpc";
+	const transition = session.emit("session_start", { reason: "reload" });
+	release();
+	await transition;
+	assert.equal(session.messages.length, 0);
+	assert.ok(existsSync(path));
+	assert.deepEqual(readdirSync(dirname(path)), ["1.json"]);
+});
+
+test("another TUI retries a restored handoff after its first recipient stops", async (t) => {
+	const w = workspace(t);
+	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });
+	const repo = realpathSync(w.repo);
+	const file = join(repo, "a.rs");
+	const oid = w.stage("a.rs", "a\n");
+	const head = w.commit();
+	const one = piSession(repo, "session-1");
+	await one.emit("session_start", { reason: "startup" });
+	const two = piSession(repo, "session-2");
+	await two.emit("session_start", { reason: "startup" });
+	const batch = join(repo, ".pi", "helix-review", "outbox", "1.json");
+	let releaseFirst!: () => void;
+	let releaseSecond!: () => void;
+	let claimed!: () => void;
+	let missed!: () => void;
+	const holdFirst = new Promise<void>((resolve) => { releaseFirst = resolve; });
+	const holdSecond = new Promise<void>((resolve) => { releaseSecond = resolve; });
+	const firstClaimed = new Promise<void>((resolve) => { claimed = resolve; });
+	const secondMissed = new Promise<void>((resolve) => { missed = resolve; });
+	const read = fs.readFile;
+	const stat = fs.stat;
+	let reads = 0;
+	const reading = t.mock.method(fs, "readFile", async (...args: Parameters<typeof read>) => {
+		if (args[0] === file) { claimed(); await holdFirst; }
+		return read(...args);
+	});
+	const stating = t.mock.method(fs, "stat", async (...args: Parameters<typeof stat>) => {
+		if (args[0] === batch && ++reads === 2) {
+			await holdSecond;
+			try { return await stat(...args); } finally { missed(); }
+		}
+		return stat(...args);
+	});
+	syncBuiltinESMExports();
+	t.after(() => { reading.mock.restore(); stating.mock.restore(); syncBuiltinESMExports(); });
+	writeFileSync(batch, JSON.stringify({ format: "helix-review-batch", version: 2, files: [{ path: file, baseline: commitBase(head, oid) }], comments: [], request: { kind: "message", text: "recover this" } }));
+	await firstClaimed;
+	releaseSecond();
+	await secondMissed;
+	one.ctx.mode = "rpc";
+	const stopping = one.emit("session_start", { reason: "reload" });
+	releaseFirst();
+	await stopping;
+	await until(() => two.messages.length === 1 && consumed(batch), "the surviving TUI to consume the restored batch");
+	assert.equal(one.messages.length, 0);
+	assert.equal(two.messages[0].message.details.request.text, "recover this");
+	assert.deepEqual(readdirSync(dirname(batch)), []);
+});
+
+test("worktree discovery cannot create a hook after the session leaves TUI mode", async (t) => {
+	const w = workspace(t);
+	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });
+	const repo = realpathSync(w.repo);
+	w.stage("a.rs", "a\n");
+	w.commit();
+	const worktree = join(w.root, "worktree");
+	git(repo, "worktree", "add", "-q", "-b", "other", worktree);
+	const session = piSession(repo);
+	await session.emit("session_start", { reason: "startup" });
+	let release!: () => void;
+	let reached!: () => void;
+	const held = new Promise<void>((resolve) => { release = resolve; });
+	const paused = new Promise<void>((resolve) => { reached = resolve; });
+	const realpath = fs.realpath;
+	const probe = t.mock.method(fs, "realpath", async (...args: Parameters<typeof realpath>) => {
+		if (args[0] === worktree) { reached(); await held; }
+		return realpath(...args);
+	});
+	syncBuiltinESMExports();
+	t.after(() => { probe.mock.restore(); syncBuiltinESMExports(); });
+	const editing = session.emit("tool_result", { toolName: "edit", input: { path: join(worktree, "a.rs") }, content: [], isError: false });
+	await paused;
+	session.ctx.mode = "rpc";
+	await session.emit("session_start", { reason: "reload" });
+	release();
+	await editing;
+	assert.ok(!existsSync(join(worktree, ".pi", "helix-review")));
+	assert.equal(session.messages.length, 0);
+	assert.equal(session.statuses.at(-1), undefined);
+});
+
+test("a manual import that crosses a TUI-to-RPC transition sends nothing", async (t) => {
+	const w = workspace(t);
+	const batch = w.batch({ format: "helix-review-batch", version: 2, files: [], comments: [], request: { kind: "message", text: "pending" } });
+	const session = piSession(w.root);
+	let release!: () => void;
+	let reached!: () => void;
+	const held = new Promise<void>((resolve) => { release = resolve; });
+	const paused = new Promise<void>((resolve) => { reached = resolve; });
+	const read = fs.readFile;
+	const probe = t.mock.method(fs, "readFile", async (...args: Parameters<typeof read>) => {
+		if (args[0] === batch) { reached(); await held; }
+		return read(...args);
+	});
+	syncBuiltinESMExports();
+	t.after(() => { probe.mock.restore(); syncBuiltinESMExports(); });
+	const importing = session.run(batch);
+	await paused;
+	session.ctx.mode = "rpc";
+	await session.emit("session_start", { reason: "reload" });
+	release();
+	await importing;
+	assert.equal(session.sent.length, 0);
+	assert.match(session.notes.at(-1)!.message, /no longer an interactive TUI/);
 });
 
 test("a batch nobody's changes explain goes to the least busy session, and dead sessions' state is removed", async (t) => {
@@ -1169,7 +1491,7 @@ test("a batch nobody's changes explain goes to the least busy session, and dead 
 	await idleShort.emit("agent_start");
 	await idleLong.emit("agent_start");
 	send();
-	await until(() => counts().reduce((a, b) => a + b) === 2, "the second handoff");
+	await until(() => counts().reduce((a, b) => a + b) === 2 && readdirSync(outbox).length === 0, "the second handoff and receipt");
 	assert.deepEqual(counts(), [1, 0, 1, 0], "with every session in a turn, the one whose turn started first");
 	assert.deepEqual(readdirSync(outbox), []);
 });
@@ -1253,13 +1575,13 @@ test("a commit the reviewer asked for moves every session's review to it, past s
 	assert.equal(sent(), `review-baseline ${second}`);
 	// A third live session holds a stale baseline on a side branch, older than anything to come.
 	const side = execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit-tree", `${first}^{tree}`, "-p", first, "-m", "side"], { cwd: repo, env: gitEnv, encoding: "utf8" }).trim();
-	writeFileSync(join(repo, ".pi", "helix-review", "state", "session-3.json"), JSON.stringify({ snapshots: {}, baseline: { commit_oid: side, acknowledged: false }, pid: process.pid }));
+	writeFileSync(join(repo, ".pi", "helix-review", "state", "session-3.json"), JSON.stringify({ snapshots: {}, baseline: { commit_oid: side, acknowledged: false }, pid: process.pid, tui: true }));
 
 	// The reviewer asks pi-1 to commit; its turn commits, and the review moves on for everyone.
 	const batch = join(outbox, "9-1.json");
 	writeFileSync(`${batch}.tmp`, JSON.stringify({ format: "helix-review-batch", version: 2, files: [], comments: [], request: { kind: "commit-staged" }, target: "pi-1" }));
 	renameSync(`${batch}.tmp`, batch);
-	await until(() => !existsSync(batch), "the batch to be consumed");
+	await until(() => consumed(batch), "the batch to be consumed");
 	await one.emit("agent_start");
 	await new Promise((wake) => setTimeout(wake, 1100));
 	w.stage("a.rs", "A\n");
@@ -1307,6 +1629,8 @@ test("pi's footer shows the session's Helix label, its worktree hooks and a miss
 	writeFileSync(file, "b\n");
 	await session.emit("tool_result", { toolName: "write", input: { path: file }, content: [], isError: false });
 	assert.equal(session.statuses.at(-1), "hx:pi-1+1");
+	// Finish the turn so its pending refresh completes before the workspace is removed.
+	await session.emit("agent_end", { messages: [] });
 
 	// Outside a repository there is nothing to show.
 	const elsewhere = piSession(w.root, "session-2");
@@ -1364,7 +1688,7 @@ test("edits in a worktree of the repository get their own hook, Helix and mailbo
 	const blob = git(wt.top, "rev-parse", `HEAD:wt.rs`);
 	writeFileSync(`${batch}.tmp`, JSON.stringify({ format: "helix-review-batch", version: 2, files: [{ path: wt.file, baseline: commitBase(wt.head, blob) }], comments: [] }));
 	renameSync(`${batch}.tmp`, batch);
-	await until(() => session.messages.length === 1 && !existsSync(batch), "the worktree's batch");
+	await until(() => session.messages.length === 1 && consumed(batch), "the worktree's batch");
 	await until(() => other.lines.at(-1) === "echo pi-1 received your review: 1 file with edits", "the receipt in the worktree's Helix");
 
 	// Bash changing another worktree is noticed at the end of the turn.
@@ -1565,7 +1889,7 @@ test("comments go to the owners of their hunks, and each owner commits only its 
 
 	// One batch with a comment on each session's hunk is split between them.
 	send("1-1.json", { comments: [comment(2, "on two"), comment(8, "on eight")] });
-	await until(() => one.messages.length === 1 && two.messages.length === 1, "each owner's share");
+	await until(() => one.messages.length === 1 && two.messages.length === 1 && readdirSync(outbox).length === 0, "each owner's share and receipts");
 	assert.deepEqual(commented(one), ["on two"]);
 	assert.deepEqual(commented(two), ["on eight"]);
 	assert.deepEqual(readdirSync(outbox), []);
@@ -1650,7 +1974,7 @@ test("baselines follow the branch through a rebase onto a newer base", async (t)
 		const stateDir = join(repo, ".pi", "helix-review", "state");
 		mkdirSync(stateDir, { recursive: true });
 		const pin = (id: string, oid: string, pid?: number, acknowledged = false) =>
-			writeFileSync(join(stateDir, `${id}.json`), JSON.stringify({ snapshots: {}, baseline: { commit_oid: oid, acknowledged }, pid }));
+			writeFileSync(join(stateDir, `${id}.json`), JSON.stringify({ snapshots: {}, baseline: { commit_oid: oid, acknowledged }, pid, tui: true }));
 		const sent = () => lines.find((line) => line.startsWith("review-baseline "))?.slice("review-baseline ".length);
 		// Starts a session and returns the baseline its first turn sends to Helix.
 		const turn = async (id: string) => {
@@ -1659,7 +1983,10 @@ test("baselines follow the branch through a rebase onto a newer base", async (t)
 			await session.emit("session_start", { reason: "startup" });
 			lines.splice(0);
 			await session.emit("agent_start");
-			return sent();
+			const baseline = sent();
+			// Later scenarios change the global socket; stop this poller before they do.
+			await session.emit("session_shutdown");
+			return baseline;
 		};
 		// Starts a session and returns the baseline it restores in Helix on attaching.
 		const attach = async (id: string) => {
@@ -1667,7 +1994,9 @@ test("baselines follow the branch through a rebase onto a newer base", async (t)
 			t.after(() => session.emit("session_shutdown"));
 			lines.splice(0);
 			await session.emit("session_start", { reason: "startup" });
-			return sent();
+			const baseline = sent();
+			await session.emit("session_shutdown");
+			return baseline;
 		};
 		const state = (id: string) => JSON.parse(readFileSync(join(stateDir, `${id}.json`), "utf8"));
 		return { c0, c1, c2, m1, head, pin, turn, attach, state, stateDir };
@@ -1695,7 +2024,7 @@ test("baselines follow the branch through a rebase onto a newer base", async (t)
 
 	// (e) A commit floor the rebase rewrote is remapped onto the rewritten commit.
 	const e = await scenario("e", ["main"]);
-	writeFileSync(join(e.stateDir, "session-1.json"), JSON.stringify({ snapshots: {}, baseline: { commit_oid: e.c0 }, pid: process.pid, commit_floor: e.c2 }));
+	writeFileSync(join(e.stateDir, "session-1.json"), JSON.stringify({ snapshots: {}, baseline: { commit_oid: e.c0 }, pid: process.pid, commit_floor: e.c2, tui: true }));
 	assert.equal(await e.attach("session-2"), e.head, "the rewritten floor");
 	assert.ok(log.mock.calls.some((call) => call.arguments[0] === `helix-review: baseline ${e.c2.slice(0, 8)} rewritten as ${e.head.slice(0, 8)} by a rebase`));
 });
@@ -1727,8 +2056,76 @@ test("an unreachable Helix never fails the hook, and an empty handoff is dropped
 			comments: [],
 		}),
 	);
-	await until(() => !existsSync(batch), "the batch to be consumed");
+	await until(() => consumed(batch), "the batch to be consumed");
 	assert.equal(session.messages.length, 0);
 	const state = JSON.parse(readFileSync(join(repo, ".pi", "helix-review", "state", "session-1.json"), "utf8"));
 	assert.deepEqual(state.baseline, { commit_oid: head });
+});
+
+test("concurrent lifecycle saves use unique temporaries and leave a complete latest session state", async (t) => {
+	const w = workspace(t);
+	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });
+	w.stage("a.rs", "a\n");
+	w.commit();
+	const session = piSession(w.repo);
+	await session.emit("session_start", { reason: "startup" });
+	const stateFile = join(w.repo, ".pi", "helix-review", "state", "session-1.json");
+	const renaming = fs.rename;
+	const temporaries: string[] = [];
+	const probe = t.mock.method(fs, "rename", async (...args: Parameters<typeof renaming>) => {
+		if (args[1] === stateFile) {
+			temporaries.push(String(args[0]));
+			// Widen the overlap between saves requested by independent lifecycle events.
+			await new Promise((wake) => setTimeout(wake, 10));
+		}
+		return renaming(...args);
+	});
+	syncBuiltinESMExports();
+	t.after(() => { probe.mock.restore(); syncBuiltinESMExports(); });
+	await Promise.all(Array.from({ length: 8 }, () => session.emit("agent_start")));
+	await session.emit("session_shutdown");
+	assert.ok(temporaries.length >= 8);
+	assert.equal(new Set(temporaries).size, temporaries.length);
+	const state = JSON.parse(readFileSync(stateFile, "utf8"));
+	assert.equal(state.pid, undefined);
+	assert.equal(state.in_turn, undefined);
+	assert.ok(!readdirSync(dirname(stateFile)).some((name) => name.endsWith(".tmp")));
+});
+
+test("shutdown drains a scheduled refresh that has already started", async (t) => {
+	const w = workspace(t);
+	withEnv(t, { HELIX_COMMAND_SOCKET: join(w.root, "missing.sock") });
+	const file = join(w.repo, "a.rs");
+	w.stage("a.rs", "a\n");
+	w.commit();
+	const session = piSession(w.repo);
+	await session.emit("session_start", { reason: "startup" });
+	await session.emit("agent_start");
+	// Refresh checks the other session's state while choosing its review baseline.
+	const other = join(w.repo, ".pi", "helix-review", "state", "other.json");
+	writeFileSync(other, JSON.stringify({ snapshots: {}, pid: 0 }));
+	const nativeTimeout = setTimeout;
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	await session.emit("tool_result", { toolName: "edit", input: { path: file }, content: [], isError: false });
+	let release!: () => void;
+	let reached!: () => void;
+	const held = new Promise<void>((resolve) => { release = resolve; });
+	const reading = new Promise<void>((resolve) => { reached = resolve; });
+	const read = fs.readFile;
+	const probe = t.mock.method(fs, "readFile", async (...args: Parameters<typeof read>) => {
+		if (args[0] === other) { reached(); await held; }
+		return read(...args);
+	});
+	syncBuiltinESMExports();
+	t.after(() => { release(); probe.mock.restore(); syncBuiltinESMExports(); });
+	t.mock.timers.tick(200);
+	await reading;
+	const stopping = session.emit("session_shutdown");
+	const stoppedEarly = await Promise.race([
+		stopping.then(() => true),
+		new Promise<boolean>((resolve) => nativeTimeout(() => resolve(false), 50)),
+	]);
+	release();
+	await stopping;
+	assert.equal(stoppedEarly, false, "shutdown returned while a refresh still read session state");
 });

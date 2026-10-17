@@ -42,8 +42,134 @@ pub(super) async fn run(program: &str, args: &[&str], cwd: &Path) -> anyhow::Res
     Ok(String::from_utf8(output.stdout)?)
 }
 
+pub(super) const LOADING_MESSAGE: &str =
+    "pull request is loading; navigation will be ready when checkout finishes";
+
 const PR_FIELDS: &str =
     "number,title,url,headRefOid,baseRefName,baseRefOid,isCrossRepository,headRepositoryOwner";
+
+/// Attach the already checked-out PR without changing branches, the index or saved edits.
+pub(super) fn review_pr_attach(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    ensure!(!cx.editor.review_pr_loading, LOADING_MESSAGE);
+    let workspace = helix_loader::find_workspace().0;
+    ensure!(
+        !cx.editor
+            .documents()
+            .any(|doc| doc.is_modified()
+                && doc.path().is_some_and(|path| path.starts_with(&workspace))),
+        "save or undo unsaved buffers before attaching a pull request"
+    );
+    let arg = args[0].to_owned();
+    if cx.editor.review_pr.as_ref().is_some_and(|pr| pr.url == arg) {
+        let pr = cx.editor.review_pr.as_ref().unwrap();
+        let head = git(&["rev-parse", "HEAD"], &workspace)?;
+        ensure!(
+            String::from_utf8_lossy(&head).trim() == pr.head_oid,
+            "the checked-out commit changed since the pull request was attached"
+        );
+        return Ok(());
+    }
+    ensure!(
+        cx.editor.review_pr_comments.is_empty(),
+        "pending pull request comments must be submitted or removed before attaching another PR"
+    );
+    cx.editor.review_pr_loading = true;
+    cx.editor
+        .set_status(format!("Attaching pull request {arg}…"));
+    cx.jobs.callback(async move {
+        let result = fetch_attachment(&arg, &workspace).await;
+        let callback = move |editor: &mut Editor| {
+            editor.review_pr_loading = false;
+            let result =
+                result.and_then(|pr| {
+                    let head = git(&["rev-parse", "HEAD"], &workspace)?;
+                    ensure!(
+                        String::from_utf8_lossy(&head).trim() == pr.head_oid,
+                        "the checkout changed while the PR was loading; attach it again"
+                    );
+                    ensure!(!editor.documents().any(|doc| doc.is_modified()
+                    && doc.path().is_some_and(|path| path.starts_with(&workspace))),
+                    "buffers changed while the PR was loading; save or undo before attaching it");
+                    ensure!(
+                        editor.review_pr_comments.is_empty(),
+                        "pending comments changed while the PR was loading; they were kept"
+                    );
+                    start(editor, pr)
+                });
+            match result {
+                Ok(pr) => Some(load_threads(pr)),
+                Err(err) => {
+                    editor.set_error(format!("{err:#}"));
+                    None
+                }
+            }
+        };
+        Ok(Callback::Followup(Box::new(callback)))
+    });
+    Ok(())
+}
+
+async fn fetch_attachment(arg: &str, cwd: &Path) -> anyhow::Result<PullRequest> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct View {
+        number: u64,
+        title: String,
+        url: String,
+        head_ref_oid: String,
+        base_ref_name: String,
+        base_ref_oid: String,
+    }
+    let view: View = serde_json::from_str(
+        &run(
+            &gh_program(),
+            &["pr", "view", arg, "--json", PR_FIELDS],
+            cwd,
+        )
+        .await?,
+    )
+    .context("unexpected gh pr view output")?;
+    let head = run("git", &["rev-parse", "HEAD"], cwd).await?;
+    ensure!(
+        head.trim() == view.head_ref_oid,
+        "this checkout is not PR #{}'s current head; check out the PR before attaching it",
+        view.number
+    );
+    let merge_base = run(
+        "git",
+        &["merge-base", &view.base_ref_oid, &view.head_ref_oid],
+        cwd,
+    )
+    .await
+    .context("PR base commit is unavailable locally; fetch the base branch before attaching")?;
+    let previous = run("git", &["symbolic-ref", "--short", "-q", "HEAD"], cwd)
+        .await
+        .unwrap_or_else(|_| head.clone());
+    let url = helix_stdx::Url::parse(&view.url).context("invalid PR URL from gh")?;
+    let parts: Vec<_> = url.path().trim_matches('/').split('/').collect();
+    ensure!(
+        parts.len() == 4 && parts[2] == "pull" && parts[3] == view.number.to_string(),
+        "unexpected PR URL from gh"
+    );
+    Ok(PullRequest {
+        number: view.number,
+        title: view.title,
+        repo: format!("{}/{}", parts[0], parts[1]),
+        url: view.url,
+        head_oid: view.head_ref_oid,
+        base_ref: view.base_ref_name,
+        merge_base: merge_base.trim().to_owned(),
+        previous: previous.trim().to_owned(),
+        batch_dir: None,
+    })
+}
 
 /// Looks up pull request `arg` (a number or URL), checks it out and finds its merge base.
 async fn fetch_and_checkout(
@@ -114,6 +240,7 @@ pub(super) fn review_pr(
     if event != PromptEvent::Validate {
         return Ok(());
     }
+    ensure!(!cx.editor.review_pr_loading, LOADING_MESSAGE);
     if &args[0] == "close" {
         let pr = cx
             .editor
@@ -145,13 +272,17 @@ pub(super) fn review_pr(
     let batch_dir = args.get(1).map(helix_stdx::path::canonicalize);
     cx.editor
         .set_status(format!("Checking out pull request {arg}…"));
+    cx.editor.review_pr_loading = true;
     cx.jobs.callback(async move {
         let result = fetch_and_checkout(&arg, batch_dir, &workspace).await;
-        let callback = move |editor: &mut Editor| match result.and_then(|pr| start(editor, pr)) {
-            Ok(pr) => Some(load_threads(pr)),
-            Err(err) => {
-                editor.set_error(format!("{err:#}"));
-                None
+        let callback = move |editor: &mut Editor| {
+            editor.review_pr_loading = false;
+            match result.and_then(|pr| start(editor, pr)) {
+                Ok(pr) => Some(load_threads(pr)),
+                Err(err) => {
+                    editor.set_error(format!("{err:#}"));
+                    None
+                }
             }
         };
         Ok(Callback::Followup(Box::new(callback)))
@@ -428,9 +559,20 @@ pub(crate) fn restore_branch(pr: &PullRequest, cwd: &Path) -> String {
 /// reloads the unmodified buffers, returning the status of the checkout.
 fn end_review(editor: &mut Editor, pr: &PullRequest) -> String {
     editor.review_user_pin = None;
+    editor.review_baseline = None;
+    editor.review_hook_baseline = None;
+    editor.review_nav = None;
     editor.review_pr_threads.clear();
     editor.share_review_threads();
-    let restored = restore_branch(pr, &helix_loader::find_workspace().0);
+    let workspace = helix_loader::find_workspace().0;
+    let restored = restore_branch(pr, &workspace);
+    let trust_full = editor
+        .workspace_trust
+        .query(&workspace, helix_loader::workspace_trust::TrustQuery::Git)
+        .is_trusted();
+    for doc in editor.documents.values_mut() {
+        doc.close_review(&editor.diff_providers, trust_full);
+    }
     let doc_ids: Vec<_> = editor
         .documents()
         .filter(|doc| !doc.is_modified() && doc.path().is_some_and(|path| path.exists()))
@@ -439,8 +581,6 @@ fn end_review(editor: &mut Editor, pr: &PullRequest) -> String {
     for doc_id in doc_ids {
         if let Err(err) = super::typed::reload_document(editor, doc_id) {
             log::info!("not reloading a buffer after the pull request review: {err:#}");
-        } else if let Err(err) = editor.start_baseline_review(doc_id) {
-            log::info!("not reviewing a reloaded buffer: {err:#}");
         }
     }
     restored

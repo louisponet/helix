@@ -236,6 +236,8 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
                 "a" => review_ask_prompt,
                 "C" => review_comments_picker,
                 "u" => review_uncomment_latest,
+                "v" => review_mark_change,
+                "V" => review_unmark_change,
                 "s" => review_toggle_stage,
                 "r" => review_revert_change,
                 "x" => review_close_buffer,

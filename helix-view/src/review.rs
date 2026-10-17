@@ -1,6 +1,6 @@
 //! Inline review of a document against an index or commit snapshot.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::ops;
@@ -250,6 +250,14 @@ pub enum HunkStage {
     Committed,
 }
 
+/// Exact content and coordinates of a reviewed change within one immutable baseline.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ReviewedHunk {
+    before: ops::Range<usize>,
+    after: ops::Range<usize>,
+    text: String,
+}
+
 /// A review of a document against an immutable Git snapshot.
 #[derive(Debug)]
 pub struct Review {
@@ -273,6 +281,9 @@ pub struct Review {
     comments: Vec<(&'static str, ReviewComment)>,
     /// The owners of each block, by its first 0-based document line, until the next edit.
     owners: Vec<(usize, String)>,
+    hunk_ids: Vec<ReviewedHunk>,
+    reviewed: HashSet<ReviewedHunk>,
+    deleted_file: bool,
 }
 
 impl Review {
@@ -306,7 +317,11 @@ impl Review {
             threads: Vec::new(),
             comments: Vec::new(),
             owners: Vec::new(),
+            hunk_ids: Vec::new(),
+            reviewed: HashSet::new(),
+            deleted_file: false,
         };
+        review.update_reviewed(doc);
         review.update_blocks();
         Ok(review)
     }
@@ -326,13 +341,20 @@ impl Review {
             self.hunks.clear();
             self.blocks.clear();
             self.focus.clear();
+            self.hunk_ids.clear();
+            self.reviewed.clear();
             return;
         };
         self.hunks = hunks;
+        self.update_reviewed(doc);
         // The ledger's lines no longer match the document.
         self.owners.clear();
         self.update_staged(doc);
         self.update_blocks();
+        self.retain_focus();
+    }
+
+    fn retain_focus(&mut self) {
         // Focus is kept in snapshot coordinates and stays valid while its old lines are
         // still removed from the document.
         let focus = std::mem::take(&mut self.focus);
@@ -347,6 +369,89 @@ impl Review {
                     })
             })
             .collect();
+    }
+
+    fn update_reviewed(&mut self, doc: &Rope) {
+        self.hunk_ids = self
+            .hunks
+            .iter()
+            .map(|hunk| {
+                let before = hunk.before.start as usize..hunk.before.end as usize;
+                let after = hunk.after.start as usize..hunk.after.end as usize;
+                let text = doc
+                    .slice(doc.line_to_char(after.start)..doc.line_to_char(after.end))
+                    .to_string();
+                ReviewedHunk {
+                    before,
+                    after,
+                    text,
+                }
+            })
+            .collect();
+        let current: HashSet<_> = self.hunk_ids.iter().collect();
+        self.reviewed.retain(|identity| current.contains(identity));
+    }
+
+    /// The current change: old focus wins; otherwise only the primary cursor is considered.
+    pub fn hunk_for_cursor(&self, view: ViewId, line: usize) -> Option<usize> {
+        if let Some(block) = self.focused_block_index(view).map(|idx| &self.blocks[idx]) {
+            return self.hunks.iter().position(|hunk| {
+                hunk.before.start as usize == block.old.start
+                    && hunk.after.start as usize == block.current.start
+                    && hunk.after.end as usize == block.current.end
+            });
+        }
+        let hunk = helix_vcs::find_hunk(&self.hunks, &(line..line + 1))?;
+        self.hunks
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, hunk))
+    }
+
+    pub fn hunk_stage(&self, index: usize) -> HunkStage {
+        self.stage(index)
+    }
+
+    pub fn hunk_reviewed(&self, index: usize) -> bool {
+        self.hunk_ids
+            .get(index)
+            .is_some_and(|identity| self.reviewed.contains(identity))
+    }
+
+    /// Sets local reading progress; this never changes the git index.
+    pub fn set_hunk_reviewed(&mut self, index: usize, reviewed: bool) {
+        let Some(identity) = self.hunk_ids.get(index) else {
+            return;
+        };
+        if reviewed {
+            self.reviewed.insert(identity.clone());
+        } else {
+            self.reviewed.remove(identity);
+        }
+    }
+
+    /// Eligible changes in order, with their first document line and local reading progress.
+    pub fn review_changes(
+        &self,
+        include_uncommitted: bool,
+    ) -> impl Iterator<Item = (usize, usize, bool)> + '_ {
+        self.hunks
+            .iter()
+            .enumerate()
+            .filter(move |(idx, _)| include_uncommitted || self.is_committed(*idx))
+            .map(|(idx, hunk)| (idx, hunk.after.start as usize, self.hunk_reviewed(idx)))
+    }
+
+    pub fn reviewed_hunks(&self) -> usize {
+        self.reviewed.len()
+    }
+
+    /// Whether commands opened this as an empty, read-only view of a deleted file.
+    pub fn is_deleted_file(&self) -> bool {
+        self.deleted_file
+    }
+
+    pub fn set_deleted_file(&mut self, deleted: bool) {
+        self.deleted_file = deleted;
     }
 
     fn update_blocks(&mut self) {
@@ -377,8 +482,20 @@ impl Review {
         &self.baseline
     }
 
-    /// The status shown when the review starts.
+    /// The status shown when the review starts, including retained local reading progress.
     pub fn summary(&self) -> String {
+        let mut summary = self.change_summary();
+        if !self.reviewed.is_empty() {
+            summary.push_str(&format!(
+                "; {}/{} changes reviewed",
+                self.reviewed.len(),
+                self.hunks.len()
+            ));
+        }
+        summary
+    }
+
+    fn change_summary(&self) -> String {
         if self.hunks.is_empty() {
             return format!("Reviewing against the {}: no changes", self.baseline);
         }
@@ -496,8 +613,15 @@ impl Review {
         self.threads = threads;
     }
 
-    /// Keeps the threads and pending comments of `previous`, the review this one replaces.
+    /// Keeps threads, pending comments and valid old selections when replacing the same baseline.
     pub fn keep_threads(&mut self, previous: Review) {
+        if self.baseline == previous.baseline && self.snapshot == previous.snapshot {
+            self.focus = previous.focus;
+            self.retain_focus();
+            self.reviewed = previous.reviewed;
+            let current: HashSet<_> = self.hunk_ids.iter().collect();
+            self.reviewed.retain(|identity| current.contains(identity));
+        }
         self.threads = previous.threads;
         self.comments = previous.comments;
     }
@@ -864,6 +988,67 @@ impl Review {
     }
 }
 
+#[cfg(test)]
+mod reviewed_tests {
+    use super::*;
+
+    fn baseline(commit: char) -> ReviewBaseline {
+        ReviewBaseline::GitCommit {
+            commit_oid: commit.to_string().repeat(40),
+            blob_oid: Some("blob".into()),
+        }
+    }
+
+    #[test]
+    fn reviewed_changes_invalidate_only_changed_hunks_and_never_return_on_undo() {
+        let before = Rope::from("a\nb\nc\nd\ne\nf\n");
+        let after = Rope::from("a\nB\nc\nd\ne\nF\n");
+        let mut review = Review::new(before, baseline('a'), &after).unwrap();
+        assert_eq!(review.hunk_count(), 2);
+        review.set_hunk_reviewed(0, true);
+        review.set_hunk_reviewed(1, true);
+        review.update(&Rope::from("a\nBB\nc\nd\ne\nF\n"));
+        assert!(!review.hunk_reviewed(0));
+        assert!(review.hunk_reviewed(1));
+        review.update(&after);
+        assert!(!review.hunk_reviewed(0));
+        assert!(review.hunk_reviewed(1));
+        review.set_hunk_reviewed(1, false);
+        assert_eq!(review.reviewed_hunks(), 0);
+    }
+
+    #[test]
+    fn reviewed_changes_survive_same_review_refresh_but_not_rebased_content() {
+        let before = Rope::from("before\n");
+        let after = Rope::from("after\n");
+        let mut previous = Review::new(before.clone(), baseline('a'), &after).unwrap();
+        previous.set_hunk_reviewed(0, true);
+        let mut refreshed = Review::new(before.clone(), baseline('a'), &after).unwrap();
+        refreshed.keep_threads(previous);
+        assert!(refreshed.hunk_reviewed(0));
+        let mut rebased = Review::new(before, baseline('b'), &after).unwrap();
+        rebased.keep_threads(refreshed);
+        assert_eq!(rebased.reviewed_hunks(), 0);
+    }
+
+    #[test]
+    fn reviewed_deletion_uses_focused_old_block_without_changing_git_stage() {
+        let before = Rope::from("keep\ngone\nend\n");
+        let after = Rope::from("keep\nend\n");
+        let mut review = Review::new(before, baseline('a'), &after).unwrap();
+        review.set_index(b"keep\nend\n", Some(b"keep\nend\n"), &after);
+        let view = ViewId::default();
+        review.focus_block(view, 0);
+        let current = review.hunk_for_cursor(view, 999).unwrap();
+        assert_eq!(current, 0);
+        assert_eq!(review.hunk_stage(current), HunkStage::Committed);
+        review.set_hunk_reviewed(current, true);
+        assert!(review.hunk_reviewed(current));
+        assert_eq!(review.hunk_stage(current), HunkStage::Committed);
+        assert_eq!(review.snapshot(), "keep\ngone\nend\n");
+    }
+}
+
 fn clamp_range(range: Range, text: RopeSlice, span: ops::Range<usize>) -> Range {
     let clamped = Range {
         anchor: range.anchor.clamp(span.start, span.end),
@@ -1190,9 +1375,21 @@ impl ReviewBatch {
         self.target.as_deref()
     }
 
-    /// Writes the files accepted by `include` and their comments as JSON to the new file `path`
-    /// and removes them from the batch. Nothing is removed if writing fails.
-    pub fn export(&mut self, path: &Path, include: impl Fn(&Path) -> bool) -> Result<()> {
+    /// Writes accepted files and comments as JSON, limiting asks to commented paths.
+    /// Exported entries are removed; excluded entries and failed writes remain pending.
+    pub fn export(&mut self, path: &Path, include_file: impl Fn(&Path) -> bool) -> Result<()> {
+        let comment_paths = matches!(self.request, Some(ReviewRequest::Ask)).then(|| {
+            self.comments
+                .iter()
+                .map(|comment| comment.path.clone())
+                .collect::<HashSet<_>>()
+        });
+        let include = |file: &Path| {
+            include_file(file)
+                && comment_paths
+                    .as_ref()
+                    .is_none_or(|paths| paths.contains(file))
+        };
         #[derive(Serialize)]
         struct File<'a> {
             path: &'a Path,

@@ -10,7 +10,7 @@ use helix_core::graphemes::prev_grapheme_boundary;
 use helix_core::line_ending::line_end_char_index;
 use helix_core::text_annotations::TextAnnotations;
 use helix_view::review::{
-    NavFile, OldFocus, Review, ReviewComment, ReviewNav, ReviewRequest, ReviewSide,
+    HunkStage, NavFile, OldFocus, Review, ReviewComment, ReviewNav, ReviewRequest, ReviewSide,
 };
 
 use helix_loader::workspace_trust::TrustQuery;
@@ -21,9 +21,735 @@ use super::*;
 
 const OLD_FOCUS_HELP: &str = "Old text (read-only): move, select, y yank, ]g/[g next/prev block, :review-comment <text>, Esc returns";
 
+/// Mobile actions call review operations directly so selections and literal text survive.
+pub(crate) fn run_terminal_action(
+    cx: &mut compositor::Context,
+    action: crate::review_transport::Action,
+    text: Option<&str>,
+) -> anyhow::Result<()> {
+    use crate::review_transport::Action;
+    ensure!(
+        cx.editor.review_handoff_dir().is_some()
+            || matches!(action, Action::OpenFile | Action::Files),
+        "Review feedback requires a Git repository with a commit and an active T3 review bridge"
+    );
+    match action {
+        Action::OpenFile => open_terminal_location(cx, text.context("missing HX location")?),
+        Action::DiscardLastComment => {
+            ensure!(
+                cx.editor.review_batch.remove_latest_comments(1) > 0,
+                "no pending comment to discard"
+            );
+            cx.editor.share_review_comments();
+            cx.editor.set_status("Last pending comment discarded");
+            Ok(())
+        }
+        Action::Comment => {
+            ensure!(
+                cx.editor.review_handoff_dir().is_some(),
+                "no review handoff directory"
+            );
+            let text = text
+                .filter(|text| !text.trim().is_empty())
+                .context("the comment is empty")?;
+            ensure_review(cx)?;
+            let comments = selection_comments(cx.editor, text, true)?;
+            for comment in comments {
+                cx.editor.review_batch.add_comment(comment);
+            }
+            cx.editor.share_review_comments();
+            cx.editor
+                .set_status("Comment saved; Send delivers pending feedback");
+            Ok(())
+        }
+        Action::Files if cx.editor.review_handoff_dir().is_none() => {
+            open_plain_file_picker(cx);
+            Ok(())
+        }
+        Action::Files => review_files(cx, Args::default(), PromptEvent::Validate),
+        Action::Previous => review_prev(cx, Args::default(), PromptEvent::Validate),
+        Action::Next => review_next(cx, Args::default(), PromptEvent::Validate),
+        Action::Stage => {
+            ensure!(review_controls(cx.editor).can_stage, "Stage is only available on an uncommitted change; use Mark reviewed for committed or pull request changes");
+            review_stage(cx, Args::default(), PromptEvent::Validate)
+        }
+        Action::MarkReviewed => set_change_reviewed(cx, true),
+        Action::UnmarkReviewed => set_change_reviewed(cx, false),
+        Action::Ask => send_comments_inner(cx, text.context("the comment is empty")?, false),
+        Action::Send => send_message(cx, None, text),
+        Action::PrReview | Action::PrComment | Action::PrSuggestion | Action::PrComplete => {
+            unreachable!("PR draft actions are handled by the review transport")
+        }
+    }
+}
+
+fn open_plain_file_picker(cx: &mut compositor::Context) {
+    cx.jobs.callback(async {
+        let callback: job::Callback = Callback::EditorCompositor(Box::new(|editor, compositor| {
+            let picker = ui::file_picker(editor, helix_stdx::env::current_working_dir());
+            compositor.push(Box::new(overlaid(picker)));
+        }));
+        Ok(callback)
+    });
+}
+
+#[derive(serde::Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum LocationSide {
+    Old,
+    New,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TerminalLocation {
+    file_path: Option<String>,
+    line: Option<usize>,
+    column: Option<usize>,
+    side: Option<LocationSide>,
+    baseline: Option<String>,
+    revision: Option<String>,
+    #[serde(default)]
+    ignore_whitespace: bool,
+    file_paths: Option<Vec<String>>,
+    worktree_path: Option<String>,
+}
+
+pub(super) fn review_launch_ready(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event == PromptEvent::Validate {
+        ensure!(
+            cx.editor.socket_command,
+            "launcher readiness must come from the command socket"
+        );
+        validate_launch_pr(
+            args.first(),
+            cx.editor.review_pr.as_ref().map(|pr| pr.url.as_str()),
+            cx.editor.review_pr_loading,
+        )?;
+        cx.editor.review_launch_ready = true;
+    }
+    Ok(())
+}
+
+fn validate_launch_pr(
+    expected: Option<&str>,
+    attached: Option<&str>,
+    loading: bool,
+) -> anyhow::Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    ensure!(!loading, super::review_pr::LOADING_MESSAGE);
+    let actual = attached.context("the requested pull request failed to attach; reopen after resolving the HX attachment error")?;
+    let expected = Url::parse(expected).context("invalid expected pull request URL")?;
+    let actual = Url::parse(actual).context("invalid attached pull request URL")?;
+    ensure!(
+        expected
+            .as_str()
+            .trim_end_matches('/')
+            .eq_ignore_ascii_case(actual.as_str().trim_end_matches('/')),
+        "the editor attached a different pull request; reopen the intended review"
+    );
+    Ok(())
+}
+
+pub(super) fn review_open(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event == PromptEvent::Validate {
+        open_terminal_location(cx, &args[0])?;
+    }
+    Ok(())
+}
+
+pub(super) fn open_terminal_location(
+    cx: &mut compositor::Context,
+    text: &str,
+) -> anyhow::Result<()> {
+    let location: TerminalLocation = serde_json::from_str(text)?;
+    ensure!(
+        location.line.is_none_or(|line| line > 0)
+            && location.column.is_none_or(|column| column > 0),
+        "location coordinates must be positive"
+    );
+    ensure!(
+        location.file_path.is_some() || (location.line.is_none() && location.column.is_none()),
+        "location requires a file"
+    );
+    let workspace = std::fs::canonicalize(helix_stdx::env::current_working_dir())?;
+    if let Some(expected) = &location.worktree_path {
+        ensure!(
+            std::fs::canonicalize(expected)? == workspace,
+            "location belongs to another worktree"
+        );
+    }
+    let repo = if location.baseline.is_some() || location.revision.is_some() {
+        let output = std::process::Command::new("git")
+            .current_dir(&workspace)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .context("comparisons require Git")?;
+        ensure!(
+            output.status.success(),
+            "comparisons require a Git repository with a commit"
+        );
+        std::fs::canonicalize(String::from_utf8(output.stdout)?.trim())?
+    } else {
+        workspace.clone()
+    };
+    let path = location
+        .file_path
+        .as_ref()
+        .map(|path| -> anyhow::Result<_> {
+            ensure!(
+                !path.is_empty() && !path.chars().any(char::is_control),
+                "invalid file path"
+            );
+            if location.revision.is_some() {
+                let path = std::path::Path::new(path);
+                ensure!(
+                    !path
+                        .components()
+                        .any(|part| matches!(part, std::path::Component::ParentDir)),
+                    "invalid snapshot path"
+                );
+                let path = repo.join(path);
+                ensure!(path.starts_with(&repo), "file is outside this worktree");
+                return Ok(path);
+            }
+            let candidate = helix_stdx::path::canonicalize(workspace.join(path));
+            ensure!(
+                candidate.starts_with(&workspace),
+                "file is outside this worktree"
+            );
+            if candidate.exists() {
+                let path = std::fs::canonicalize(candidate)?;
+                ensure!(
+                    path.starts_with(&workspace) && path.is_file(),
+                    "location is outside this worktree or is not a file"
+                );
+                return Ok(path);
+            }
+            let ancestor = candidate
+                .ancestors()
+                .find(|path| path.exists())
+                .context("file has no existing parent")?;
+            ensure!(
+                std::fs::canonicalize(ancestor)?.starts_with(&workspace),
+                "file is outside this worktree"
+            );
+            let baseline = location
+                .baseline
+                .as_deref()
+                .or(cx.editor.review_baseline.as_deref())
+                .unwrap_or("HEAD");
+            let base = cx.editor.diff_providers.get_commit_base(
+                &candidate,
+                baseline,
+                doc_trust_full(cx.editor),
+            )?;
+            ensure!(
+                base.blob_id.is_some(),
+                "file does not exist in the worktree or review baseline"
+            );
+            ensure!(
+                !cx.editor
+                    .document_by_path(&candidate)
+                    .is_some_and(Document::is_modified),
+                "deleted file has unsaved changes; preserve them before reviewing its deletion"
+            );
+            Ok(candidate)
+        })
+        .transpose()?;
+    if location.revision.is_some() {
+        let diff = checkpoint_snapshot(&repo, &location, path.as_deref())?;
+        let doc_id = match cx
+            .editor
+            .review_snapshot
+            .filter(|id| cx.editor.documents.contains_key(id))
+        {
+            Some(id) => {
+                cx.editor.switch(id, Action::Replace);
+                id
+            }
+            None => {
+                let id = cx.editor.new_file(Action::Replace);
+                cx.editor.review_snapshot = Some(id);
+                id
+            }
+        };
+        fill_review_diff(cx.editor, doc_id, diff)?;
+        cx.editor.set_status(
+            "Historical checkpoint snapshot; open the current file to edit or send feedback",
+        );
+        return Ok(());
+    }
+    if let Some(baseline) = &location.baseline {
+        ensure!(
+            !baseline.is_empty() && !baseline.chars().any(char::is_control),
+            "invalid review baseline"
+        );
+        let trust_full = cx
+            .editor
+            .workspace_trust
+            .query(&repo, TrustQuery::Git)
+            .is_trusted();
+        let commit = cx
+            .editor
+            .diff_providers
+            .resolve_commit(&repo, baseline, trust_full)?;
+        ensure!(
+            cx.editor
+                .diff_providers
+                .is_in_head_history(&repo, &commit, trust_full)?,
+            "baseline is not in this branch's history"
+        );
+        if let Some(path) = &path {
+            ensure!(!cx.editor.document_by_path(path).is_some_and(|doc| doc.is_modified() && doc.review.as_ref().is_none_or(|review| review.baseline().revision() != Some(commit.as_str()))), "this file has unsaved changes under another review baseline; save or preserve them before changing its review scope");
+        }
+        pin_review_baseline(cx.editor, &commit)?;
+        set_user_pin(cx.editor, &commit);
+    }
+    if let Some(path) = path {
+        if path.exists() {
+            cx.editor.open(&path, Action::Replace)?;
+        } else {
+            let commit = cx
+                .editor
+                .review_baseline
+                .clone()
+                .unwrap_or_else(|| "HEAD".to_owned());
+            let providers = &cx.editor.diff_providers;
+            let trust = doc_trust_full(cx.editor);
+            let in_head = providers
+                .get_commit_base(&path, "HEAD", trust)?
+                .blob_id
+                .is_none();
+            let in_index = providers.get_index_base(&path, trust)?.0.is_empty();
+            open_review_nav_file(
+                cx,
+                &NavFile {
+                    path,
+                    deleted: true,
+                    added: false,
+                    in_head,
+                    in_index,
+                },
+                &commit,
+            )?;
+        }
+        if location.side == Some(LocationSide::Old) {
+            ensure_review(cx)?;
+            let (view, doc) = current!(cx.editor);
+            let review = doc.review.as_mut().context("file has no review baseline")?;
+            let line = location.line.unwrap_or(1) - 1;
+            let block = review
+                .blocks()
+                .iter()
+                .position(|block| block.old.contains(&line))
+                .context("requested old line is not in a removed or replaced block")?;
+            review.focus_block(view.id, block);
+            review.update_focus(view.id, |text, focus, _| {
+                let start = text.line_to_char(line);
+                let end = line_end_char_index(&text, line);
+                let pos = start
+                    .saturating_add(location.column.unwrap_or(1) - 1)
+                    .min(end);
+                OldFocus {
+                    range: Range::point(pos).min_width_1(text),
+                    ..focus
+                }
+            });
+            align_view(doc, view, Align::Center);
+            return Ok(());
+        }
+        let (view, doc) = current!(cx.editor);
+        if let Some(review) = doc.review.as_mut() {
+            review.clear_focus(view.id);
+        }
+        let text = doc.text().slice(..);
+        let line = location
+            .line
+            .unwrap_or(1)
+            .saturating_sub(1)
+            .min(text.len_lines().saturating_sub(1));
+        let start = text.line_to_char(line);
+        let end = line_end_char_index(&text, line);
+        let pos = start
+            .saturating_add(location.column.unwrap_or(1).saturating_sub(1))
+            .min(end);
+        doc.set_selection(view.id, Selection::point(pos));
+        align_view(doc, view, Align::Center);
+        Ok(())
+    } else if cx.editor.review_handoff_dir().is_none() {
+        open_plain_file_picker(cx);
+        Ok(())
+    } else {
+        review_next(cx, Args::default(), PromptEvent::Validate)
+    }
+}
+
+fn checkpoint_snapshot(
+    repo: &Path,
+    location: &TerminalLocation,
+    path: Option<&Path>,
+) -> anyhow::Result<String> {
+    let revision = location
+        .revision
+        .as_ref()
+        .context("snapshot requires a revision")?;
+    let baseline = location
+        .baseline
+        .as_ref()
+        .context("snapshot requires a baseline")?;
+    let resolve = |revision: &str| -> anyhow::Result<String> {
+        ensure!(
+            !revision.is_empty()
+                && revision.len() <= 2048
+                && !revision.chars().any(char::is_control),
+            "invalid snapshot revision"
+        );
+        let output = std::process::Command::new("git")
+            .current_dir(repo)
+            .args([
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{revision}^{{commit}}"),
+            ])
+            .output()?;
+        ensure!(output.status.success(), "checkpoint is unavailable");
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    };
+    // Root commits compare against the empty tree, which is a tree object rather than a commit.
+    let empty_tree = std::process::Command::new("git")
+        .current_dir(repo)
+        .args(["hash-object", "-t", "tree", "--stdin"])
+        .output()?;
+    ensure!(
+        empty_tree.status.success(),
+        "cannot determine the repository's empty tree"
+    );
+    let empty_tree = String::from_utf8(empty_tree.stdout)?.trim().to_owned();
+    let baseline = if baseline == &empty_tree {
+        empty_tree
+    } else {
+        resolve(baseline)?
+    };
+    let revision = resolve(revision)?;
+    if let Some(paths) = &location.file_paths {
+        ensure!(
+            paths.len() <= 1000
+                && paths.iter().all(|path| !path.is_empty()
+                    && !path.chars().any(char::is_control)
+                    && !std::path::Path::new(path).is_absolute()
+                    && !std::path::Path::new(path)
+                        .components()
+                        .any(|part| matches!(part, std::path::Component::ParentDir))),
+            "invalid checkpoint file filter"
+        );
+    }
+    let mut command = std::process::Command::new("git");
+    command.current_dir(repo).args([
+        "--literal-pathspecs",
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+    ]);
+    if location.ignore_whitespace {
+        command.arg("--ignore-all-space");
+    }
+    command.args([&baseline, &revision, "--"]);
+    if let Some(path) = path {
+        if let Some(paths) = &location.file_paths {
+            ensure!(
+                paths.iter().any(|filter| repo.join(filter) == path),
+                "file is outside the checkpoint comparison"
+            );
+        }
+        command.arg(path);
+    } else if let Some(paths) = &location.file_paths {
+        ensure!(
+            !paths.is_empty(),
+            "no authored files in this checkpoint comparison"
+        );
+        command.args(paths);
+    }
+    let output = command.output()?;
+    ensure!(
+        output.status.success(),
+        "cannot read the requested checkpoint diff: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ensure!(
+        output.stdout.len() <= 8 * 1024 * 1024,
+        "snapshot diff exceeds 8 MiB; choose a file"
+    );
+    let diff = format!(
+        "Checkpoint snapshot {} → {} (read-only)\n\n{}",
+        baseline,
+        revision,
+        String::from_utf8_lossy(&output.stdout)
+    );
+    Ok(diff)
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub(crate) struct ReviewControls {
+    pub can_stage: bool,
+    pub can_mark_reviewed: bool,
+    pub reviewed: Option<bool>,
+    pub reviewed_count: usize,
+    pub total_count: usize,
+}
+
+/// Cheap current-file controls, using the diff metadata already loaded by HX.
+pub(crate) fn review_controls(editor: &Editor) -> ReviewControls {
+    let (view, doc) = current_ref!(editor);
+    let Some(review) = doc.review.as_ref().filter(|review| !review.is_suspended()) else {
+        return ReviewControls::default();
+    };
+    if editor.review_diff == Some(doc.id()) || editor.review_pr_loading {
+        return ReviewControls::default();
+    }
+    let pr = editor.review_pr.is_some();
+    let (reviewed_count, total_count) = review
+        .review_changes(pr)
+        .fold((0, 0), |(reviewed, total), (_, _, marked)| {
+            (reviewed + usize::from(marked), total + 1)
+        });
+    let cursor = doc
+        .selection(view.id)
+        .primary()
+        .cursor_line(doc.text().slice(..));
+    let current = review.hunk_for_cursor(view.id, cursor);
+    let markable = current.filter(|&idx| pr || review.hunk_stage(idx) == HunkStage::Committed);
+    ReviewControls {
+        can_stage: !pr
+            && !doc.is_modified()
+            && current.is_some_and(|idx| review.hunk_stage(idx) == HunkStage::Unstaged),
+        can_mark_reviewed: markable.is_some(),
+        reviewed: markable.map(|idx| review.hunk_reviewed(idx)),
+        reviewed_count,
+        total_count,
+    }
+}
+
+/// Marks exactly the primary change (or focused old block); secondary selections are untouched.
+pub(crate) fn set_change_reviewed(
+    cx: &mut compositor::Context,
+    reviewed: bool,
+) -> anyhow::Result<()> {
+    ensure_review(cx)?;
+    ensure!(
+        review_controls(cx.editor).can_mark_reviewed,
+        "Mark reviewed is only available on a committed or pull request change"
+    );
+    let (view, doc) = current!(cx.editor);
+    let cursor = doc
+        .selection(view.id)
+        .primary()
+        .cursor_line(doc.text().slice(..));
+    let review = doc.review.as_mut().unwrap();
+    let current = review
+        .hunk_for_cursor(view.id, cursor)
+        .context("no review change here")?;
+    review.set_hunk_reviewed(current, reviewed);
+    if !reviewed {
+        announce_review_progress(cx.editor, "Marked unreviewed");
+        return Ok(());
+    }
+    match next_unreviewed_change(cx, current) {
+        Ok(true) => announce_review_progress(cx.editor, "Marked reviewed; next"),
+        Ok(false) => {
+            let scope = if cx.editor.review_pr.is_some() {
+                "All changes"
+            } else {
+                "All committed changes"
+            };
+            cx.editor.set_status(format!(
+                "{scope} reviewed; Previous revisits a change, :review-unmark undoes its mark"
+            ));
+        }
+        Err(err) => cx.editor.set_status(format!(
+            "Marked reviewed; could not find the next change: {err:#}"
+        )),
+    }
+    Ok(())
+}
+
+fn announce_review_progress(editor: &mut Editor, prefix: &str) {
+    let controls = review_controls(editor);
+    let name = doc!(editor).display_name().into_owned();
+    let state = match controls.reviewed {
+        Some(true) => "reviewed",
+        Some(false) => "unreviewed",
+        None => "no current change",
+    };
+    editor.set_status(format!(
+        "{prefix}: {name}, {state}; {}/{} reviewed",
+        controls.reviewed_count, controls.total_count
+    ));
+}
+
+fn next_unreviewed_change(
+    cx: &mut compositor::Context,
+    current_hunk: usize,
+) -> anyhow::Result<bool> {
+    let pr = cx.editor.review_pr.is_some();
+    let next = doc!(cx.editor).review.as_ref().and_then(|review| {
+        review
+            .review_changes(pr)
+            .find(|(idx, _, reviewed)| *idx > current_hunk && !reviewed)
+            .map(|(_, line, _)| line)
+    });
+    if let Some(line) = next {
+        land_on_hunk(cx.editor, line);
+        return Ok(true);
+    }
+    let original = doc!(cx.editor).id();
+    let original_path = doc!(cx.editor).path().map(Path::to_path_buf);
+    let nav = review_nav(cx)?;
+    let start = nav
+        .files
+        .iter()
+        .position(|file| Some(&file.path) == original_path.as_ref());
+    let len = nav.files.len();
+    let order: Vec<usize> = match start {
+        Some(start) => (1..=len).map(|step| (start + step) % len).collect(),
+        None => (0..len).collect(),
+    };
+    let mut unavailable = Vec::new();
+    for idx in order {
+        let file = &nav.files[idx];
+        if let Err(err) = open_review_nav_file(cx, file, &nav.commit) {
+            log::info!(
+                "not reviewing {} while advancing: {err:#}",
+                file.path.display()
+            );
+            unavailable.push(file.path.display().to_string());
+            continue;
+        }
+        let next = doc!(cx.editor).review.as_ref().and_then(|review| {
+            review
+                .review_changes(pr)
+                .find(|(_, _, reviewed)| !reviewed)
+                .map(|(_, line, _)| line)
+        });
+        if let Some(line) = next {
+            land_on_hunk(cx.editor, line);
+            return Ok(true);
+        }
+    }
+    cx.editor.switch(original, Action::Replace);
+    ensure!(
+        unavailable.is_empty(),
+        "could not review {}; skipped unreadable or oversized changes",
+        unavailable.join(", ")
+    );
+    Ok(false)
+}
+
+fn open_review_nav_file(
+    cx: &mut compositor::Context,
+    file: &NavFile,
+    commit: &str,
+) -> anyhow::Result<()> {
+    cx.editor.open(&file.path, Action::Replace)?;
+    if file.deleted {
+        // A deleted file is an empty, read-only review buffer; opening it never recreates it.
+        let (view, doc) = current!(cx.editor);
+        ensure!(
+            !doc.is_modified(),
+            "{} has unsaved changes; preserve them before reviewing its deletion",
+            doc.display_name()
+        );
+        // New-file buffers contain a default line ending, but a deletion has zero bytes.
+        if doc.text().len_chars() > 0 {
+            let transaction =
+                Transaction::change(doc.text(), [(0, doc.text().len_chars(), None)].into_iter());
+            doc.apply(&transaction, view.id);
+            doc.append_changes_to_history(view);
+            doc.reset_modified();
+        }
+        let doc = doc!(cx.editor);
+        if doc.review.is_none() {
+            let review = doc.load_review(
+                &cx.editor.diff_providers,
+                doc_trust_full(cx.editor),
+                Some(commit),
+            )?;
+            doc_mut!(cx.editor).set_review(review);
+        }
+        let doc = doc_mut!(cx.editor);
+        doc.readonly = true;
+        if let Some(review) = doc.review.as_mut() {
+            review.set_deleted_file(true);
+        }
+        if file.in_head && file.in_index {
+            let text = doc.text().clone();
+            if let Some(review) = doc.review.as_mut() {
+                let bytes = text.to_string();
+                review.set_index(bytes.as_bytes(), Some(bytes.as_bytes()), &text);
+            }
+        }
+        Ok(())
+    } else {
+        let doc = doc_mut!(cx.editor);
+        if doc.review.as_ref().is_some_and(Review::is_deleted_file) {
+            doc.detect_readonly();
+            if let Some(review) = doc.review.as_mut() {
+                review.set_deleted_file(false);
+            }
+        }
+        ensure_review(cx)?;
+        ensure!(
+            !doc!(cx.editor)
+                .review
+                .as_ref()
+                .is_some_and(Review::is_suspended),
+            Review::LIMIT_MESSAGE
+        );
+        Ok(())
+    }
+}
+
+pub(super) fn review_mark(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event == PromptEvent::Validate {
+        set_change_reviewed(cx, true)
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) fn review_unmark(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event == PromptEvent::Validate {
+        set_change_reviewed(cx, false)
+    } else {
+        Ok(())
+    }
+}
+
 /// Typable commands allowed while old text is focused. Only `review-revert` modifies a document,
 /// and it leaves the old text first.
 const OLD_FOCUS_TYPABLE: &[&str] = &[
+    "review-mark",
+    "review-unmark",
     "review-revert",
     "review-stage",
     "review-unstage",
@@ -45,6 +771,8 @@ const OLD_FOCUS_TYPABLE: &[&str] = &[
 /// Static review commands (the `G` menu) allowed while old text is focused; each runs a command
 /// of [`OLD_FOCUS_TYPABLE`] or opens the prompt for one.
 const OLD_FOCUS_STATIC: &[&str] = &[
+    "review_mark_change",
+    "review_unmark_change",
     "review_old_text",
     "review_comment_prompt",
     "review_ask_prompt",
@@ -196,7 +924,8 @@ fn review_nav(cx: &mut compositor::Context) -> anyhow::Result<ReviewNav> {
             let path = change.path().to_path_buf();
             let head = providers.get_commit_base(&path, "HEAD", trust_full);
             if let FileChange::Deleted { .. } = change {
-                let in_head = !path.exists() && head.is_err();
+                let in_head =
+                    !path.exists() && head.as_ref().is_ok_and(|base| base.blob_id.is_none());
                 return NavFile {
                     path,
                     deleted: true,
@@ -244,14 +973,33 @@ fn jump_change_by(cx: &mut compositor::Context, forward: bool, count: usize) -> 
     cx.editor.nav_mode = helix_view::editor::NavMode::Review;
     let nav = review_nav(cx)?;
     let commit = &nav.commit;
-    let every = nav.all_committed(cx.editor);
+    let progress = cx.editor.documents().any(|doc| {
+        doc.review
+            .as_ref()
+            .is_some_and(|review| review.reviewed_hunks() > 0)
+    });
+    let every = cx.editor.review_pr.is_some()
+        || progress
+        || review_controls(cx.editor).can_mark_reviewed
+        || nav.all_committed(cx.editor);
     let blocks: fn(&Review) -> Vec<ops::Range<usize>> = if every {
         Review::hunk_lines
     } else {
         Review::uncommitted_hunk_lines
     };
     // Deleted files have nothing to land on.
-    let files: Vec<&NavFile> = nav.files.iter().filter(|file| !file.deleted).collect();
+    let files: Vec<&NavFile> = nav
+        .files
+        .iter()
+        .filter(|file| {
+            !file.deleted
+                || cx.editor.document_by_path(&file.path).is_some_and(|doc| {
+                    doc.review
+                        .as_ref()
+                        .is_some_and(|review| review.reviewed_hunks() > 0)
+                })
+        })
+        .collect();
     ensure!(!files.is_empty(), "no changes since {}", &commit[..8]);
     if let Err(err) = ensure_review(cx) {
         log::info!("not enabling review: {err:#}");
@@ -295,8 +1043,7 @@ fn jump_change_by(cx: &mut compositor::Context, forward: bool, count: usize) -> 
             if !every && file.in_head && !modified {
                 continue;
             }
-            cx.editor.open(&file.path, Action::Replace)?;
-            if let Err(err) = ensure_review(cx) {
+            if let Err(err) = open_review_nav_file(cx, file, commit) {
                 log::info!("not enabling review: {err:#}");
             }
             let hunks = doc!(cx.editor)
@@ -336,6 +1083,14 @@ fn jump_change_by(cx: &mut compositor::Context, forward: bool, count: usize) -> 
             .set_status(format!("{name}: hunk {} of {}", idx + 1, hunks.len())),
         None => cx.editor.set_status(format!("{name}: no hunks to show")),
     }
+    if progress && review_controls(cx.editor).total_count > 0 {
+        let status = cx
+            .editor
+            .get_status()
+            .map(|(status, _)| status.to_owned())
+            .unwrap_or_default();
+        announce_review_progress(cx.editor, &status);
+    }
     Ok(())
 }
 
@@ -361,7 +1116,17 @@ pub(crate) fn old_focused(editor: &Editor) -> bool {
 }
 
 pub(super) fn typable_allowed(editor: &Editor, name: &str) -> bool {
-    !old_focused(editor) || OLD_FOCUS_TYPABLE.contains(&name)
+    !old_focused(editor)
+        || OLD_FOCUS_TYPABLE.contains(&name)
+        || editor.socket_command
+            && matches!(
+                name,
+                "echo"
+                    | "review-open"
+                    | "review-launch-ready"
+                    | "review-handoff"
+                    | "review-baseline"
+            )
 }
 
 /// Formats `count` followed by `noun`, pluralized with a trailing "s" unless `count` is 1.
@@ -805,7 +1570,7 @@ pub(super) fn review_ask(
 
 /// Comments with `text` on the focused old text, or on the primary selection (every selection
 /// range if `all_ranges`) of the current buffer.
-fn selection_comments(
+pub(super) fn selection_comments(
     editor: &Editor,
     text: &str,
     all_ranges: bool,
@@ -897,13 +1662,25 @@ fn enclosing_text(doc: &Document, range: Range) -> Option<String> {
 /// Comments with `text` on every selection (or the selected old text) and hands the review off
 /// at once as a question, writing the buffer first if it is modified.
 fn send_comments(cx: &mut compositor::Context, text: &str) -> anyhow::Result<()> {
+    send_comments_inner(cx, text, true)
+}
+
+fn send_comments_inner(
+    cx: &mut compositor::Context,
+    text: &str,
+    parse_target: bool,
+) -> anyhow::Result<()> {
     ensure!(
         cx.editor.review_handoff_dir().is_some(),
         "no review handoff directory, use :review-handoff <dir> first"
     );
     ensure!(doc!(cx.editor).path().is_some(), "buffer has no path");
     ensure_review(cx)?;
-    let (target, message) = split_target(Some(text));
+    let (target, message) = if parse_target {
+        split_target(Some(text))
+    } else {
+        (None, (!text.trim().is_empty()).then_some(text))
+    };
     let message = message.context("the comment is empty")?;
     let comments = selection_comments(cx.editor, message, true)?;
     let count = comments.len();
@@ -1383,6 +2160,10 @@ fn step_baseline(cx: &mut compositor::Context, base: &str, older: bool) -> anyho
 /// set, then starts reviewing the current buffer against it if it is a workspace file without a
 /// review that the reviewer did not close under that baseline.
 fn ensure_review(cx: &mut compositor::Context) -> anyhow::Result<()> {
+    ensure!(
+        !cx.editor.review_pr_loading,
+        super::review_pr::LOADING_MESSAGE
+    );
     let doc = doc!(cx.editor);
     // A buffer under review, whatever its baseline, or the diff buffer needs nothing more.
     if doc.review.is_some() || cx.editor.review_diff == Some(doc.id()) {
@@ -1420,6 +2201,10 @@ fn refresh_staging(editor: &mut Editor, path: &Path, trust_full: bool) {
 
 /// The editor-wide review baseline, pinning `HEAD` like `:review-baseline HEAD` when none is set.
 fn review_baseline_or_head(cx: &mut compositor::Context) -> anyhow::Result<String> {
+    ensure!(
+        !cx.editor.review_pr_loading,
+        super::review_pr::LOADING_MESSAGE
+    );
     if cx.editor.review_baseline.is_none() {
         pin_review_baseline(cx.editor, "HEAD")
             .context("no review baseline, and HEAD cannot be resolved")?;
@@ -1478,14 +2263,38 @@ pub(super) fn pin_review_baseline(editor: &mut Editor, revision: &str) -> anyhow
             Some(review) if refresh => review.baseline().revision().map(str::to_owned),
             _ => Some(commit.clone()),
         };
-        let result = reload_document(editor, doc_id).and_then(|()| {
+        let deleted = doc.review.as_ref().is_some_and(Review::is_deleted_file)
+            && doc.path().is_some_and(|path| {
+                path.metadata()
+                    .is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound)
+            });
+        let reloaded = if deleted {
+            Ok(())
+        } else {
+            reload_document(editor, doc_id)
+        };
+        let result = reloaded.and_then(|()| {
             let doc = doc_mut!(editor, &doc_id);
             let trust_full = editor
                 .workspace_trust
                 .query(doc.workspace_root(), TrustQuery::Git)
                 .is_trusted();
-            let review =
+            let mut review =
                 doc.load_review(&editor.diff_providers, trust_full, revision.as_deref())?;
+            if deleted {
+                review.set_deleted_file(true);
+                if doc.path().is_some_and(|path| {
+                    editor
+                        .diff_providers
+                        .get_commit_base(path, "HEAD", trust_full)
+                        .is_ok_and(|head| head.blob_id.is_none())
+                }) {
+                    let bytes = doc.text().to_string();
+                    review.set_index(bytes.as_bytes(), Some(bytes.as_bytes()), doc.text());
+                }
+            } else if doc.review.as_ref().is_some_and(Review::is_deleted_file) {
+                doc.detect_readonly();
+            }
             doc.set_review(review);
             Ok(())
         });
@@ -1555,7 +2364,16 @@ pub(super) fn review_handoff(
     }
 
     if &args[0] == "clear" {
+        ensure!(
+            args.len() == 1,
+            "review-handoff clear does not take a label"
+        );
+        ensure!(
+            cx.editor.review_send_on_write.is_none(),
+            "a review comment is being saved; wait before changing the handoff directory"
+        );
         cx.editor.review_handoff = None;
+        cx.editor.review_handoff_label = None;
         cx.editor.set_status("Review handoff cleared");
         return Ok(());
     }
@@ -1565,11 +2383,24 @@ pub(super) fn review_handoff(
         "{} is not an absolute path to a directory",
         dir.display()
     );
+    let label = args.get(1).map(|label| label.trim());
+    ensure!(
+        args.get(1).is_none_or(|label| !label
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}')))
+            && label.is_none_or(|label| (1..=120).contains(&label.chars().count())),
+        "review handoff label must be a single line of 1 to 120 characters without control characters"
+    );
+    ensure!(
+        cx.editor.review_send_on_write.is_none() || cx.editor.review_handoff.as_ref() == Some(&dir),
+        "a review comment is being saved; wait before changing the handoff directory"
+    );
     cx.editor.set_status(format!(
         "Review handoffs export review batches to {}",
         dir.display()
     ));
     cx.editor.review_handoff = Some(dir);
+    cx.editor.review_handoff_label = label.map(str::to_owned);
     Ok(())
 }
 
@@ -1581,10 +2412,18 @@ pub(super) fn review_send(
     if event != PromptEvent::Validate {
         return Ok(());
     }
+    let (target, text) = split_target(args.first());
+    send_message(cx, target, text)
+}
+
+fn send_message(
+    cx: &mut compositor::Context,
+    target: Option<String>,
+    text: Option<&str>,
+) -> anyhow::Result<()> {
     if let Err(err) = ensure_review(cx) {
         log::info!("not enabling review: {err:#}");
     }
-    let (target, text) = split_target(args.first());
     let request = text.map(|text| ReviewRequest::Message {
         text: text.to_owned(),
     });
@@ -1649,6 +2488,14 @@ pub(super) fn ensure_reviews_saved(editor: &Editor, command: &str) -> anyhow::Re
     let unsaved: Vec<_> = editor
         .documents()
         .filter(|doc| doc.review.is_some() && doc.is_modified())
+        .filter(|doc| {
+            command != ":review-comment"
+                || editor
+                    .review_batch
+                    .comments()
+                    .iter()
+                    .any(|comment| Some(comment.path.as_path()) == doc.path())
+        })
         .map(|doc| doc.display_name().into_owned())
         .collect();
     ensure!(
@@ -2589,11 +3436,15 @@ fn refresh_review_diff(editor: &mut Editor) {
 /// Toggles the staging of the review hunk under the cursor when the buffer is reviewed or is the
 /// `:review-diff` buffer, and does nothing otherwise, so it can own a key that is otherwise free.
 pub(crate) fn review_stage_hunk(cx: &mut Context) {
+    if cx.editor.review_pr_loading {
+        cx.editor.set_error(super::review_pr::LOADING_MESSAGE);
+        return;
+    }
     let doc = doc!(cx.editor);
     if doc.review.is_none() && cx.editor.review_diff != Some(doc.id()) {
         // Outside a review, Enter only takes over on an unstaged change of a workspace file,
         // and then enables the review first so the same press stages.
-        if !on_unstaged_change(cx.editor) {
+        if cx.editor.review_pr.is_none() && !on_unstaged_change(cx.editor) {
             return;
         }
         let mut cx = compositor::Context {
@@ -2616,7 +3467,7 @@ pub(crate) fn review_stage_hunk(cx: &mut Context) {
     }
 }
 
-/// The `G s` key: toggles the staging like `:review-toggle-stage`, or jumps on like Enter.
+/// The review stage key: stages uncommitted work, or marks a committed change like Enter.
 pub(crate) fn review_toggle_stage_key(cx: &mut Context) {
     let mut cx = compositor::Context {
         editor: cx.editor,
@@ -2631,12 +3482,18 @@ pub(crate) fn review_toggle_stage_key(cx: &mut Context) {
 
 /// Toggles the staging of the hunks under the selections; when there is none to stage in a
 /// reviewed buffer, jumps to the next unstaged hunk instead, across files. With everything since
-/// the baseline committed, only jumps, to the next changed block.
+/// the baseline committed, records the current change as reviewed and advances.
 fn toggle_or_jump(cx: &mut compositor::Context) -> anyhow::Result<()> {
+    if review_controls(cx.editor).can_mark_reviewed {
+        return set_change_reviewed(cx, true);
+    }
+    if cx.editor.review_pr.is_some() {
+        return jump_on(cx, true, true);
+    }
     if !reviewed(cx.editor) {
         return stage_and_move_on(cx, Staging::Toggle);
     }
-    let every = everything_committed(cx);
+    let every = cx.editor.review_pr.is_some() || everything_committed(cx);
     if !every {
         match stage_and_move_on(cx, Staging::Toggle) {
             Err(err) if err.to_string() == NOTHING_TO_STAGE => (),
@@ -2654,10 +3511,18 @@ pub(crate) fn review_jump_prev(cx: &mut Context) {
         jobs: cx.jobs,
         scroll: None,
     };
-    if !reviewed(cx.editor) {
+    if !reviewed(cx.editor) && cx.editor.review_pr.is_none() {
         return;
     }
-    let every = everything_committed(&mut cx);
+    let progress = cx.editor.documents().any(|doc| {
+        doc.review
+            .as_ref()
+            .is_some_and(|review| review.reviewed_hunks() > 0)
+    });
+    let every = cx.editor.review_pr.is_some()
+        || progress
+        || review_controls(cx.editor).can_mark_reviewed
+        || everything_committed(&mut cx);
     if let Err(err) = jump_on(&mut cx, false, every) {
         cx.editor.set_error(format!("{err:#}"));
     }
@@ -3047,4 +3912,95 @@ fn move_old_selection(
         "select_all" => Range::new(block.start, block.end),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod checkpoint_snapshot_tests {
+    use super::*;
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    #[test]
+    fn pr_launch_requires_completed_matching_attachment() {
+        let expected = Some("https://github.com/Owner/Repo/pull/1");
+        assert!(validate_launch_pr(expected, None, true)
+            .unwrap_err()
+            .to_string()
+            .contains("loading"));
+        assert!(validate_launch_pr(expected, None, false).is_err());
+        assert!(validate_launch_pr(
+            expected,
+            Some("https://github.com/Owner/Repo/pull/2"),
+            false
+        )
+        .is_err());
+        assert!(validate_launch_pr(
+            expected,
+            Some("https://github.com/owner/repo/pull/1"),
+            false
+        )
+        .is_ok());
+        assert!(validate_launch_pr(None, None, false).is_ok());
+    }
+
+    #[test]
+    fn checkpoint_diff_uses_immutable_revisions_and_authored_literal_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q"]);
+        git(repo, &["config", "user.email", "test@example.invalid"]);
+        git(repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("authored.txt"), "old checkpoint\n").unwrap();
+        std::fs::write(repo.join("imported.txt"), "imported old\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "before"]);
+        let before = git(repo, &["rev-parse", "HEAD"]);
+        let empty_tree = git(repo, &["hash-object", "-t", "tree", "--stdin"]);
+        let root: TerminalLocation = serde_json::from_value(serde_json::json!({ "baseline": empty_tree, "revision": before, "filePaths": ["authored.txt"] })).unwrap();
+        let root_diff = checkpoint_snapshot(repo, &root, None).unwrap();
+        assert!(root_diff.contains("+old checkpoint"));
+        assert!(root_diff.contains("new file mode"));
+
+        std::fs::write(repo.join("authored.txt"), "new checkpoint\n").unwrap();
+        std::fs::write(repo.join("imported.txt"), "imported new\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "after"]);
+        let after = git(repo, &["rev-parse", "HEAD"]);
+        git(
+            repo,
+            &[
+                "update-ref",
+                "refs/t3/orchestration-v2/checkpoints/test/1",
+                &after,
+            ],
+        );
+        std::fs::write(repo.join("authored.txt"), "unsaved live worktree\n").unwrap();
+        let location: TerminalLocation = serde_json::from_value(serde_json::json!({
+            "baseline": before, "revision": "refs/t3/orchestration-v2/checkpoints/test/1",
+            "filePaths": ["authored.txt"]
+        }))
+        .unwrap();
+        let diff = checkpoint_snapshot(repo, &location, None).unwrap();
+        assert!(diff.contains("-old checkpoint"));
+        assert!(diff.contains("+new checkpoint"));
+        assert!(!diff.contains("imported.txt"));
+        assert!(!diff.contains("unsaved live worktree"));
+        assert!(checkpoint_snapshot(repo, &location, Some(&repo.join("imported.txt"))).is_err());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("authored.txt")).unwrap(),
+            "unsaved live worktree\n"
+        );
+    }
 }

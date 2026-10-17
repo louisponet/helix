@@ -82,7 +82,7 @@ Normal mode is the default mode when you launch helix. You can return to it from
 | `O`         | Open new line above selection                                        | `open_above`              |
 | `.`         | Repeat last insert                                                   | N/A                       |
 | `u`         | Undo change                                                          | `undo`                    |
-| `Enter`     | Stage or unstage the review hunk under the cursor, or jump to the next unstaged one (any next block when everything is committed; only while [reviewing](./review.md)) | `review_stage_hunk` |
+| `Enter`     | Stage or unstage uncommitted work; mark a committed or pull request change reviewed and advance (only while [reviewing](./review.md)) | `review_stage_hunk` |
 | `Shift-Enter` | Jump back to the previous unstaged review hunk (any previous block when everything is committed; only while [reviewing](./review.md)) | `review_jump_prev` |
 | `U`         | Redo change                                                          | `redo`                    |
 | `Alt-u`     | Move backward in history                                             | `earlier`                 |
@@ -374,6 +374,8 @@ the [inline review](./review.md) and start one against `HEAD` when needed.
 | `C` | Pick a pending review comment                                | `review_comments_picker` |
 | `u` | Drop the latest pending review comment                       | `review_uncomment_latest`|
 | `s` | Stage or unstage the review hunks the selections touch       | `review_toggle_stage`    |
+| `v` | Mark the current committed or pull request change reviewed and advance | `review_mark_change` |
+| `V` | Mark the current change unreviewed without moving             | `review_unmark_change` |
 | `r` | Revert the change under the cursor to the review baseline    | `review_revert_change`   |
 | `x` | Close the review of the buffer                               | `review_close_buffer`    |
 | `b` | Pick the review baseline from the history of HEAD            | `review_baseline_picker` |

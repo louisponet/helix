@@ -1299,8 +1299,10 @@ pub struct Editor {
     pub review_batch: ReviewBatch,
     /// Commit that documents in the workspace are reviewed against, see `:review-baseline`.
     pub review_baseline: Option<String>,
-    /// Directory that writes of reviewed documents export review batches to.
+    /// Directory that explicit review handoffs export review batches to.
     pub review_handoff: Option<PathBuf>,
+    /// Display name for the handoff destination, independent of a batch's `@target`.
+    pub review_handoff_label: Option<String>,
     /// The baseline the reviewer chose (`G b`, `G -`, `G +` or a typed `:review-baseline`) over
     /// the one the pi hook sent; while set, the hook's `:review-baseline` only refreshes it.
     pub review_user_pin: Option<String>,
@@ -1313,6 +1315,7 @@ pub struct Editor {
     pub nav_mode: NavMode,
     /// The GitHub pull request under review, see `:review-pr`.
     pub review_pr: Option<crate::review::PullRequest>,
+    pub review_pr_loading: bool,
     /// The pull request's comment threads, shown in the reviews of their files.
     pub review_pr_threads: Vec<crate::review::ReviewThread>,
     /// Comments pending for the pull request, posted by `:review-submit` rather than handed to pi.
@@ -1323,6 +1326,8 @@ pub struct Editor {
     pub review_target: Option<String>,
     /// The scratch buffer `:review-diff` writes to.
     pub review_diff: Option<DocumentId>,
+    pub review_snapshot: Option<DocumentId>,
+    pub review_launch_ready: bool,
     /// What review navigation last found changed since the baseline, while still valid.
     pub review_nav: Option<crate::review::ReviewNav>,
 
@@ -1504,16 +1509,20 @@ impl Editor {
             review_batch: ReviewBatch::default(),
             review_baseline: None,
             review_handoff: None,
+            review_handoff_label: None,
             review_target: None,
             review_user_pin: None,
             review_hook_baseline: None,
             review_send_on_write: None,
             nav_mode: NavMode::Review,
             review_pr: None,
+            review_pr_loading: false,
             review_pr_threads: Vec::new(),
             review_pr_comments: Vec::new(),
             socket_command: false,
             review_diff: None,
+            review_snapshot: None,
+            review_launch_ready: false,
             review_nav: None,
             debug_adapters: dap::registry::Registry::new(),
             breakpoints: HashMap::new(),

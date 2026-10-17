@@ -180,6 +180,40 @@ async fn send_keys(app: &mut Application, keys: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+const REVIEW_TOUCH_NONCE: &str = "c983fb0c-3199-4018-9b03-25bd24f498b8";
+
+fn touch_app(repo: &Repo) -> anyhow::Result<Application> {
+    let previous = std::env::var_os("HELIX_REVIEW_ACTION_TOKEN");
+    std::env::set_var("HELIX_REVIEW_ACTION_TOKEN", REVIEW_TOUCH_NONCE);
+    let app = repo.app();
+    match previous {
+        Some(value) => std::env::set_var("HELIX_REVIEW_ACTION_TOKEN", value),
+        None => std::env::remove_var("HELIX_REVIEW_ACTION_TOKEN"),
+    }
+    app
+}
+
+fn touch_frame(id: usize, action: &str, text: Option<&str>) -> String {
+    let mut payload = serde_json::json!({
+        "v": 1,
+        "id": format!("a4f9d271-dcae-40fe-8bec-{id:012}"),
+        "action": action,
+    });
+    if let Some(text) = text {
+        payload["text"] = text.into();
+    }
+    touch_json_frame(&payload)
+}
+
+fn touch_json_frame(payload: &serde_json::Value) -> String {
+    let encoded: String = serde_json::to_vec(payload)
+        .unwrap()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("# hx-review:{REVIEW_TOUCH_NONCE}:{encoded}")
+}
+
 /// Sets the working directory, and so the workspace, until dropped.
 struct Cwd(PathBuf);
 
@@ -2016,6 +2050,146 @@ async fn one_enter_stages_without_or_right_after_a_review() -> anyhow::Result<()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn review_mark_committed_primary_changes_advance_and_can_be_unmarked() -> anyhow::Result<()> {
+    let before = "a\nb\nc\nd\ne\nf\n";
+    let after = "a\nB\nc\nd\ne\nF\n";
+    let repo = Repo::new(before, before, before);
+    let _cwd = Cwd::enter(repo.dir.path());
+    let baseline = git_ok(repo.dir.path(), &["rev-parse", "HEAD"]);
+    repo.write(after);
+    fs::write(repo.dir.path().join("other.txt"), "other\n")?;
+    git_ok(repo.dir.path(), &["add", "."]);
+    git_ok(repo.dir.path(), &["commit", "-m", "agent work"]);
+    let index = git_ok(repo.dir.path(), &["write-tree"]);
+    let mut app = repo.app()?;
+    let pin = format!(":review-baseline {baseline}<ret>");
+    send_keys(&mut app, &pin).await?;
+    // Multiple selections still mark only the primary current change.
+    {
+        let (view, doc) = helix_view::current!(app.editor);
+        let selection = helix_core::Selection::new(
+            smallvec::smallvec![
+                Range::point(doc.text().line_to_char(1)),
+                Range::point(doc.text().line_to_char(5)),
+            ],
+            0,
+        );
+        doc.set_selection(view.id, selection);
+    }
+    send_keys(&mut app, ":review-mark<ret>").await?;
+    assert_status_not_error(&app.editor);
+    let (view, doc) = current_ref!(app.editor);
+    let review = doc.review.as_ref().unwrap();
+    assert!(review.hunk_reviewed(0));
+    assert!(!review.hunk_reviewed(1));
+    assert_eq!(
+        doc.selection(view.id)
+            .primary()
+            .cursor_line(doc.text().slice(..)),
+        5
+    );
+    assert!(app.editor.get_status().unwrap().0.contains("1/2 reviewed"));
+    send_keys(&mut app, ":review-mark<ret>").await?;
+    assert_eq!(
+        doc!(app.editor).path().unwrap().file_name().unwrap(),
+        "other.txt"
+    );
+    send_keys(&mut app, ":review-mark<ret>").await?;
+    assert!(app
+        .editor
+        .get_status()
+        .unwrap()
+        .0
+        .contains("changes reviewed"));
+    send_keys(&mut app, ":review-prev<ret>:review-unmark<ret>").await?;
+    assert_eq!(doc!(app.editor).path(), Some(repo.file.as_path()));
+    let review = doc!(app.editor).review.as_ref().unwrap();
+    assert!(review.hunk_reviewed(0));
+    assert!(!review.hunk_reviewed(1));
+    send_keys(
+        &mut app,
+        ":review-next<ret>:review-prev<ret>:review-mark<ret>",
+    )
+    .await?;
+    assert!(app
+        .editor
+        .get_status()
+        .unwrap()
+        .0
+        .contains("changes reviewed"));
+    send_keys(&mut app, &pin).await?;
+    let review = doc!(app.editor).review.as_ref().unwrap();
+    assert_eq!(review.reviewed_hunks(), 2);
+
+    // Editing one marked hunk invalidates it; neither marking nor editing touches the index.
+    send_keys(&mut app, "iX<esc>").await?;
+    let review = doc!(app.editor).review.as_ref().unwrap();
+    assert_eq!(review.reviewed_hunks(), 1);
+    assert!(review.hunk_reviewed(0));
+    assert!(!review.hunk_reviewed(1));
+    send_keys(&mut app, ":review HEAD<ret>").await?;
+    assert_eq!(
+        doc!(app.editor).review.as_ref().unwrap().reviewed_hunks(),
+        0
+    );
+    assert_eq!(git_ok(repo.dir.path(), &["write-tree"]), index);
+    assert_eq!(repo.disk(), after);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_mark_skips_unreviewable_files_without_claiming_completion() -> anyhow::Result<()> {
+    let repo = Repo::new("before\n", "before\n", "before\n");
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let baseline = git_ok(dir, &["rev-parse", "HEAD"]);
+    repo.write("after\n");
+    fs::write(dir.join("middle.txt"), "x\n".repeat(160_000))?;
+    let suspended = dir.join("m-suspended.txt");
+    fs::write(&suspended, "small\n")?;
+    let last = dir.join("z-last.txt");
+    fs::write(&last, "last\n")?;
+    git_ok(dir, &["add", "."]);
+    git_ok(dir, &["commit", "-m", "agent work"]);
+    let index = git_ok(dir, &["write-tree"]);
+    let mut app = repo.app()?;
+    send_keys(
+        &mut app,
+        &format!(
+            ":review-baseline {baseline}<ret>:open '{}'<ret>",
+            suspended.display()
+        ),
+    )
+    .await?;
+    // A previously valid review can suspend after a large unsaved edit.
+    send_keys_and_paste(&mut app, "i", &"x".repeat(300_000)).await?;
+    assert!(doc!(app.editor).review.as_ref().unwrap().is_suspended());
+    send_keys(
+        &mut app,
+        &format!("<esc>:open '{}'<ret>:review-mark<ret>", repo.file.display()),
+    )
+    .await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(doc!(app.editor).path(), Some(last.as_path()));
+    send_keys(&mut app, ":review-mark<ret>").await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(doc!(app.editor).path(), Some(last.as_path()));
+    let status = app.editor.get_status().unwrap().0;
+    assert!(
+        status.contains("Marked reviewed; could not find the next change"),
+        "{status}"
+    );
+    assert!(status.contains("middle.txt"), "{status}");
+    assert!(status.contains("m-suspended.txt"), "{status}");
+    assert!(
+        !status.contains("All committed changes reviewed"),
+        "{status}"
+    );
+    assert_eq!(git_ok(dir, &["write-tree"]), index);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn hunks_committed_after_the_baseline_are_neither_staged_nor_stageable() -> anyhow::Result<()>
 {
     let repo = Repo::new("a\nb\nc\n", "a\nb\nc\n", "a\nb\nc\n");
@@ -2073,15 +2247,18 @@ async fn hunks_committed_after_the_baseline_are_neither_staged_nor_stageable() -
             &head[..8]
         ),
     );
-    // With everything committed, Enter on the committed hunk only jumps to the next block.
+    // Enter on a committed hunk records reading progress without changing the index.
     send_keys(&mut app, "<ret>").await?;
     assert_status_not_error(&app.editor);
-    assert_eq!(
-        app.editor.get_status().unwrap().0,
-        "next: file.txt hunk 1 of 1"
-    );
+    assert!(app
+        .editor
+        .get_status()
+        .unwrap()
+        .0
+        .contains("changes reviewed"));
+    assert!(doc!(app.editor).review.as_ref().unwrap().hunk_reviewed(0));
     assert_eq!(git_ok(dir, &["diff", "--cached"]), "");
-    // With an uncommitted change elsewhere, it says the hunk is committed.
+    // An uncommitted change elsewhere is left for Stage, without losing the review mark.
     fs::write(
         dir.join("other.txt"),
         "x
@@ -2089,7 +2266,13 @@ async fn hunks_committed_after_the_baseline_are_neither_staged_nor_stageable() -
     )?;
     git_ok(dir, &["add", "other.txt"]);
     send_keys(&mut app, "<ret>").await?;
-    assert_error(&app, &format!("already committed in {}", &head[..8]));
+    assert_status_not_error(&app.editor);
+    assert!(app
+        .editor
+        .get_status()
+        .unwrap()
+        .0
+        .contains("changes reviewed"));
     Ok(())
 }
 
@@ -2740,6 +2923,177 @@ async fn review_pr_checks_out_a_pull_request_and_reviews_it_against_the_merge_ba
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn review_navigation_waits_for_the_pull_requests_base() -> anyhow::Result<()> {
+    let fixture = PrFixture::new("a\nb\n", "a\nB\n", r#"api\ *) echo '[]';;"#);
+    let dir = fixture.repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let gate = fixture.gh._dir.path().join("checkout-gate");
+    let started = fixture.gh._dir.path().join("checkout-started");
+    assert!(Command::new("mkfifo")
+        .args([&gate, &started])
+        .status()?
+        .success());
+    let gh = std::env::var("HELIX_GH")?;
+    let original = fs::read_to_string(&gh)?;
+    let script = original.replace(
+        "git checkout -q feature",
+        &format!(
+            "printf started > '{}'; read ready < '{}'; git checkout -q feature",
+            started.display(),
+            gate.display()
+        ),
+    );
+    fs::write(&gh, script)?;
+    let mut app = AppBuilder::new().build()?;
+    send_keys(&mut app, &fixture.review_pr()).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), tokio::fs::read(&started)).await??;
+    send_keys(&mut app, "<space>An").await?;
+    let early_base = app.editor.review_baseline.clone();
+    let early_status = app.editor.get_status().map(|status| status.0.to_string());
+    send_keys(&mut app, "<ret>").await?;
+    let enter_base = app.editor.review_baseline.clone();
+    send_keys(&mut app, &fixture.review_pr()).await?;
+    let duplicate_status = app.editor.get_status().map(|status| status.0.to_string());
+    fs::write(&gate, "ready\n")?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app.editor.review_pr_loading {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "checkout did not finish"
+        );
+        send_keys(&mut app, "<esc>").await?;
+    }
+    assert!(
+        early_base.is_none(),
+        "navigation pinned HEAD while the PR was still loading: {early_base:?}"
+    );
+    assert!(early_status.is_some_and(|status| status.contains("pull request is loading")));
+    assert!(enter_base.is_none());
+    assert!(duplicate_status.is_some_and(|status| status.contains("pull request is loading")));
+    assert!(!app.editor.review_pr_loading);
+    assert_eq!(
+        app.editor.review_baseline.as_deref(),
+        Some(fixture.merge_base.as_str())
+    );
+    send_keys(&mut app, "<ret>").await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(
+        doc!(app.editor).path(),
+        Some(dir.join("file.txt").as_path())
+    );
+    send_keys(&mut app, ":new<ret><S-ret>").await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(doc!(app.editor).path(), Some(dir.join("new.txt").as_path()));
+    assert_eq!(git_ok(dir, &["diff", "--cached"]), "");
+    send_keys(&mut app, ":review-pr close<ret>").await?;
+    fs::write(
+        &gh,
+        original.replace(
+            "git checkout -q feature",
+            "echo checkout-failed >&2; exit 1",
+        ),
+    )?;
+    send_keys(&mut app, &fixture.review_pr()).await?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app.editor.review_pr_loading {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "failed checkout did not finish"
+        );
+        send_keys(&mut app, "<esc>").await?;
+    }
+    assert!(app.editor.review_pr.is_none());
+    assert_error(&app, "checkout-failed");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_mark_pull_request_old_deletion_advances_without_staging() -> anyhow::Result<()> {
+    let fixture = PrFixture::new("keep\ngone\nend\n", "keep\nend\n", r#"api\ *) echo '[]';;"#);
+    let dir = fixture.repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let mut app = fixture.open().await?;
+    let index = git_ok(dir, &["write-tree"]);
+    send_keys(&mut app, ":review-old<ret>vl:review-mark<ret>").await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(
+        doc!(app.editor).path().unwrap().file_name().unwrap(),
+        "new.txt"
+    );
+    let previous = app.editor.document_by_path(&fixture.repo.file).unwrap();
+    assert!(previous.review.as_ref().unwrap().hunk_reviewed(0));
+    send_keys(&mut app, "<ret>").await?;
+    assert!(app
+        .editor
+        .get_status()
+        .unwrap()
+        .0
+        .contains("changes reviewed"));
+    send_keys(
+        &mut app,
+        ":review-prev<ret>:review-old<ret>:review-unmark<ret>",
+    )
+    .await?;
+    assert_eq!(doc!(app.editor).path(), Some(fixture.repo.file.as_path()));
+    assert!(old_focus(&app).is_some());
+    assert!(!doc!(app.editor).review.as_ref().unwrap().hunk_reviewed(0));
+    assert_eq!(git_ok(dir, &["write-tree"]), index);
+    assert_eq!(git_ok(dir, &["diff", "--cached"]), "");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_mark_committed_deleted_file_is_read_only_and_not_recreated() -> anyhow::Result<()> {
+    let repo = Repo::new("before\n", "before\n", "before\n");
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let deleted = dir.join("gone.txt");
+    fs::write(&deleted, "old deleted text\n")?;
+    git_ok(dir, &["add", "gone.txt"]);
+    git_ok(dir, &["commit", "-m", "baseline"]);
+    let baseline = git_ok(dir, &["rev-parse", "HEAD"]);
+    repo.write("after\n");
+    git_ok(dir, &["rm", "gone.txt"]);
+    git_ok(dir, &["add", "file.txt"]);
+    git_ok(dir, &["commit", "-m", "agent work"]);
+    let index = git_ok(dir, &["write-tree"]);
+    let mut app = repo.app()?;
+    send_keys(
+        &mut app,
+        &format!(":review-baseline {baseline}<ret>:review-mark<ret>"),
+    )
+    .await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(doc!(app.editor).path(), Some(deleted.as_path()));
+    assert!(doc!(app.editor).readonly);
+    assert_eq!(doc!(app.editor).text().len_bytes(), 0);
+    send_keys(&mut app, ":review-old<ret>:review-mark<ret>").await?;
+    assert_status_not_error(&app.editor);
+    assert!(app
+        .editor
+        .get_status()
+        .unwrap()
+        .0
+        .contains("changes reviewed"));
+    assert!(!deleted.exists());
+    assert_eq!(git_ok(dir, &["write-tree"]), index);
+    send_keys(&mut app, ":review-prev<ret>:review-next<ret>").await?;
+    assert_eq!(doc!(app.editor).path(), Some(deleted.as_path()));
+    assert!(doc!(app.editor).review.as_ref().unwrap().hunk_reviewed(0));
+    // Rebase the same empty review buffer without trying to reload its absent path.
+    let head = git_ok(dir, &["rev-parse", "HEAD"]);
+    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+    assert_status_not_error(&app.editor);
+    let review = doc!(app.editor).review.as_ref().unwrap();
+    assert_eq!(review.baseline().revision(), Some(head.as_str()));
+    assert_eq!(review.reviewed_hunks(), 0);
+    assert_eq!(review.hunk_count(), 0);
+    assert!(!deleted.exists());
+    assert_eq!(git_ok(dir, &["write-tree"]), index);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn review_next_and_enter_walk_the_committed_hunks_of_a_pull_request() -> anyhow::Result<()> {
     let fixture = PrFixture::new(
         "a\nb\nc\nd\ne\nf\n",
@@ -2760,6 +3114,16 @@ async fn review_next_and_enter_walk_the_committed_hunks_of_a_pull_request() -> a
         (name.into_string().unwrap(), line)
     };
 
+    // A local suggestion must not hide the PR's committed changes.
+    fs::write(dir.join("new.txt"), "suggested\n")?;
+    app.editor.socket_command = true;
+    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+    app.editor.socket_command = false;
+    assert_eq!(
+        app.editor.review_baseline.as_deref(),
+        Some(fixture.merge_base.as_str())
+    );
+
     // file.txt's hunks are on lines 2 and 6 (1-based); new.txt is new.
     send_keys(&mut app, "gg<space>An").await?;
     assert_eq!(at(&app), ("file.txt".to_owned(), 1));
@@ -2774,15 +3138,52 @@ async fn review_next_and_enter_walk_the_committed_hunks_of_a_pull_request() -> a
     assert_eq!(at(&app), ("file.txt".to_owned(), 5));
     assert_eq!(status(&app), "file.txt: hunk 2 of 2");
 
-    // Enter on a committed hunk jumps on without staging; Shift-Enter comes back.
+    // Enter records this change as reviewed and advances; Shift-Enter revisits it.
     send_keys(&mut app, "<ret>").await?;
     assert_status_not_error(&app.editor);
     assert_eq!(at(&app), ("new.txt".to_owned(), 0));
-    assert_eq!(status(&app), "next: new.txt hunk 1 of 1");
+    assert!(status(&app).contains("Marked reviewed; next"));
     assert_eq!(git_ok(dir, &["diff", "--cached"]), "");
     send_keys(&mut app, "<S-ret>").await?;
     assert_eq!(at(&app), ("file.txt".to_owned(), 5));
-    assert_eq!(status(&app), "previous: file.txt hunk 2 of 2");
+    assert!(status(&app).contains("reviewed; 1/2 reviewed"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_next_and_enter_walk_a_pull_request_with_a_committed_rename() -> anyhow::Result<()> {
+    let mut fixture = PrFixture::new("a\nb\n", "a\nB\n", r#"api\ *) echo '[]';;"#);
+    let dir = fixture.repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    git_ok(dir, &["checkout", "-q", "feature"]);
+    git_ok(dir, &["mv", "file.txt", "renamed.txt"]);
+    git_ok(dir, &["commit", "-m", "rename"]);
+    let head = git_ok(dir, &["rev-parse", "HEAD"]);
+    let gh = std::env::var("HELIX_GH")?;
+    fs::write(&gh, fs::read_to_string(&gh)?.replace(&fixture.head, &head))?;
+    fixture.head = head;
+    git_ok(dir, &["checkout", "-q", "main"]);
+
+    let mut app = fixture.open().await?;
+    app.editor.socket_command = true;
+    send_keys(&mut app, ":review-baseline HEAD force<ret>").await?;
+    app.editor.socket_command = false;
+    assert_eq!(
+        app.editor.review_baseline.as_deref(),
+        Some(fixture.merge_base.as_str())
+    );
+    assert_eq!(git_ok(dir, &["status", "--porcelain"]), "");
+    send_keys(&mut app, "<space>An").await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(doc!(app.editor).path(), Some(dir.join("new.txt").as_path()));
+    send_keys(&mut app, "<ret>").await?;
+    assert_eq!(
+        doc!(app.editor).path(),
+        Some(dir.join("renamed.txt").as_path())
+    );
+    send_keys(&mut app, "<S-ret>").await?;
+    assert_eq!(doc!(app.editor).path(), Some(dir.join("new.txt").as_path()));
+    assert_eq!(git_ok(dir, &["diff", "--cached"]), "");
     Ok(())
 }
 
@@ -3049,6 +3450,10 @@ async fn review_submit_hands_comments_and_replies_to_gtc() -> anyhow::Result<()>
     );
     assert!(app.editor.review_pr_comments.is_empty());
     assert!(app.editor.review_pr.is_none());
+    assert!(app.editor.review_baseline.is_none());
+    assert!(app.editor.review_user_pin.is_none());
+    assert!(app.editor.review_hook_baseline.is_none());
+    assert!(app.editor.documents().all(|doc| doc.review.is_none()));
     assert_eq!(git_ok(dir, &["symbolic-ref", "--short", "HEAD"]), "main");
     assert!(fixture.only_read(), "{:?}", fixture.gh.calls());
     Ok(())
@@ -3451,12 +3856,16 @@ async fn review_ask_writes_the_buffer_and_hands_off_every_selection_once() -> an
     git_ok(repo, &["init"]);
     let file = repo.join("lib.rs");
     let source = "fn alpha() {\n    let a = 1;\n    let b = 2;\n}\n\nfn beta() {}\n";
+    let other = repo.join("other.rs");
     fs::write(&file, source)?;
-    git_ok(repo, &["add", "lib.rs"]);
+    fs::write(&other, "fn unrelated() {}\n")?;
+    git_ok(repo, &["add", "lib.rs", "other.rs"]);
     git_ok(repo, &["commit", "-m", "head"]);
     let _cwd = Cwd::enter(repo);
     let outbox = tempfile::tempdir()?;
     let mut app = AppBuilder::new().with_file(&file, None).build()?;
+
+    send_keys(&mut app, ":review-baseline HEAD<ret>:o other.rs<ret>:review HEAD<ret>i// unfinished<esc>:o lib.rs<ret>").await?;
 
     // An edit leaves the buffer modified; lines 2 and 3 are selected separately.
     let keys = format!(
@@ -3474,6 +3883,9 @@ async fn review_ask_writes_the_buffer_and_hands_off_every_selection_once() -> an
     assert_eq!(batches.len(), 1, "{batches:?}");
     let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(&batches[0])?)?;
     assert_eq!(json["request"], serde_json::json!({ "kind": "ask" }));
+    assert_eq!(json["files"].as_array().unwrap().len(), 1);
+    assert_eq!(json["files"][0]["path"], file.to_string_lossy().as_ref());
+    assert!(app.editor.review_batch.files().any(|path| path == other));
     let mut comments = json["comments"].as_array().unwrap().clone();
     assert_eq!(comments.len(), 2, "{comments:?}");
     // The primary selection (the copy on line 3) comes first.
@@ -3490,6 +3902,26 @@ async fn review_ask_writes_the_buffer_and_hands_off_every_selection_once() -> an
         assert!(!enclosing.contains("beta"), "{enclosing}");
     }
     assert!(app.editor.review_batch.comments().is_empty());
+    // A saved-file comment is not blocked by another reviewed buffer's unsaved edits.
+    send_keys(&mut app, ":review-comment follow up<ret>").await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(fs::read_dir(outbox.path())?.count(), 2);
+    send_keys(&mut app, ":review-send full review<ret>").await?;
+    assert_error(&app, "reviewed buffers have unsaved changes");
+    send_keys(&mut app, ":o other.rs<ret>:w<ret>").await?;
+    send_keys(&mut app, ":review-send full review<ret>").await?;
+    assert_status_not_error(&app.editor);
+    let mut batches = fs::read_dir(outbox.path())?
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    batches.sort();
+    let full: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(batches.last().unwrap())?)?;
+    assert!(full["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|file| file["path"] == other.to_string_lossy().as_ref()));
     Ok(())
 }
 
@@ -4186,6 +4618,462 @@ async fn review_send_exports_the_handoff_batch_without_writing() -> anyhow::Resu
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn handoff_labels_stay_visible_without_review_and_do_not_address_batches(
+) -> anyhow::Result<()> {
+    let repo = Repo::new("old\n", "old\n", "new\n");
+    let _cwd = Cwd::enter(repo.dir.path());
+    let outbox = repo.dir.path().join("quoted outbox");
+    fs::create_dir(&outbox)?;
+    let mut config = test_config();
+    config.editor.statusline.left.clear();
+    config.editor.statusline.right = vec![StatusLineElement::Review];
+    let mut app = AppBuilder::new()
+        .with_file(&repo.file, None)
+        .with_config(config)
+        .build()?;
+    let bind = format!(
+        ":review-handoff '{}' \"T3: Fix parser's café\"<ret>",
+        outbox.display()
+    );
+    send_keys(&mut app, &bind).await?;
+    assert_status_not_error(&app.editor);
+    assert!(doc!(app.editor).review.is_none());
+    assert!(statusline(&app).contains("T3: Fix parser's café → review"));
+
+    send_keys(&mut app, ":review HEAD<ret>:review-send @pi-2 check<ret>").await?;
+    assert_status_not_error(&app.editor);
+    let batches = take_batches(&outbox);
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0]["target"], "pi-2");
+    let status = statusline(&app);
+    assert!(
+        status.contains("T3: Fix parser's café → review"),
+        "{status}"
+    );
+    assert!(status.contains("@pi-2"), "{status}");
+
+    send_keys(&mut app, ":review-send check again<ret>").await?;
+    assert_status_not_error(&app.editor);
+    let batches = take_batches(&outbox);
+    assert_eq!(batches.len(), 1);
+    assert!(batches[0].get("target").is_none());
+    assert_eq!(app.editor.review_target, None);
+    assert_eq!(
+        app.editor.review_handoff_label.as_deref(),
+        Some("T3: Fix parser's café")
+    );
+
+    send_keys(&mut app, ":new<ret>").await?;
+    assert!(doc!(app.editor).path().is_none());
+    assert!(statusline(&app).contains("T3: Fix parser's café → review"));
+    // The original one-argument command remains valid and removes a previous label.
+    send_keys(
+        &mut app,
+        &format!(":review-handoff '{}'<ret>", outbox.display()),
+    )
+    .await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(app.editor.review_handoff, Some(outbox.clone()));
+    assert_eq!(app.editor.review_handoff_label, None);
+    assert!(!statusline(&app).contains("review"));
+    send_keys(&mut app, &bind).await?;
+    send_keys(&mut app, ":review-handoff clear<ret>").await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(app.editor.review_handoff, None);
+    assert_eq!(app.editor.review_handoff_label, None);
+    assert!(!statusline(&app).contains("review"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn handoff_bridge_refresh_preserves_old_selection() -> anyhow::Result<()> {
+    let original = "keep\ngone one\ngone two\nend\n";
+    let repo = Repo::new(original, original, "keep\nend\n");
+    let _cwd = Cwd::enter(repo.dir.path());
+    let outbox = tempfile::tempdir()?;
+    let mut app = repo.app()?;
+    send_keys(&mut app, ":review-baseline HEAD<ret>:review-old<ret>vlll").await?;
+    let focus = {
+        let (view, doc) = current_ref!(app.editor);
+        doc.review.as_ref().unwrap().focus(view.id).unwrap()
+    };
+    let current_selection = {
+        let (view, doc) = current_ref!(app.editor);
+        doc.selection(view.id).clone()
+    };
+    assert!(focus.extend);
+
+    // Only socket metadata bypasses the restrictions on commands in old text.
+    send_keys(&mut app, ":echo user command<ret>").await?;
+    assert_error(&app, "is not available on old review text");
+    app.editor.socket_command = true;
+    send_keys(
+        &mut app,
+        &format!(
+            ":echo 'T3: connected'<ret>:review-handoff '{}' 'T3: Parser'<ret>:review-baseline HEAD<ret>",
+            outbox.path().display()
+        ),
+    )
+    .await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(old_focus(&app), Some(focus.range));
+
+    // An agent edit reloads the current file while the historical selection stays valid.
+    repo.write_external("keep\nend\nagent tail\n");
+    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+    assert_status_not_error(&app.editor);
+    let (view, doc) = current_ref!(app.editor);
+    let review = doc.review.as_ref().unwrap();
+    assert_eq!(review.focus(view.id), Some(focus));
+    assert_eq!(doc.selection(view.id), &current_selection);
+    assert_eq!(doc.text(), "keep\nend\nagent tail\n");
+    let selected = focus
+        .range
+        .fragment(review.snapshot().slice(..))
+        .to_string();
+
+    app.editor.socket_command = false;
+    send_keys(&mut app, ":review-ask Why remove this?<ret>").await?;
+    assert_status_not_error(&app.editor);
+    let batches = take_batches(outbox.path());
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0]["comments"][0]["side"], "old");
+    assert_eq!(batches[0]["comments"][0]["selected_text"], selected);
+
+    // Restoring those lines removes the old block and ends its now-invalid focus.
+    repo.write_external(original);
+    app.editor.socket_command = true;
+    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+    app.editor.socket_command = false;
+    assert_status_not_error(&app.editor);
+    assert_eq!(old_focus(&app), None);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_touch_ask_preserves_old_selection_and_deduplicates_literal_text(
+) -> anyhow::Result<()> {
+    let original = "keep\ngone one\ngone two\nend\n";
+    let repo = Repo::new(original, original, "keep\nend\n");
+    let _cwd = Cwd::enter(repo.dir.path());
+    let outbox = tempfile::tempdir()?;
+    let mut app = touch_app(&repo)?;
+    send_keys(
+        &mut app,
+        &format!(
+            ":review-handoff '{}'<ret>:review-baseline HEAD<ret>:review-old<ret>vlll",
+            outbox.path().display()
+        ),
+    )
+    .await?;
+    let focus = old_focus(&app).unwrap();
+    let selected = {
+        let (view, doc) = current_ref!(app.editor);
+        let review = doc.review.as_ref().unwrap();
+        assert!(review.focus(view.id).unwrap().extend);
+        focus.fragment(review.snapshot().slice(..)).to_string()
+    };
+    let current_selection = {
+        let (view, doc) = current_ref!(app.editor);
+        doc.selection(view.id).clone()
+    };
+    let text =
+        "@another-session keep this literal\n%sh{touch should-not-exist} '%{buffer_name}' 🦀";
+    let ask = touch_frame(1, "ask", Some(text));
+    send_keys_and_paste(&mut app, "", &ask).await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(old_focus(&app), Some(focus));
+    let (view, doc) = current_ref!(app.editor);
+    assert_eq!(doc.selection(view.id), &current_selection);
+    assert_eq!(repo.disk(), "keep\nend\n");
+    assert!(!repo.dir.path().join("should-not-exist").exists());
+    let batches = take_batches(outbox.path());
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0]["comments"][0]["side"], "old");
+    assert_eq!(batches[0]["comments"][0]["selected_text"], selected);
+    assert_eq!(batches[0]["comments"][0]["comment"], text);
+    assert!(batches[0]
+        .get("target")
+        .is_none_or(serde_json::Value::is_null));
+
+    // Lost acknowledgments can be retried without exporting a second batch.
+    send_keys_and_paste(&mut app, "", &ask).await?;
+    assert_status_not_error(&app.editor);
+    assert!(take_batches(outbox.path()).is_empty());
+    send_keys_and_paste(&mut app, "", &touch_frame(1, "ask", Some("different"))).await?;
+    assert_error(&app, "reused with different contents");
+    assert!(take_batches(outbox.path()).is_empty());
+    assert_eq!(old_focus(&app), Some(focus));
+
+    let send = touch_frame(2, "send", Some(text));
+    send_keys_and_paste(&mut app, "", &send).await?;
+    assert_status_not_error(&app.editor);
+    let batches = take_batches(outbox.path());
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0]["request"]["text"], text);
+    assert!(batches[0]
+        .get("target")
+        .is_none_or(serde_json::Value::is_null));
+    send_keys_and_paste(&mut app, "", &send).await?;
+    assert!(take_batches(outbox.path()).is_empty());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn review_touch_discovery_preserves_insert_prompt_picker_and_old_selection(
+) -> anyhow::Result<()> {
+    let original = "keep\ngone one\ngone two\nend\n";
+    let repo = Repo::new(original, original, "keep\nend\n");
+    let _cwd = Cwd::enter(repo.dir.path());
+    let mut app = touch_app(&repo)?;
+    // Reclaiming the integration terminal follows the real resume path and advertises ready.
+    assert!(app.handle_signals(libc::SIGCONT).await);
+    send_keys_and_paste(&mut app, "i", "# hx-review:discover").await?;
+    assert_eq!(app.editor.mode(), helix_view::document::Mode::Insert);
+    assert_eq!(doc!(app.editor).text(), "keep\nend\n");
+    send_keys_and_paste(&mut app, "<esc>:echo untouched", "# hx-review:discover").await?;
+    send_keys(&mut app, "<ret>").await?;
+    assert_eq!(app.editor.get_status().unwrap().0, "untouched");
+    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+    send_keys_and_paste(&mut app, "", &touch_frame(30, "files", None)).await?;
+    send_keys_and_paste(&mut app, "", "# hx-review:discover").await?;
+    send_keys_and_paste(&mut app, "", &touch_frame(31, "stage", None)).await?;
+    assert_error(&app, "close the HX prompt or picker");
+    send_keys(&mut app, "<esc>:review-old<ret>vlll").await?;
+    let focus = old_focus(&app).unwrap();
+    send_keys_and_paste(&mut app, "", "# hx-review:discover").await?;
+    assert_eq!(old_focus(&app), Some(focus));
+    assert_eq!(doc!(app.editor).text(), "keep\nend\n");
+
+    let mut plain = repo.app()?;
+    send_keys_and_paste(&mut plain, "i", "# hx-review:discover").await?;
+    assert_error(&plain, "not enabled");
+    assert_eq!(plain.editor.mode(), helix_view::document::Mode::Insert);
+    assert_eq!(doc!(plain.editor).text(), "keep\nend\n");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_touch_rejects_unsafe_states_and_frames_without_typing() -> anyhow::Result<()> {
+    let repo = Repo::new("old\nkeep\n", "old\nkeep\n", "new\nkeep\n");
+    let _cwd = Cwd::enter(repo.dir.path());
+    let mut app = touch_app(&repo)?;
+    send_keys(&mut app, ":review-baseline HEAD<ret>").await?;
+    let original_index = repo.index_oid();
+
+    send_keys_and_paste(&mut app, "i", &touch_frame(10, "stage", None)).await?;
+    assert_error(&app, "finish inserting");
+    assert_eq!(app.editor.mode(), helix_view::document::Mode::Insert);
+    assert_eq!(repo.index_oid(), original_index);
+    assert_eq!(doc!(app.editor).text(), "new\nkeep\n");
+    send_keys(&mut app, "<esc>").await?;
+    send_keys_and_paste(&mut app, ":echo preserved", &touch_frame(11, "stage", None)).await?;
+    assert_error(&app, "close the HX prompt or picker");
+    send_keys(&mut app, "<ret>").await?;
+    assert_eq!(app.editor.get_status().unwrap().0, "preserved");
+
+    // A pending normal-mode command must also survive a rejected action.
+    send_keys_and_paste(&mut app, "f", &touch_frame(12, "stage", None)).await?;
+    assert_error(&app, "pending HX key command");
+    send_keys(&mut app, "<esc>").await?;
+
+    let mut malformed = vec![
+        "# hx-review:wrong:00".to_owned(),
+        format!("# hx-review:{REVIEW_TOUCH_NONCE}:0"),
+        format!("# hx-review:{REVIEW_TOUCH_NONCE}:zz"),
+        format!("# hx-review:{REVIEW_TOUCH_NONCE}:{}", "00".repeat(16385)),
+        touch_frame(13, "unknown", None),
+        touch_frame(14, "ask", Some(&"x".repeat(8193))),
+        touch_frame(15, "stage", Some("unexpected")),
+        touch_frame(16, "ask", Some(" \n")),
+    ];
+    let mut invalid = serde_json::json!({"v": 2, "id": "a4f9d271-dcae-40fe-8bec-000000000017", "action": "stage"});
+    malformed.push(touch_json_frame(&invalid));
+    invalid["v"] = 1.into();
+    invalid["extra"] = true.into();
+    malformed.push(touch_json_frame(&invalid));
+    for frame in malformed {
+        send_keys_and_paste(&mut app, "", &frame).await?;
+        assert_eq!(repo.index_oid(), original_index);
+        assert_eq!(doc!(app.editor).text(), "new\nkeep\n");
+        assert_eq!(*app.editor.get_status().unwrap().1, Severity::Error);
+    }
+
+    // Files opens the actual HX picker; another action must not dismiss it.
+    send_keys_and_paste(&mut app, "", &touch_frame(20, "files", None)).await?;
+    assert_status_not_error(&app.editor);
+    send_keys_and_paste(&mut app, "", &touch_frame(21, "stage", None)).await?;
+    assert_error(&app, "close the HX prompt or picker");
+    send_keys(&mut app, "<esc>").await?;
+    send_keys_and_paste(&mut app, "", &touch_frame(22, "next", None)).await?;
+    assert_status_not_error(&app.editor);
+    send_keys_and_paste(&mut app, "", &touch_frame(23, "previous", None)).await?;
+    assert_status_not_error(&app.editor);
+    send_keys_and_paste(&mut app, "", &touch_frame(24, "stage", None)).await?;
+    assert_status_not_error(&app.editor);
+    assert_ne!(repo.index_oid(), original_index);
+
+    // The reserved prefix is consumed even without opt-in; ordinary paste still works.
+    let mut plain = repo.app()?;
+    send_keys_and_paste(&mut plain, "i", &touch_frame(25, "stage", None)).await?;
+    assert_error(&plain, "not enabled");
+    assert_eq!(doc!(plain.editor).text(), "new\nkeep\n");
+    send_keys_and_paste(&mut plain, "", "plain").await?;
+    assert_eq!(doc!(plain.editor).text(), "plainnew\nkeep\n");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn handoff_destination_precedes_review_details_in_a_narrow_center() -> anyhow::Result<()> {
+    let repo = Repo::new("old\n", "old\n", "new\n");
+    let _cwd = Cwd::enter(repo.dir.path());
+    let outbox = tempfile::tempdir()?;
+    let mut config = test_config();
+    config.editor.statusline.left = vec![
+        StatusLineElement::Mode,
+        StatusLineElement::FileBaseName,
+        StatusLineElement::FileEncoding,
+    ];
+    config.editor.statusline.center = vec![StatusLineElement::Review];
+    config.editor.statusline.right = vec![StatusLineElement::Position];
+    let mut app = AppBuilder::new()
+        .with_file(&repo.file, None)
+        .with_config(config)
+        .build()?;
+    send_keys(
+        &mut app,
+        &format!(
+            ":review-handoff '{}' 'T3: Fix parser'<ret>:review HEAD<ret>:review-stage<ret>",
+            outbox.path().display()
+        ),
+    )
+    .await?;
+    assert_status_not_error(&app.editor);
+    app.editor.resize(Rect::new(0, 0, 80, 24));
+    let narrow = statusline(&app);
+    assert!(narrow.contains("T3: Fix parser → review"), "{narrow}");
+    assert!(!narrow.contains("staged"), "{narrow}");
+
+    app.editor.resize(Rect::new(0, 0, 160, 24));
+    let wide = statusline(&app);
+    assert!(wide.contains("T3: Fix parser → review"), "{wide}");
+    assert!(wide.contains("1 hunk 1 staged"), "{wide}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn handoff_labels_validate_without_losing_binding_or_pending_comments() -> anyhow::Result<()>
+{
+    let repo = Repo::new("old\n", "old\n", "new\n");
+    let outbox = tempfile::tempdir()?;
+    let mut app = repo.app()?;
+    break_handoff(&mut app, repo.dir.path()).await?;
+    send_keys(&mut app, ":review<ret>:review-comment retained<ret>").await?;
+    assert_eq!(app.editor.review_batch.comments().len(), 1);
+    let bind = format!(
+        ":review-handoff '{}' '  T3: Parser  '<ret>",
+        outbox.path().display()
+    );
+    send_keys(&mut app, &bind).await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(
+        app.editor.review_handoff_label.as_deref(),
+        Some("T3: Parser")
+    );
+    assert_eq!(app.editor.review_batch.comments().len(), 1);
+
+    for invalid in [
+        String::new(),
+        "  ".to_owned(),
+        "line\nbreak".to_owned(),
+        "line\rbreak".to_owned(),
+        "tab\tlabel".to_owned(),
+        "escape\u{1b}".to_owned(),
+        "line\u{2028}break".to_owned(),
+        "line\u{2029}break".to_owned(),
+        "x".repeat(121),
+    ] {
+        send_keys_and_paste(
+            &mut app,
+            ":",
+            &format!("review-handoff '{}' '{invalid}'", outbox.path().display()),
+        )
+        .await?;
+        send_keys(&mut app, "<ret>").await?;
+        assert_error(&app, "label must be a single line");
+        assert_eq!(app.editor.review_handoff.as_deref(), Some(outbox.path()));
+        assert_eq!(
+            app.editor.review_handoff_label.as_deref(),
+            Some("T3: Parser")
+        );
+        assert_eq!(app.editor.review_batch.comments().len(), 1);
+    }
+    send_keys(&mut app, ":review-handoff clear 'extra label'<ret>").await?;
+    assert_error(&app, "clear does not take a label");
+    assert_eq!(app.editor.review_handoff.as_deref(), Some(outbox.path()));
+
+    send_keys(&mut app, ":review-handoff clear<ret>").await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(app.editor.review_handoff_label, None);
+    assert_eq!(app.editor.review_batch.comments().len(), 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn handoff_rebinding_waits_for_an_in_flight_comment_save() -> anyhow::Result<()> {
+    let repo = Repo::new("old\n", "old\n", "new\n");
+    let first = tempfile::tempdir()?;
+    let second = tempfile::tempdir()?;
+    let mut app = repo.app()?;
+    send_keys(
+        &mut app,
+        &format!(":review-handoff '{}' 'First'<ret>", first.path().display()),
+    )
+    .await?;
+    // Hold the marker that :review-comment sets until its asynchronous write finishes.
+    app.editor.review_send_on_write = Some(doc!(app.editor).id());
+    send_keys(
+        &mut app,
+        &format!(
+            ":review-handoff '{}' 'Second'<ret>",
+            second.path().display()
+        ),
+    )
+    .await?;
+    assert_error(&app, "a review comment is being saved");
+    assert_eq!(app.editor.review_handoff.as_deref(), Some(first.path()));
+    assert_eq!(app.editor.review_handoff_label.as_deref(), Some("First"));
+    send_keys(&mut app, ":review-handoff clear<ret>").await?;
+    assert_error(&app, "a review comment is being saved");
+    assert_eq!(app.editor.review_handoff.as_deref(), Some(first.path()));
+
+    // Updating presentation on the same destination is safe during the save.
+    send_keys(
+        &mut app,
+        &format!(
+            ":review-handoff '{}' 'Renamed'<ret>",
+            first.path().display()
+        ),
+    )
+    .await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(app.editor.review_handoff_label.as_deref(), Some("Renamed"));
+    app.editor.review_send_on_write = None;
+    send_keys(
+        &mut app,
+        &format!(
+            ":review-handoff '{}' 'Second'<ret>",
+            second.path().display()
+        ),
+    )
+    .await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(app.editor.review_handoff.as_deref(), Some(second.path()));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn handoff_defaults_to_the_pi_mailbox_in_the_workspace() -> anyhow::Result<()> {
     let repo = Repo::new("old\n", "old\n", "old\n");
     let _cwd = Cwd::enter(repo.dir.path());
@@ -4384,5 +5272,71 @@ c
     let rows = texts(&app);
     assert_eq!(rows[..3], ["a", "▲ pr │ for the pr", "b"], "{rows:#?}");
     assert!(!rows.iter().any(|row| row.contains("for pi")), "{rows:#?}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_pr_attach_preserves_saved_agent_edits_index_and_current_branch(
+) -> anyhow::Result<()> {
+    let fixture = PrFixture::new("base\n", "head\n", r#"api\ *) echo '[]';;"#);
+    let dir = fixture.repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    git_ok(dir, &["checkout", "-q", "feature"]);
+    fixture.repo.write("staged agent edit\n");
+    git_ok(dir, &["add", "file.txt"]);
+    fixture.repo.write("saved agent edit\n");
+    fs::write(dir.join("new.txt"), "unopened agent edit\n")?;
+    let index = git_ok(dir, &["diff", "--cached"]);
+    let status = git_ok(dir, &["status", "--porcelain"]);
+    let mut app = AppBuilder::new()
+        .with_file(&fixture.repo.file, None)
+        .build()?;
+    send_keys(&mut app, ":review-pr-attach 7<ret>").await?;
+    wait_for(&mut app, |app| !app.editor.review_pr_loading).await?;
+    assert_status_not_error(&app.editor);
+    let pr = app.editor.review_pr.as_ref().unwrap();
+    assert_eq!(pr.head_oid, fixture.head);
+    assert_eq!(pr.merge_base, fixture.merge_base);
+    assert_eq!(pr.repo, "o/r");
+    assert!(pr.batch_dir.is_none());
+    assert_eq!(doc!(app.editor).text(), "saved agent edit\n");
+    assert_eq!(
+        fs::read_to_string(&fixture.repo.file)?,
+        "saved agent edit\n"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("new.txt"))?,
+        "unopened agent edit\n"
+    );
+    assert_eq!(git_ok(dir, &["diff", "--cached"]), index);
+    assert_eq!(git_ok(dir, &["status", "--porcelain"]), status);
+    assert_eq!(git_ok(dir, &["branch", "--show-current"]), "feature");
+    assert_eq!(git_ok(dir, &["rev-parse", "HEAD"]), fixture.head);
+    assert!(!fixture
+        .gh
+        .calls()
+        .iter()
+        .any(|call| call.starts_with("pr checkout")));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_pr_attach_rejects_an_unrelated_checkout_without_switching_branches(
+) -> anyhow::Result<()> {
+    let fixture = PrFixture::new("base\n", "head\n", r#"api\ *) echo '[]';;"#);
+    let dir = fixture.repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let head = git_ok(dir, &["rev-parse", "HEAD"]);
+    let mut app = AppBuilder::new()
+        .with_file(&fixture.repo.file, None)
+        .build()?;
+    send_keys(&mut app, ":review-pr-attach 7<ret>").await?;
+    wait_for(&mut app, |app| !app.editor.review_pr_loading).await?;
+    assert!(app.editor.review_pr.is_none());
+    assert!(app.editor.get_status().unwrap().0.contains("current head"));
+    assert_eq!(git_ok(dir, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git_ok(dir, &["branch", "--show-current"]), "main");
+    assert_eq!(git_ok(dir, &["status", "--porcelain"]), "");
+    assert_eq!(fixture.gh.calls().len(), 1);
     Ok(())
 }

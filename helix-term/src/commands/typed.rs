@@ -4097,6 +4097,28 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         },
     },
     TypableCommand {
+        name: "review-mark",
+        aliases: &["review-mark-reviewed"],
+        doc: "Mark the current primary committed or pull request change reviewed without changing the git index, then advance to the next unreviewed change.",
+        fun: review::review_mark,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-unmark",
+        aliases: &["review-unmark-reviewed"],
+        doc: "Mark the current primary change unreviewed without moving or changing the git index.",
+        fun: review::review_unmark,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
         name: "review-stage",
         aliases: &[],
         doc: "Stage the unstaged hunks the selections touch (or the focused old text's, or the :review-diff hunk under the cursor) in the git index, like git add -p. Refuses unsaved buffers.",
@@ -4148,6 +4170,17 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         completer: CommandCompleter::none(),
         signature: Signature {
             positionals: (1, Some(2)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-pr-attach",
+        aliases: &[],
+        doc: "Attach the current checkout to a GitHub pull request without changing branches or saved edits. The checked-out commit must equal the PR head. Takes a PR URL or number.",
+        fun: review_pr::review_pr_attach,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (1, Some(1)),
             ..Signature::DEFAULT
         },
     },
@@ -4231,6 +4264,22 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         },
     },
     TypableCommand {
+        name: "review-launch-ready",
+        aliases: &[],
+        doc: "Release the launcher's review protocol after its initial location and optional expected PR are ready.",
+        fun: review::review_launch_ready,
+        completer: CommandCompleter::none(),
+        signature: Signature { positionals: (0, Some(1)), ..Signature::DEFAULT },
+    },
+    TypableCommand {
+        name: "review-open",
+        aliases: &[],
+        doc: "Open a thread-bound file location or immutable checkpoint comparison supplied as JSON.",
+        fun: review::review_open,
+        completer: CommandCompleter::none(),
+        signature: Signature { positionals: (1, Some(1)), ..Signature::DEFAULT },
+    },
+    TypableCommand {
         name: "review-baseline",
         aliases: &[],
         doc: "Review every unmodified buffer in the workspace, and buffers opened later, against a commit revision such as HEAD. Repeating the same commit refreshes the reviews; `clear` closes them. A trailing `force` adopts the commit even over a baseline pinned by you.",
@@ -4244,11 +4293,11 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "review-handoff",
         aliases: &[],
-        doc: "Set the directory the explicit handoffs (:review-comment, :review-send, :review-commit, :review-commit-all) export review batches to. Without it, batches go to `<workspace>/.pi/helix-review/outbox` when that directory exists and every reviewed file is in the workspace. `clear` returns to that default.",
+        doc: "Set the directory the explicit handoffs (:review-comment, :review-send, :review-commit, :review-commit-all) export review batches to, with an optional display label shown in the review statusline. Quote labels containing spaces. The label does not address a session. Without a directory, batches go to `<workspace>/.pi/helix-review/outbox` when it exists and every reviewed file is in the workspace. `clear` returns to that default and clears the label; setting a directory without a label also clears the label. Refuses directory changes while a review comment is being saved.",
         fun: review::review_handoff,
         completer: CommandCompleter::positional(&[completers::directory]),
         signature: Signature {
-            positionals: (1, Some(1)),
+            positionals: (1, Some(2)),
             ..Signature::DEFAULT
         },
     },

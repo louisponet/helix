@@ -191,12 +191,13 @@ quoted as a fenced JSON block in its content, is:
 | Field | Meaning |
 |-------|---------|
 | `baseline` | The commit the agent's turn was reviewed against, or `null` if pi has none. |
-| `files[].path` | Absolute path from the batch (its files and comment paths). |
+| `files[].path` | Absolute path from the batch. For an `ask` request, only paths with comments are included. |
 | `files[].user_edits.against` | `"turn-snapshot"`: the file as the agent left it at the end of its last turn. `"baseline"`: the batch's baseline blob for the file (empty when absent). |
 | `files[].user_edits.hunks` | Unified-diff hunks (`git diff` of the raw bytes) from that content to the saved file. Whole hunks are kept up to 200 lines per file; the rest are replaced by one entry such as `"... 3 more hunks (480 lines) omitted; read the file"`. |
 | `files[].user_edits.truncated` | `true` when hunks were omitted that way, else `false`. |
-| `files[].review_comments` | The batch's comments for the file, with the batch fields except `path` and `baseline`. |
-| `request` | The batch's `request`, when it has one. The message content then ends with a "User request" section: for `commit-staged`, an instruction to commit exactly what is staged (`git commit` without `-a`, a Conventional Commit message derived from `git diff --cached`, the subject if given), touch nothing else and report the commit hash; for `message`, the text verbatim; for `ask`, an instruction to do what the message asks, followed by each comment: path, lines, and the fenced selected text, enclosing code (when present) and message. |
+| `files[].review_comments` | The batch's comments for the file, with the batch fields except `path` and `baseline`. An `ask` omits `enclosing_text` and carries bounded `context_hunks` instead. |
+| `files[].review_comments[].context_hunks` | For `ask`, `{ hunks, truncated }`: overlapping or nearest unified-diff hunks from that comment's exported baseline to the current file, chosen on its old/current side and capped at 200 lines. `user_edits` includes only changes overlapping these hunks or the selection context, while retaining its original `against` meaning. |
+| `request` | The batch's `request`, when it has one. The message content then ends with a "User request" section: for `commit-staged`, an instruction to commit exactly what is staged (`git commit` without `-a`, a Conventional Commit message derived from `git diff --cached`, the subject if given), touch nothing else and report the commit hash; for `message`, the text verbatim; for `ask`, an instruction to do what the message asks, followed by each comment: path, lines, and the fenced selected text and message. The structured handoff supplies only nearby hunk context, not the entire review or enclosing function. |
 
 Files without edits or comments are omitted; a handoff with no files
 and no request is not sent.

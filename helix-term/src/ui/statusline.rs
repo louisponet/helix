@@ -611,6 +611,9 @@ where
     F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
 {
     let Some(review) = &context.doc.review else {
+        if let Some(label) = &context.editor.review_handoff_label {
+            write(context, format!(" {label} → review ").into());
+        }
         return;
     };
     let pr = match &context.editor.review_pr {
@@ -637,6 +640,14 @@ where
     if committed > 0 {
         text.push_str(&format!(" {committed} committed"));
     }
+    let (reviewed, total) = review
+        .review_changes(context.editor.review_pr.is_some())
+        .fold((0, 0), |(reviewed, total), (_, _, marked)| {
+            (reviewed + usize::from(marked), total + 1)
+        });
+    if total > 0 {
+        text.push_str(&format!(" {reviewed}/{total} reviewed"));
+    }
     let staged = review.staged_hunks();
     if staged > 0 {
         text.push_str(&format!(" {staged} staged"));
@@ -649,6 +660,9 @@ where
     }
     if review.is_suspended() {
         text.push_str(" suspended");
+    }
+    if let Some(label) = &context.editor.review_handoff_label {
+        text = format!(" {label} →{text}");
     }
     if let Some(target) = &context.editor.review_target {
         text.push_str(&format!(" @{target}"));

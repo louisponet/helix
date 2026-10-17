@@ -1,0 +1,8 @@
+{
+  "name": "helix-review",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test helix-review.test.ts"
+  }
+}

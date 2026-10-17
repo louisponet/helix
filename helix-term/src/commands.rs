@@ -1,6 +1,7 @@
 pub(crate) mod dap;
 pub(crate) mod lsp;
 pub(crate) mod review;
+pub(crate) mod review_mobile;
 pub(crate) mod review_pr;
 pub(crate) mod syntax;
 pub(crate) mod typed;
@@ -488,7 +489,9 @@ impl MappableCommand {
         kill_to_line_start, "Delete till start of line",
         kill_to_line_end, "Delete till end of line",
         undo, "Undo change",
-        review_stage_hunk, "Stage or unstage the review hunk under the cursor (only while reviewing)",
+        review_stage_hunk, "Stage or unstage an uncommitted review hunk; mark a committed or pull request change reviewed and advance",
+        review_mark_change, "Mark the current committed or pull request change reviewed and advance",
+        review_unmark_change, "Mark the current change unreviewed without advancing",
         review_jump_prev, "Go back to the previous unstaged review hunk (only while reviewing)",
         review_files_picker, "Pick a file changed since the review baseline",
         review_diff_buffer, "Show the review as one diff",
@@ -496,7 +499,7 @@ impl MappableCommand {
         review_old_text, "Focus the old review text nearest the cursor",
         review_comments_picker, "Pick a pending review comment",
         review_uncomment_latest, "Drop the latest pending review comment",
-        review_toggle_stage, "Stage or unstage the review hunks the selections touch",
+        review_toggle_stage, "Stage or unstage uncommitted changes; mark a committed or pull request change reviewed and advance",
         review_revert_change, "Revert the change under the cursor to the review baseline",
         review_close_buffer, "Close the review of the buffer",
         review_refresh_buffer, "Refresh the review of the buffer",
@@ -4845,6 +4848,14 @@ fn undo(cx: &mut Context) {
 
 fn review_stage_hunk(cx: &mut Context) {
     review::review_stage_hunk(cx)
+}
+
+fn review_mark_change(cx: &mut Context) {
+    review::run_typed(cx, review::review_mark)
+}
+
+fn review_unmark_change(cx: &mut Context) {
+    review::run_typed(cx, review::review_unmark)
 }
 
 fn review_jump_prev(cx: &mut Context) {

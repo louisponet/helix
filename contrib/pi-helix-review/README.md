@@ -88,8 +88,8 @@ symlink is resolved first, as Helix does, so its target's entry is compared.
 
 ## Hook mode
 
-When pi starts in a Git repository, the extension also keeps a running Helix
-in sync with the agent over Helix's command socket (see "Driving Helix from
+When an interactive pi TUI starts in a Git repository, the extension keeps a
+running Helix in sync with the agent over its command socket (see "Driving Helix from
 pi" in the Helix book). The socket is `$HELIX_COMMAND_SOCKET`, or
 `$XDG_RUNTIME_DIR/helix/<id>.sock` (`/tmp/helix-<uid>/<id>.sock` without
 `XDG_RUNTIME_DIR`), where `<id>` is the first 32 hex digits of the SHA-256 of
@@ -114,7 +114,10 @@ version moves into the first session's file. Ignore `.pi/` in Git.
   committed <oid>, N files still changed`; if the agent did not commit,
   nothing moves. A `:review-comment` (or `:review-ask`) handoff ends with an
   instruction to do what the question asks, listing each selection with its
-  lines, selected text, enclosing code and message; you read the answer in
+  lines, selected text and message. Only commented files and the overlapping
+  or closest diff hunks are included, with the selection's three-line context;
+  unrelated files, distant user edits and full enclosing functions are omitted.
+  Explicit message and commit handoffs keep their broader review context; you read the answer in
   pi, and the turn ends with the ordinary echo. pi sends `review-handoff <outbox>` and `review-baseline <commit>`,
   so Helix reviews every open file in the workspace against that commit and
   writes a batch into the outbox when you hand back explicitly
@@ -212,9 +215,14 @@ version moves into the first session's file. Ignore `.pi/` in Git.
 
 ### Multiple sessions
 
-Several pi sessions can be hooked to one repository. A session is live while
-the pid in its state file runs. Each session is labelled `pi-N`, the smallest
-number no other live session in the repository uses, kept in its state file
+Several interactive pi TUI sessions can be hooked to one repository. Subagents
+and RPC, JSON and print-mode sessions do not attach or receive handoffs, even
+when they edited the hunk. Routing falls back to an eligible TUI session. A
+session is eligible while its pid runs and its state file records `tui: true`;
+older sessions need `/reload` to register that capability. A target naming an
+ineligible session stays pending instead of being delivered elsewhere. Each
+session is labelled `pi-N`, the smallest number no other live session in the
+repository uses, kept in its state file
 and shown in its echoes (`pi-2: Agent turn started`, `pi-2 received your
 review: ...`, `pi hook attached as pi-2`) and in pi's footer (`hx:pi-2`, `hx:pi-2+1`
 with one worktree hook, `hx:pi-2 (no helix)` while no Helix answers). The baseline sent to Helix is the

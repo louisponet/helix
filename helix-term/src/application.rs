@@ -83,6 +83,7 @@ pub struct Application {
     theme_mode: Option<theme::Mode>,
 
     command_socket: Option<CommandSocket>,
+    review_transport: Option<crate::review_transport::Session>,
 }
 
 #[cfg(feature = "integration")]
@@ -258,6 +259,7 @@ impl Application {
             lsp_progress: LspProgressMap::new(),
             theme_mode,
             command_socket: CommandSocket::new(),
+            review_transport: crate::review_transport::Session::from_env(),
         };
 
         Ok(app)
@@ -294,6 +296,9 @@ impl Application {
 
         let pos = pos.map(|pos| (pos.col as u16, pos.row as u16));
         self.terminal.draw(pos, kind).unwrap();
+        if let Some(session) = &mut self.review_transport {
+            session.sync_state(&self.editor);
+        }
     }
 
     pub async fn event_loop<S>(&mut self, input_stream: &mut S)
@@ -589,6 +594,10 @@ impl Application {
                     }
                 }
 
+                if let Some(session) = &mut self.review_transport {
+                    session.ready();
+                }
+
                 // redraw the terminal
                 let area = self.terminal.size();
                 self.compositor.resize(area);
@@ -804,7 +813,23 @@ impl Application {
             }) => false,
             #[cfg(not(windows))]
             event if event.is_escape() => false,
-            event => self.compositor.handle_event(&event.into(), &mut cx),
+            event => {
+                let event = event.into();
+                if let Event::Paste(paste) = &event {
+                    if crate::review_transport::handle_paste(
+                        self.review_transport.as_mut(),
+                        paste,
+                        &mut self.compositor,
+                        &mut cx,
+                    ) {
+                        true
+                    } else {
+                        self.compositor.handle_event(&event, &mut cx)
+                    }
+                } else {
+                    self.compositor.handle_event(&event, &mut cx)
+                }
+            }
         };
 
         if should_redraw && !self.editor.should_close() {
@@ -1309,6 +1334,9 @@ impl Application {
     }
 
     fn restore_term(&mut self) -> std::io::Result<()> {
+        if let Some(session) = &mut self.review_transport {
+            session.closed();
+        }
         use helix_view::graphics::CursorKind;
         self.terminal
             .backend_mut()
@@ -1362,6 +1390,10 @@ impl Application {
         S: Stream<Item = std::io::Result<TerminalEvent>> + Unpin,
     {
         self.terminal.claim()?;
+
+        if let Some(session) = &mut self.review_transport {
+            session.ready();
+        }
 
         self.event_loop(input_stream).await;
 
