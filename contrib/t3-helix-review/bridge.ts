@@ -10,6 +10,7 @@ import { pullRequestUrl } from "./t3.ts";
 
 export interface ReviewClient {
   readThread(id: string): Promise<T3ThreadInfo>;
+  linkedPullRequests(id: string): Promise<string[]>;
   send(id: string, message: string, clientRequestId: string, mode?: "auto" | "queue"): Promise<T3SendResult>;
 }
 export type ReviewMode = "work" | "review";
@@ -152,7 +153,12 @@ export class ReviewBridge {
     const runtime = process.env.XDG_RUNTIME_DIR || join(tmpdir(), `helix-${process.getuid?.() ?? "user"}`);
     const socketPath = options.socketPath ?? join(runtime, "helix", `t3-${id}.sock`);
     if (Buffer.byteLength(socketPath) > 103) throw new Error("HX socket path is too long. Use --socket with a shorter private path.");
-    const prUrl = mode === "review" ? options.pullRequest ?? thread.linkedPullRequest?.url ?? previous?.pullRequest : undefined;
+    let prUrl = mode === "review" ? options.pullRequest ?? thread.linkedPullRequest?.url ?? previous?.pullRequest : undefined;
+    if (mode === "review" && !prUrl) {
+      const linked = await options.client.linkedPullRequests(thread.threadId);
+      if (linked.length > 1) throw new Error("This thread links several pull requests. Pass --pr <url> to choose one.");
+      prUrl = linked[0];
+    }
     if (mode === "review" && !prUrl) throw new Error("Link a pull request to this thread or pass --pr <url> before opening Review a PR.");
     const state: State = { version: 1, threadId: thread.threadId, cwd: thread.cwd, repo, branch, baseline, mode,
       ...(prUrl ? { pullRequest: pullRequestUrl(prUrl) } : {}),

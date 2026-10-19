@@ -242,6 +242,13 @@ export class T3Client {
     return { threadId, projectId: thread.projectId, title: thread.title, status: thread.status as T3ThreadStatus, activeRunId: thread.activeRunId, latestRunId: thread.latestRunId, branch: thread.branch, worktreePath: thread.worktreePath, cwd, archived: thread.archived, settled: thread.settled, snoozed: thread.snoozed, recentRuns: output.recentRuns as T3Run[], ...(linkedPullRequest ? { linkedPullRequest } : {}) };
   }
 
+  /** URLs of every PR linked to the thread; T3 with multiple links leaves `linkedPullRequest` null. */
+  async linkedPullRequests(threadId: string): Promise<string[]> {
+    const output = await this.callTool("list_thread_pull_requests", { threadId: requireString(threadId) });
+    if (!Array.isArray(output.pullRequests)) malformed();
+    return output.pullRequests.map(pr => record(pr) && nonempty(pr.url) ? pr.url : malformed());
+  }
+
   async send(threadId: string, message: string, clientRequestId: string, mode: "auto" | "queue" = "auto"): Promise<T3SendResult> {
     if (!nonempty(threadId) || !nonempty(message) || message.length > 120_000 || !nonempty(clientRequestId) || clientRequestId.length > 256) throw new T3Error("invalid_request", "Sending a review requires a thread, message (at most 120,000 characters), and stable clientRequestId (at most 256 characters).");
     if (mode !== "auto" && mode !== "queue") throw new T3Error("invalid_request", "Review delivery mode must be auto or queue.");

@@ -26,8 +26,10 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   const thread: T3ThreadInfo = { threadId: "thread-1", projectId: "project", title: "Fix 'parser' 100%", status: "completed", activeRunId: null, latestRunId: "run-1", branch: "main", worktreePath: null, cwd: repo, archived: false, settled: false, snoozed: false, recentRuns: [] };
   const calls: { id: string; message: string; thread: string; mode: "auto" | "queue" }[] = [];
   let failure = false;
+  const linked: string[] = [];
   const client: ReviewClient = {
     readThread: async () => ({ ...thread }),
+    linkedPullRequests: async () => [...linked],
     send: async (id, message, request, mode = "auto") => {
       calls.push({ id: request, message, thread: id, mode });
       if (failure) throw new Error("connection lost after acceptance");
@@ -59,7 +61,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   const writeBatch = async (name: string, { files = [{ path: join(repo, "file.txt"), baseline: { kind: "git-commit", commit_oid: baseline, blob_oid: blob } }], comments = [], request }: { files?: unknown[]; comments?: unknown[]; request?: unknown } = {}) => {
     await writeFile(join(bridge.outbox, name), JSON.stringify({ format: "helix-review-batch", version: 2, files, comments, ...(request ? { request } : {}) }));
   };
-  return { dir, repo, baseline, blob, thread, client, calls, commands, options, batch, writeBatch,
+  return { dir, repo, baseline, blob, thread, linked, client, calls, commands, options, batch, writeBatch,
     get bridge() { return bridge; }, fail(value: boolean) { failure = value; },
     failAttach(message: string) { attachError = message; },
     async reopen(mode: "work" | "review" = "work") { await bridge.close(); bridge = await ReviewBridge.open({ ...options, mode }); return bridge; } };
@@ -144,6 +146,14 @@ test("work and review retain separate locks, sockets and pending feedback for th
   assert.deepEqual(await review.pending(), []);
   assert.deepEqual(await f.bridge.pending(), ["review.json"]);
   await assert.rejects(ReviewBridge.open({ ...f.options, mode: "review", socketPath: undefined }), /already has an HX review open/u);
+});
+
+test("review mode uses the thread's only PR from T3's link list", async t => {
+  const f = await fixture(t);
+  f.linked.push("https://github.com/team/project/pull/7", "https://github.com/team/project/pull/8");
+  await assert.rejects(ReviewBridge.open({ ...f.options, mode: "review" }), /several pull requests/u);
+  f.linked.pop();
+  assert.equal((await f.reopen("review")).pullRequest, "https://github.com/team/project/pull/7");
 });
 
 test("review mode requires a PR and never forwards a commit request", async t => {
