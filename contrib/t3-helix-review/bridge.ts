@@ -291,8 +291,10 @@ export class ReviewBridge {
   }
 
   async refresh(): Promise<void> {
-    const info = await stat(this.socketPath).catch(() => undefined);
-    if (!info) { this.socketIdentity = undefined; return; }
+    const info = await stat(this.socketPath).catch(error => {
+      this.socketIdentity = undefined;
+      throw error;
+    });
     const identity = `${info.ino}:${info.ctimeMs}`;
     const newSocket = identity !== this.socketIdentity;
     const title = [...`T3: ${this.title.replace(/[\p{Cc}\u2028\u2029]/gu, " ")}`].slice(0, 120).join("");

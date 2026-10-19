@@ -199,6 +199,10 @@ pub(super) fn open_terminal_location(
     let reviewing = cx.editor.review_mode == Some(ReviewMode::Review);
     if reviewing {
         ensure!(
+            !cx.editor.review_pr_loading,
+            super::review_pr::LOADING_MESSAGE
+        );
+        ensure!(
             cx.editor.review_pr.is_some(),
             "Attach the requested pull request before opening review files"
         );

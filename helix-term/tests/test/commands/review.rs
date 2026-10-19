@@ -5596,6 +5596,74 @@ async fn conversation_checkpoint_reports_review_limits_without_blocking_plain_fi
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn explicit_pr_review_waits_for_attachment_before_opening_files() -> anyhow::Result<()> {
+    use helix_view::editor::ReviewMode;
+    let fixture = PrFixture::new("base\nkeep\n", "head\nkeep\n", r#"api\ *) echo '[]';;"#);
+    let dir = fixture.repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    git_ok(dir, &["checkout", "-q", "feature"]);
+    let gate = fixture.gh._dir.path().join("attach-gate");
+    let started = fixture.gh._dir.path().join("attach-started");
+    assert!(Command::new("mkfifo")
+        .args([&gate, &started])
+        .status()?
+        .success());
+    let gh = std::env::var("HELIX_GH")?;
+    let original = fs::read_to_string(&gh)?;
+    fs::write(
+        &gh,
+        original.replace(
+            r"pr\ view\ 7*) ",
+            &format!(
+                "pr\\ view\\ 7*) printf started > '{}'; read ready < '{}'; ",
+                started.display(),
+                gate.display()
+            ),
+        ),
+    )?;
+    let mut app = AppBuilder::new().build()?;
+    app.editor.review_mode = Some(ReviewMode::Review);
+    send_keys(&mut app, ":review-pr-attach 7<ret>").await?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), tokio::fs::read(&started)).await??;
+    let mut early_statuses = Vec::new();
+    for location in [
+        serde_json::json!({"mode": "review", "worktreePath": dir}),
+        serde_json::json!({"mode": "review", "filePath": "file.txt", "line": 2}),
+    ] {
+        send_keys(&mut app, &format!(":review-open '{location}'<ret>")).await?;
+        early_statuses.push(app.editor.get_status().map(|status| status.0.to_string()));
+    }
+    fs::write(&gate, "ready\n")?;
+    wait_for(&mut app, |app| !app.editor.review_pr_loading).await?;
+    for status in early_statuses {
+        assert!(
+            status
+                .as_deref()
+                .is_some_and(|text| text.contains("pull request is loading")),
+            "{status:?}"
+        );
+    }
+    assert_eq!(
+        app.editor.review_pr.as_ref().unwrap().head_oid,
+        fixture.head
+    );
+    let location = serde_json::json!({"mode": "review", "filePath": "file.txt", "line": 2});
+    send_keys(&mut app, &format!(":review-open '{location}'<ret>")).await?;
+    assert_status_not_error(&app.editor);
+    let (view, doc) = current_ref!(app.editor);
+    assert_eq!(doc.path(), Some(fixture.repo.file.as_path()));
+    assert!(doc.review_draft);
+    assert_eq!(
+        doc.selection(view.id)
+            .primary()
+            .cursor_line(doc.text().slice(..)),
+        1
+    );
+    assert_eq!(git_ok(dir, &["status", "--porcelain"]), "");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn explicit_pr_review_edits_suggestion_buffers_without_writing_the_checkout(
 ) -> anyhow::Result<()> {
     use helix_view::editor::ReviewMode;

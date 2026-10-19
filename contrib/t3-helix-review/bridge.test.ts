@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createServer } from "node:net";
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
@@ -108,6 +108,18 @@ test("review mode attaches a linked PR once and asks the agent for proposals wit
   assert.match(f.calls[0].message, /old check/u);
   assert.doesNotMatch(f.calls[0].message, /private unrelated working change/u);
   assert.equal(await readFile(join(f.repo, "file.txt"), "utf8"), "private unrelated working change\n");
+});
+
+test("startup waits for its command socket before treating the PR binding as refreshed", async t => {
+  const f = await fixture(t);
+  f.thread.linkedPullRequest = { url: "https://github.com/team/project/pull/7", repository: "team/project", number: 7 };
+  await f.reopen("review");
+  await rename(f.options.socketPath, `${f.options.socketPath}.waiting`);
+  await assert.rejects(f.bridge.refresh(), { code: "ENOENT" });
+  assert.equal(f.commands.length, 0);
+  await rename(`${f.options.socketPath}.waiting`, f.options.socketPath);
+  await f.bridge.refresh();
+  assert(f.commands.some(command => command.startsWith("review-pr-attach ")));
 });
 
 test("linking a PR does not turn work mode into PR review", async t => {

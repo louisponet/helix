@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
+import { createServer as createSocketServer } from "node:net";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -122,4 +123,58 @@ test("basic editing fallback distinguishes non-Git and unborn repositories from 
   await execute("git", ["-C", f.dir, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "first"]);
   assert.equal(await hasReviewCommit(f.dir), true);
   await assert.rejects(hasReviewCommit(join(f.dir, "missing-directory")), /cannot change to/u);
+});
+
+test("startup retries an asynchronous PR attachment before opening its file and advertising readiness", async t => {
+  const f = await fixture(t);
+  await execute("git", ["-C", f.dir, "init", "-q"]);
+  await execute("git", ["-C", f.dir, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "first"]);
+  const socketPath = join(f.dir, "hx.sock");
+  const commands: string[] = [];
+  let loading = false;
+  let opened = false;
+  let attempts = 0;
+  let child: ReturnType<typeof execFile>;
+  const server = createSocketServer(socket => {
+    let pending = "";
+    socket.on("data", bytes => {
+      const lines = (pending + bytes.toString()).split("\n");
+      pending = lines.pop()!;
+      for (const line of lines) {
+        commands.push(line);
+        if (line.startsWith("review-pr-attach ")) loading = true;
+        if (line.startsWith("review-open ") && line.includes("file.txt")) {
+          attempts++;
+          if (loading) {
+            loading = false;
+            socket.write("error pull request is loading; navigation will be ready when checkout finishes\n");
+            continue;
+          }
+          opened = true;
+        }
+        socket.write("ok\n");
+        if (line.startsWith("review-launch-ready")) {
+          assert(opened);
+          child.kill("SIGTERM");
+        }
+      }
+    });
+  });
+  await new Promise<void>(done => server.listen(socketPath, done));
+  t.after(() => new Promise<void>(done => server.close(() => done())));
+  const thread = { threadId: "thread", title: "Test", cwd: f.dir, branch: null, archived: false, linkedPullRequest: { url: "https://github.com/team/project/pull/7" } };
+  const script = `
+    import { T3Client } from './contrib/t3-helix-review/t3.ts';
+    import { main } from './contrib/t3-helix-review/cli.ts';
+    T3Client.prototype.readThread = async () => (${JSON.stringify(thread)});
+    await main(${JSON.stringify(["--thread", "thread", "--mode", "review", "--attach", "--socket", socketPath, "--state-dir", join(f.dir, "state"), "--file", "file.txt"])});
+  `;
+  await new Promise<void>((done, fail) => {
+    child = execFile(process.execPath, ["--input-type=module", "-e", script], {
+      env: { ...f.env, HX_T3_MCP_URL: "http://127.0.0.1:1/mcp", HX_T3_MCP_TOKEN: "test" }, timeout: 10000,
+    }, error => error ? fail(error) : done());
+  });
+  assert.equal(attempts, 2);
+  assert.equal(commands.filter(command => command.startsWith("review-pr-attach ")).length, 1);
+  assert.equal(commands.filter(command => command.startsWith("review-launch-ready ")).length, 1);
 });
