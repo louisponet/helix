@@ -1,0 +1,12 @@
+{
+  "name": "t3-helix-review",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Review a T3 Code thread in Helix and send selection feedback back to it",
+  "scripts": {
+    "test": "node --test *.test.ts",
+    "install-launcher": "node cli.ts install"
+  },
+  "engines": { "node": ">=23.6" }
+}

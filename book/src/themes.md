@@ -280,8 +280,14 @@ See also [#2380]
 - `diff` - version control changes
   - `plus` - additions
     - `gutter` - gutter indicator
+    - `review` - lines changed since the selected baseline during [`:review`](./review.md)
+      - `staged` - those lines when their hunk is already staged in the git index
+      - `committed` - those lines when their hunk was committed after the baseline, best a muted tint that is still clearly visible against the background (falls back to `staged`)
   - `minus` - deletions
     - `gutter` - gutter indicator
+    - `review` - old baseline lines shown inline during [`:review`](./review.md)
+      - `staged` - those old lines when their hunk is already staged in the git index
+      - `committed` - those old lines when their hunk was committed after the baseline, best a muted but clearly visible tint with a dimmed, readable foreground (falls back to `staged`)
   - `delta` - modifications
     - `moved` - renamed or moved files/changes
     - `conflict` - merge conflicts
@@ -362,6 +368,9 @@ These scopes are used for theming the editor interface:
 | `ui.selection.primary`            |                                                                                                |
 | `ui.highlight`                    | Highlighted lines in the picker preview                                                        |
 | `ui.highlight.frameline`          | Line at which debugging execution is paused at                                                 |
+| `ui.review.thread`                | Pull request comment threads shown above their line while reviewing a pull request (`:review-pr`) |
+| `ui.review.comment`               | Pending review comments (`:review-comment`, `:review-ask`) shown below the lines they are on |
+| `ui.review.owner`                 | The pi session (or `you`) owning a review block, right-aligned on its first line (dim) |
 | `ui.cursorline.primary`           | The line of the primary cursor ([if cursorline is enabled][editor-section])                    |
 | `ui.cursorline.secondary`         | The lines of any other cursors ([if cursorline is enabled][editor-section])                    |
 | `ui.cursorcolumn.primary`         | The column of the primary cursor ([if cursorcolumn is enabled][editor-section])                |

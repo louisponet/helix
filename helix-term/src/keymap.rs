@@ -399,6 +399,26 @@ mod tests {
     }
 
     #[test]
+    fn space_a_is_the_review_menu_and_g_goes_to_a_line() {
+        let normal = &default::default()[&Mode::Normal];
+        let key = |s: &str| s.parse::<KeyEvent>().unwrap();
+        match normal.search(&[key("space"), key("A")]) {
+            Some(KeyTrie::Node(review)) => {
+                assert_eq!(review.name, "Review");
+                assert!(matches!(
+                    review.get(&key("f")),
+                    Some(KeyTrie::MappableCommand(command)) if command.name() == "review_files_picker"
+                ));
+            }
+            other => panic!("space A is not the Review menu: {other:?}"),
+        }
+        assert!(matches!(
+            normal.search(&[key("G")]),
+            Some(KeyTrie::MappableCommand(command)) if command.name() == "goto_line"
+        ));
+    }
+
+    #[test]
     fn merge_partial_keys() {
         let keymap = hashmap! {
             Mode::Normal => keymap!({ "Normal mode"

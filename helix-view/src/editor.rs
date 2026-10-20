@@ -10,6 +10,7 @@ use crate::{
     info::Info,
     input::KeyEvent,
     register::Registers,
+    review::ReviewBatch,
     theme::{self, Theme},
     tree::{self, Tree},
     Document, DocumentId, View, ViewId,
@@ -804,6 +805,9 @@ pub enum StatusLineElement {
 
     /// Indicator for when code actions are available
     CodeActionHint,
+
+    /// The review baseline, pending review comments and suspension, while the buffer is reviewed
+    Review,
 }
 
 // Cursor shape is read and used on every rendered frame and so needs
@@ -1291,6 +1295,42 @@ pub struct Editor {
     pub language_servers: helix_lsp::Registry,
     pub diagnostics: Diagnostics,
     pub diff_providers: DiffProviderRegistry,
+    /// Review comments and reviewed files waiting for the next handoff or `:review-export`.
+    pub review_batch: ReviewBatch,
+    /// Commit that documents in the workspace are reviewed against, see `:review-baseline`.
+    pub review_baseline: Option<String>,
+    /// Directory that explicit review handoffs export review batches to.
+    pub review_handoff: Option<PathBuf>,
+    /// Display name for the handoff destination, independent of a batch's `@target`.
+    pub review_handoff_label: Option<String>,
+    /// The baseline the reviewer chose (`G b`, `G -`, `G +` or a typed `:review-baseline`) over
+    /// the one the pi hook sent; while set, the hook's `:review-baseline` only refreshes it.
+    pub review_user_pin: Option<String>,
+    /// The baseline the pi hook last sent over the command socket.
+    pub review_hook_baseline: Option<String>,
+    /// The document `:review-comment` is writing, whose save exports the review batch.
+    pub review_send_on_write: Option<DocumentId>,
+    /// What `search_next_or_review_next` and `search_prev_or_review_prev` move between: the last
+    /// used of searching and walking review changes.
+    pub nav_mode: NavMode,
+    /// The GitHub pull request under review, see `:review-pr`.
+    pub review_pr: Option<crate::review::PullRequest>,
+    pub review_mode: Option<ReviewMode>,
+    pub review_pr_loading: bool,
+    /// The pull request's comment threads, shown in the reviews of their files.
+    pub review_pr_threads: Vec<crate::review::ReviewThread>,
+    /// Comments pending for the pull request, posted by `:review-submit` rather than handed to pi.
+    pub review_pr_comments: Vec<crate::review::ReviewComment>,
+    /// Whether the typed command running came from the command socket (the pi hook), not the user.
+    pub socket_command: bool,
+    /// The pi session the last handoff was addressed to with `@label`, if it was.
+    pub review_target: Option<String>,
+    /// The scratch buffer `:review-diff` writes to.
+    pub review_diff: Option<DocumentId>,
+    pub review_snapshot: Option<DocumentId>,
+    pub review_launch_ready: bool,
+    /// What review navigation last found changed since the baseline, while still valid.
+    pub review_nav: Option<crate::review::ReviewNav>,
 
     pub debug_adapters: dap::registry::Registry,
     pub breakpoints: HashMap<PathBuf, Vec<Breakpoint>>,
@@ -1409,7 +1449,40 @@ pub enum CloseError {
     SaveError(anyhow::Error),
 }
 
+/// What `n`/`N` mapped to `search_next_or_review_next`/`search_prev_or_review_prev` move between.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NavMode {
+    #[default]
+    Review,
+    Search,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewMode {
+    Work,
+    Review,
+}
+
 impl Editor {
+    /// The directory review batches are exported to: the `:review-handoff` one, else the pi
+    /// extension's `<workspace>/.pi/helix-review/outbox` mailbox when it exists and every
+    /// reviewed or pending path is inside the workspace, so the agent there gets only its files.
+    pub fn review_handoff_dir(&self) -> Option<PathBuf> {
+        if let Some(dir) = &self.review_handoff {
+            return Some(dir.clone());
+        }
+        let workspace = helix_loader::find_workspace().0;
+        let outbox = workspace.join(".pi/helix-review/outbox");
+        let inside = self
+            .documents()
+            .filter(|doc| doc.review.is_some())
+            .filter_map(|doc| doc.path())
+            .chain(self.review_batch.files())
+            .all(|path| path.starts_with(&workspace));
+        (inside && outbox.is_dir()).then_some(outbox)
+    }
+
     pub fn new(
         mut area: Rect,
         theme_loader: Arc<theme::Loader>,
@@ -1441,6 +1514,29 @@ impl Editor {
             language_servers,
             diagnostics: Diagnostics::new(),
             diff_providers: DiffProviderRegistry::default(),
+            review_batch: ReviewBatch::default(),
+            review_baseline: None,
+            review_handoff: None,
+            review_handoff_label: None,
+            review_target: None,
+            review_user_pin: None,
+            review_hook_baseline: None,
+            review_send_on_write: None,
+            nav_mode: NavMode::Review,
+            review_pr: None,
+            review_mode: match std::env::var("HELIX_REVIEW_MODE").as_deref() {
+                Ok("work") => Some(ReviewMode::Work),
+                Ok("review") => Some(ReviewMode::Review),
+                _ => None,
+            },
+            review_pr_loading: false,
+            review_pr_threads: Vec::new(),
+            review_pr_comments: Vec::new(),
+            socket_command: false,
+            review_diff: None,
+            review_snapshot: None,
+            review_launch_ready: false,
+            review_nav: None,
             debug_adapters: dap::registry::Registry::new(),
             breakpoints: HashMap::new(),
             syn_loader,
@@ -1631,6 +1727,12 @@ impl Editor {
     /// moves/renames a path, invoking any event handlers (currently only lsp)
     /// and calling `set_doc_path` if the file is open in the editor
     pub fn move_path(&mut self, old_path: &Path, new_path: &Path) -> io::Result<()> {
+        if self.review_mode == Some(ReviewMode::Review) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Review a PR keeps checkout files unchanged",
+            ));
+        }
         let new_path = canonicalize(new_path);
         // sanity check
         if old_path == new_path {
@@ -1685,6 +1787,12 @@ impl Editor {
     }
 
     pub fn create_path(&mut self, path: &Path, is_dir: bool) -> io::Result<()> {
+        if self.review_mode == Some(ReviewMode::Review) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Review a PR keeps checkout files unchanged",
+            ));
+        }
         let path = canonicalize(path);
         let language_servers: Vec<_> = self
             .language_servers
@@ -1730,6 +1838,12 @@ impl Editor {
     }
 
     pub fn delete_path(&mut self, path: &Path, recursive: bool) -> io::Result<()> {
+        if self.review_mode == Some(ReviewMode::Review) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Review a PR keeps checkout files unchanged",
+            ));
+        }
         let path = canonicalize(path);
         let is_dir = path.is_dir();
         let language_servers: Vec<_> = self
@@ -1957,6 +2071,8 @@ impl Editor {
                     && doc.path().is_none()
                     // If the buffer we are changing to is not this buffer
                     && id != doc.id
+                    // The :review-diff buffer is unmodified but generated, and kept for refreshes.
+                    && self.review_diff != Some(doc.id)
                     // Ensure the buffer is not displayed in any other splits.
                     && !self
                         .tree
@@ -2045,6 +2161,7 @@ impl Editor {
 
     /// Generate an id for a new document and register it.
     fn new_document(&mut self, mut doc: Document) -> DocumentId {
+        doc.review_draft = self.review_mode == Some(ReviewMode::Review);
         let id = self.next_document_id;
         // Safety: adding 1 from 1 is fine, practically impossible to reach usize max
         self.next_document_id =
@@ -2130,6 +2247,13 @@ impl Editor {
             );
 
             let id = self.new_document(doc);
+            if self.review_mode == Some(ReviewMode::Review) && self.review_pr.is_some() {
+                if let Err(error) = self.initialize_review_draft(id) {
+                    self.documents.remove(&id);
+                    self.saves.remove(&id);
+                    return Err(error.into());
+                }
+            }
             self.launch_language_servers(id);
 
             helix_event::dispatch(DocumentDidOpen {
@@ -2137,12 +2261,160 @@ impl Editor {
                 doc: id,
             });
 
+            if let Err(err) = self.start_baseline_review(id) {
+                log::info!("not reviewing {}: {err:#}", path.display());
+            }
+
             id
         };
 
         self.switch(id, action);
 
         Ok(id)
+    }
+
+    pub fn initialize_review_draft(&mut self, doc_id: DocumentId) -> anyhow::Result<()> {
+        let pr = self
+            .review_pr
+            .as_ref()
+            .ok_or_else(|| anyhow!("no pull request attached"))?;
+        let previous = &self.documents[&doc_id];
+        let path = previous
+            .path()
+            .ok_or_else(|| anyhow!("buffer has no path"))?
+            .to_owned();
+        let trust_full = self
+            .workspace_trust
+            .query(previous.workspace_root(), TrustQuery::Git)
+            .is_trusted();
+        let head = self
+            .diff_providers
+            .get_commit_base(&path, &pr.head_oid, trust_full)?;
+        let (text, encoding, has_bom) =
+            crate::document::from_reader(&mut head.data.as_slice(), None)?;
+        let mut doc = Document::from(
+            text,
+            Some((encoding, has_bom)),
+            self.config.clone(),
+            self.syn_loader.clone(),
+        );
+        doc.id = doc_id;
+        doc.set_path(Some(&path));
+        doc.detect_language(&self.syn_loader.load());
+        doc.detect_editor_config();
+        doc.detect_indent_and_line_ending();
+        doc.review_draft = true;
+        for view in previous.selections().keys() {
+            doc.ensure_view_init(*view);
+        }
+        let mut review = doc.load_review(&self.diff_providers, trust_full, Some(&pr.merge_base))?;
+        review.set_deleted_file(head.blob_id.is_none());
+        doc.set_review(review);
+        for server in previous.language_servers() {
+            server.text_document_did_close(previous.identifier());
+        }
+        self.documents.insert(doc_id, doc);
+        Ok(())
+    }
+
+    /// Starts reviewing the unmodified, unreviewed document `doc_id` against the review baseline
+    /// if it is in the workspace, and shows the review summary.
+    pub fn start_baseline_review(&mut self, doc_id: DocumentId) -> anyhow::Result<()> {
+        let (Some(commit), Some(doc)) = (&self.review_baseline, self.documents.get_mut(&doc_id))
+        else {
+            return Ok(());
+        };
+        let workspace = helix_loader::find_workspace().0;
+        if doc.review.is_some()
+            || doc.review_opt_out.as_ref() == Some(commit)
+            || doc.is_modified()
+            || !doc.path().is_some_and(|path| path.starts_with(&workspace))
+        {
+            return Ok(());
+        }
+        let trust_full = self
+            .workspace_trust
+            .query(doc.workspace_root(), TrustQuery::Git)
+            .is_trusted();
+        let review = doc.load_review(&self.diff_providers, trust_full, Some(commit))?;
+        let status = review.summary();
+        doc.set_review(review);
+        self.share_review_threads();
+        self.refresh_review_owners();
+        self.set_status(status);
+        Ok(())
+    }
+
+    /// Gives every reviewed document the pull request threads on its file.
+    /// Names the owners of the blocks of every reviewed buffer from the pi hook's ledger, when
+    /// its entry matches the unmodified file on disk.
+    pub fn refresh_review_owners(&mut self) {
+        let ownership = crate::review::Ownership::load(&helix_loader::find_workspace().0);
+        for doc in self.documents.values_mut() {
+            let Some(path) = doc.path().map(Path::to_path_buf) else {
+                continue;
+            };
+            let modified = doc.is_modified();
+            let Some(review) = doc.review.as_mut() else {
+                continue;
+            };
+            let file = ownership.files.get(&path).filter(|file| {
+                !modified
+                    && std::fs::read(&path)
+                        .ok()
+                        .and_then(|data| helix_vcs::blob_id(&data))
+                        .is_some_and(|blob| blob == file.blob)
+            });
+            review.set_owners(file);
+        }
+    }
+
+    pub fn share_review_threads(&mut self) {
+        let threads = &self.review_pr_threads;
+        for doc in self.documents.values_mut() {
+            let Some(path) = doc.path().map(Path::to_path_buf) else {
+                continue;
+            };
+            if let Some(review) = doc.review.as_mut() {
+                review.set_threads(
+                    threads
+                        .iter()
+                        .filter(|thread| thread.path == path)
+                        .cloned()
+                        .collect(),
+                );
+            }
+        }
+        self.share_review_comments();
+    }
+
+    /// Shows the pending comments, for pi and for the pull request, in the reviews of their files.
+    pub fn share_review_comments(&mut self) {
+        let mut comments: Vec<_> = (self.review_batch.comments().iter())
+            .map(|comment| ("pi", comment))
+            .chain(self.review_pr_comments.iter().map(|comment| {
+                let kind = if comment.reply_to.is_some() {
+                    "reply"
+                } else {
+                    "pr"
+                };
+                (kind, comment)
+            }))
+            .collect();
+        comments.sort_by_key(|(_, comment)| comment.created);
+        for doc in self.documents.values_mut() {
+            let Some(path) = doc.path().map(Path::to_path_buf) else {
+                continue;
+            };
+            if let Some(review) = doc.review.as_mut() {
+                review.set_comments(
+                    (comments.iter())
+                        .filter(|(_, comment)| comment.path == path)
+                        .map(|&(kind, comment)| (kind, comment.clone()))
+                        .collect(),
+                );
+            }
+        }
     }
 
     pub fn close(&mut self, id: ViewId) {

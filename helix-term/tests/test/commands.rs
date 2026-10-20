@@ -5,6 +5,7 @@ use super::*;
 mod insert;
 mod movement;
 mod reverse_selection_contents;
+mod review;
 mod rotate_selection_contents;
 mod write;
 

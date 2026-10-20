@@ -9,6 +9,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use crate::diff::line_cache::InternedRopeLines;
 use crate::diff::worker::DiffWorker;
 
 pub use imara_diff::Hunk;
@@ -110,6 +111,94 @@ impl DiffHandle {
         };
         self.channel.send(event).is_ok()
     }
+}
+
+/// Computes the hunks between `diff_base` and `doc` on the calling thread. Returns `None` if
+/// either text is too large to diff.
+pub fn compute_hunks(diff_base: Rope, doc: Rope) -> Option<Vec<Hunk>> {
+    let lines = InternedRopeLines::new(diff_base, doc);
+    let mut diff = imara_diff::Diff::default();
+    worker::diff_lines(&mut diff, lines.interned_lines()?);
+    Some(diff.hunks().collect())
+}
+
+/// The line hunks of the change from `before` to `after`, compared as raw bytes.
+pub fn line_hunks(before: &[u8], after: &[u8]) -> Vec<Hunk> {
+    let input = imara_diff::InternedInput::new(before, after);
+    let mut diff = imara_diff::Diff::compute(ALGORITHM, &input);
+    diff.postprocess_lines(&input);
+    diff.hunks().collect()
+}
+
+/// `before` with only `hunk` of the change from `before` to `after` applied.
+pub fn apply_hunk(before: &[u8], after: &[u8], hunk: &Hunk) -> Vec<u8> {
+    let before: Vec<&[u8]> = imara_diff::sources::byte_lines(before).collect();
+    let after: Vec<&[u8]> = imara_diff::sources::byte_lines(after).collect();
+    let range = |range: &std::ops::Range<u32>| range.start as usize..range.end as usize;
+    before[..hunk.before.start as usize]
+        .iter()
+        .chain(&after[range(&hunk.after)])
+        .chain(&before[hunk.before.end as usize..])
+        .flat_map(|line| line.iter().copied())
+        .collect()
+}
+
+/// The hunk of `hunks` whose worktree (`after`) lines meet `lines`. An empty range, a removal,
+/// meets the hunks at its position, and a removal is also found from the line on either side.
+pub fn find_hunk<'a>(hunks: &'a [Hunk], lines: &std::ops::Range<usize>) -> Option<&'a Hunk> {
+    let after = |hunk: &Hunk| hunk.after.start as usize..hunk.after.end as usize;
+    let exact = |hunk: &&Hunk| {
+        let range = after(hunk);
+        match (range.is_empty(), lines.is_empty()) {
+            (false, false) => range.start < lines.end && lines.start < range.end,
+            (true, true) => range.start == lines.start,
+            _ => false,
+        }
+    };
+    let touching = |hunk: &&Hunk| {
+        let range = after(hunk);
+        (range.is_empty() || lines.is_empty())
+            && range.start <= lines.end
+            && lines.start <= range.end
+    };
+    hunks
+        .iter()
+        .find(exact)
+        .or_else(|| hunks.iter().find(touching))
+}
+
+/// How many hunks of the change from `base` to `worktree` the index content `index` already holds
+/// in full, and how many hunks there are.
+pub fn staged_hunk_count(base: &[u8], index: &[u8], worktree: &[u8]) -> (usize, usize) {
+    let unstaged = line_hunks(index, worktree);
+    let changes = line_hunks(base, worktree);
+    let staged = changes
+        .iter()
+        .filter(|hunk| {
+            let lines = hunk.after.start as usize..hunk.after.end as usize;
+            find_hunk(&unstaged, &lines).is_none()
+        })
+        .count();
+    (staged, changes.len())
+}
+
+/// Formats the changes from `before` to `after` as unified diff hunks with three lines of
+/// context, without file headers.
+pub fn unified_diff(before: &str, after: &str) -> String {
+    use imara_diff::{BasicLineDiffPrinter, InternedInput, UnifiedDiffConfig};
+
+    let input = InternedInput::new(
+        imara_diff::sources::lines(before),
+        imara_diff::sources::lines(after),
+    );
+    let mut diff = imara_diff::Diff::compute(ALGORITHM, &input);
+    diff.postprocess_lines(&input);
+    diff.unified_diff(
+        &BasicLineDiffPrinter(&input.interner),
+        UnifiedDiffConfig::default(),
+        &input,
+    )
+    .to_string()
 }
 
 /// synchronous debounce value should be low

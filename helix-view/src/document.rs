@@ -47,6 +47,7 @@ use crate::{
     editor::Config,
     events::{DocumentDidChange, SelectionDidChange},
     expansion,
+    review::{Review, ReviewBaseline},
     view::ViewPosition,
     DocumentId, Editor, Theme, View, ViewId,
 };
@@ -136,6 +137,8 @@ pub enum DocumentOpenError {
     IrregularFile,
     #[error(transparent)]
     IoError(#[from] io::Error),
+    #[error(transparent)]
+    Review(#[from] anyhow::Error),
 }
 
 pub struct Document {
@@ -207,12 +210,22 @@ pub struct Document {
     pub(crate) language_servers: HashMap<LanguageServerName, Arc<Client>>,
 
     diff_handle: Option<DiffHandle>,
+    /// The diff base from the diff providers. While a review is active, the differ compares
+    /// against its snapshot instead.
+    diff_base: Option<Rope>,
     version_control_head: Option<Arc<ArcSwap<Box<str>>>>,
+    /// Inline review against an index or commit snapshot, see [`Document::load_review`]. Start
+    /// and close it with [`Document::set_review`] and [`Document::close_review`].
+    pub review: Option<Review>,
+    /// The editor-wide review baseline under which the reviewer closed this buffer's review.
+    /// That baseline does not review the buffer again; any other review clears it.
+    pub review_opt_out: Option<String>,
 
     // when document was used for most-recent-used buffer picker
     pub focused_at: std::time::Instant,
 
     pub readonly: bool,
+    pub review_draft: bool,
 
     pub previous_diagnostic_ids: HashMap<LanguageServerId, String>,
 
@@ -760,10 +773,14 @@ impl Document {
             modified_since_accessed: false,
             language_servers: HashMap::new(),
             diff_handle: None,
+            diff_base: None,
             config,
             version_control_head: None,
+            review: None,
+            review_opt_out: None,
             focused_at: std::time::Instant::now(),
             readonly: false,
+            review_draft: false,
             jump_labels: HashMap::new(),
             document_highlights: HashMap::new(),
             code_action_hints: HashSet::new(),
@@ -1003,6 +1020,10 @@ impl Document {
         impl Future<Output = Result<DocumentSavedEvent, anyhow::Error>> + 'static + Send,
         anyhow::Error,
     > {
+        anyhow::ensure!(
+            !self.review_draft,
+            "Suggestion drafts stay in HX; publish them from Review a PR"
+        );
         log::debug!(
             "submitting save of doc '{:?}'",
             self.path().map(|path| path.to_string_lossy())
@@ -1269,6 +1290,15 @@ impl Document {
         };
     }
 
+    /// Whether saving would overwrite a newer external change. Missing or unreadable files fail.
+    pub fn is_modified_on_disk(&self) -> Result<bool, Error> {
+        if self.review_draft {
+            return Ok(false);
+        }
+        let path = self.path().ok_or_else(|| anyhow!("buffer has no path"))?;
+        Ok(self.last_saved_time < path.metadata()?.modified()?)
+    }
+
     // Detect if the file is readonly and change the readonly field if necessary (unix only)
     pub fn detect_readonly(&mut self) {
         // Allows setting the flag for files the user cannot modify, like root files
@@ -1285,6 +1315,10 @@ impl Document {
         provider_registry: &DiffProviderRegistry,
         trust_full: bool,
     ) -> Result<(), Error> {
+        anyhow::ensure!(
+            !self.review_draft,
+            "Suggestion drafts use the attached PR snapshot; reopen the review to reload it"
+        );
         let encoding = self.encoding;
         let path = match self.path() {
             None => return Ok(()),
@@ -1310,10 +1344,7 @@ impl Document {
         self.pickup_last_saved_time();
         self.detect_indent_and_line_ending();
 
-        match provider_registry.get_diff_base(&path, trust_full) {
-            Some(diff_base) => self.set_diff_base(diff_base),
-            None => self.diff_handle = None,
-        }
+        self.refresh_diff_base(provider_registry, trust_full);
 
         self.version_control_head = provider_registry.get_current_head_name(&path, trust_full);
 
@@ -1446,6 +1477,9 @@ impl Document {
         self.document_highlight_controllers.remove(&view_id);
         self.code_action_hints.remove(&view_id);
         self.code_action_controllers.remove(&view_id);
+        if let Some(review) = &mut self.review {
+            review.remove_view(view_id);
+        }
     }
 
     /// Apply a [`Transaction`] to the [`Document`] to change its text.
@@ -1528,6 +1562,13 @@ impl Document {
         // start computing the diff in parallel
         if let Some(diff_handle) = &self.diff_handle {
             diff_handle.update_document(self.text.clone(), false);
+        }
+        if let Some(review) = &mut self.review {
+            let active = !review.is_suspended();
+            review.update(&self.text);
+            if active && review.is_suspended() {
+                self.update_differ();
+            }
         }
 
         // map diagnostics over changes too
@@ -1989,17 +2030,108 @@ impl Document {
         self.diff_handle.as_ref()
     }
 
-    /// Intialize/updates the differ for this document with a new base.
+    /// Sets the diff base from the diff providers. While a review is active, the differ keeps
+    /// comparing against the review snapshot.
     pub fn set_diff_base(&mut self, diff_base: Vec<u8>) {
-        if let Ok((diff_base, ..)) = from_reader(&mut diff_base.as_slice(), Some(self.encoding)) {
-            if let Some(differ) = &self.diff_handle {
-                differ.update_diff_base(diff_base);
-                return;
+        self.diff_base = from_reader(&mut diff_base.as_slice(), Some(self.encoding))
+            .ok()
+            .map(|(diff_base, ..)| diff_base);
+        self.update_differ();
+    }
+
+    /// Rereads the diff base from the diff providers.
+    pub fn refresh_diff_base(
+        &mut self,
+        provider_registry: &DiffProviderRegistry,
+        trust_full: bool,
+    ) {
+        match self
+            .path()
+            .and_then(|path| provider_registry.get_diff_base(path, trust_full))
+        {
+            Some(diff_base) => self.set_diff_base(diff_base),
+            None => {
+                self.diff_base = None;
+                self.update_differ();
             }
-            self.diff_handle = Some(DiffHandle::new(diff_base, self.text.clone()))
-        } else {
-            self.diff_handle = None;
         }
+    }
+
+    /// Starts or replaces the review. The differ compares against its snapshot until the review
+    /// is closed or suspended.
+    pub fn set_review(&mut self, mut review: Review) {
+        if let Some(previous) = self.review.take() {
+            review.keep_threads(previous);
+        }
+        self.review = Some(review);
+        self.review_opt_out = None;
+        self.update_differ();
+    }
+
+    /// Ends the review and restores the diff base from the diff providers. Returns the review.
+    pub fn close_review(
+        &mut self,
+        provider_registry: &DiffProviderRegistry,
+        trust_full: bool,
+    ) -> Option<Review> {
+        let review = self.review.take()?;
+        self.refresh_diff_base(provider_registry, trust_full);
+        Some(review)
+    }
+
+    /// Points the differ at the active review's snapshot, or else at the diff base.
+    fn update_differ(&mut self) {
+        let diff_base = match &self.review {
+            Some(review) if !review.is_suspended() => Some(review.snapshot().clone()),
+            _ => self.diff_base.clone(),
+        };
+        match (diff_base, &self.diff_handle) {
+            (Some(diff_base), Some(differ)) => {
+                differ.update_diff_base(diff_base);
+            }
+            (Some(diff_base), None) => {
+                self.diff_handle = Some(DiffHandle::new(diff_base, self.text.clone()))
+            }
+            (None, _) => self.diff_handle = None,
+        }
+    }
+
+    /// Loads a candidate review without replacing the active review.
+    pub fn load_review(
+        &self,
+        provider_registry: &DiffProviderRegistry,
+        trust_full: bool,
+        revision: Option<&str>,
+    ) -> Result<Review, Error> {
+        let path = self.path().ok_or_else(|| anyhow!("buffer has no path"))?;
+        let (data, baseline) = match revision {
+            Some(revision) => {
+                let base = provider_registry.get_commit_base(path, revision, trust_full)?;
+                (
+                    base.data,
+                    ReviewBaseline::GitCommit {
+                        commit_oid: base.commit_id,
+                        blob_oid: base.blob_id,
+                    },
+                )
+            }
+            None => {
+                let (data, blob_oid) = provider_registry.get_index_base(path, trust_full)?;
+                (data, ReviewBaseline::GitIndex { blob_oid })
+            }
+        };
+        let (snapshot, ..) = from_reader(&mut data.as_slice(), Some(self.encoding))?;
+        let mut review = Review::new(snapshot, baseline, &self.text)?;
+        // Against a commit, part of the change may already be in the index, or even committed.
+        if revision.is_some() {
+            if let Ok((index, _)) = provider_registry.get_index_base(path, trust_full) {
+                let head = provider_registry
+                    .get_commit_base(path, "HEAD", trust_full)
+                    .ok();
+                review.set_index(&index, head.as_ref().map(|head| &head.data[..]), &self.text);
+            }
+        }
+        Ok(review)
     }
 
     pub fn version_control_head(&self) -> Option<Arc<Box<str>>> {

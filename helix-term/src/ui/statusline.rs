@@ -63,6 +63,18 @@ pub fn render(context: &mut RenderContext, viewport: Rect, surface: &mut Surface
 
     let config = context.editor.config();
 
+    if context
+        .doc
+        .review
+        .as_ref()
+        .is_some_and(|review| review.is_suspended())
+    {
+        context.parts.left.0.push(Span::styled(
+            "Review suspended (limit; :review-refresh) ",
+            context.editor.theme.get("error"),
+        ));
+    }
+
     for element_id in &config.statusline.left {
         let render = get_render_function(*element_id);
         (render)(context, |context, span| {
@@ -158,6 +170,7 @@ where
         helix_view::editor::StatusLineElement::Register => render_register,
         helix_view::editor::StatusLineElement::CurrentWorkingDirectory => render_cwd,
         helix_view::editor::StatusLineElement::CodeActionHint => render_code_action_hint,
+        helix_view::editor::StatusLineElement::Review => render_review,
     }
 }
 
@@ -174,7 +187,12 @@ where
         Mode::Normal => &modenames.normal,
     };
     let content = if visible {
-        format!(" {mode_str} ")
+        let review_mode = match context.editor.review_mode {
+            Some(helix_view::editor::ReviewMode::Work) => " WORK",
+            Some(helix_view::editor::ReviewMode::Review) => " PR DRAFT",
+            None => "",
+        };
+        format!(" {mode_str}{review_mode} ")
     } else {
         // If not focused, explicitly leave an empty space instead of returning None.
         " ".repeat(mode_str.width() + 2)
@@ -370,11 +388,19 @@ fn render_position<'a, F>(context: &mut RenderContext<'a>, write: F)
 where
     F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
 {
-    let position = get_position(context);
-    write(
-        context,
-        format!(" {}:{} ", position.row + 1, position.col + 1).into(),
-    );
+    let old_focus = context.doc.review.as_ref().and_then(|review| {
+        let focus = review.focus(context.view.id)?;
+        let snapshot = review.snapshot().slice(..);
+        Some(coords_at_pos(snapshot, focus.range.cursor(snapshot)))
+    });
+    let text = match old_focus {
+        Some(position) => format!(" old {}:{} ", position.row + 1, position.col + 1),
+        None => {
+            let position = get_position(context);
+            format!(" {}:{} ", position.row + 1, position.col + 1)
+        }
+    };
+    write(context, text.into());
 }
 
 fn render_total_line_numbers<'a, F>(context: &mut RenderContext<'a>, write: F)
@@ -583,6 +609,71 @@ where
         .to_string_lossy()
         .to_string();
     write(context, cwd.into())
+}
+
+fn render_review<'a, F>(context: &mut RenderContext<'a>, write: F)
+where
+    F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
+{
+    let Some(review) = &context.doc.review else {
+        if let Some(label) = &context.editor.review_handoff_label {
+            write(context, format!(" {label} → review ").into());
+        }
+        return;
+    };
+    let pr = match &context.editor.review_pr {
+        Some(pr) => format!(" #{}", pr.number),
+        None => String::new(),
+    };
+    let mut text = match review.baseline().revision() {
+        Some(commit) => {
+            let stepped = if context.editor.review_user_pin.is_some() {
+                "*"
+            } else {
+                ""
+            };
+            format!(" review{pr} {}{stepped}", &commit[..8])
+        }
+        None => format!(" review{pr} index"),
+    };
+    let hunks = review.hunk_count();
+    if hunks > 0 {
+        let suffix = if hunks == 1 { "" } else { "s" };
+        text.push_str(&format!(" {hunks} hunk{suffix}"));
+    }
+    let committed = review.committed_hunks();
+    if committed > 0 {
+        text.push_str(&format!(" {committed} committed"));
+    }
+    let (reviewed, total) = review
+        .review_changes(context.editor.review_pr.is_some())
+        .fold((0, 0), |(reviewed, total), (_, _, marked)| {
+            (reviewed + usize::from(marked), total + 1)
+        });
+    if total > 0 {
+        text.push_str(&format!(" {reviewed}/{total} reviewed"));
+    }
+    let staged = review.staged_hunks();
+    if staged > 0 {
+        text.push_str(&format!(" {staged} staged"));
+    }
+    let comments =
+        context.editor.review_pr_comments.len() + context.editor.review_batch.comments().len();
+    if comments > 0 {
+        let suffix = if comments == 1 { "" } else { "s" };
+        text.push_str(&format!(" {comments} comment{suffix}"));
+    }
+    if review.is_suspended() {
+        text.push_str(" suspended");
+    }
+    if let Some(label) = &context.editor.review_handoff_label {
+        text = format!(" {label} →{text}");
+    }
+    if let Some(target) = &context.editor.review_target {
+        text.push_str(&format!(" @{target}"));
+    }
+    text.push(' ');
+    write(context, text.into());
 }
 
 fn render_code_action_hint<'a, F>(context: &mut RenderContext<'a>, write: F)

@@ -82,6 +82,8 @@ Normal mode is the default mode when you launch helix. You can return to it from
 | `O`         | Open new line above selection                                        | `open_above`              |
 | `.`         | Repeat last insert                                                   | N/A                       |
 | `u`         | Undo change                                                          | `undo`                    |
+| `Enter`     | Stage or unstage uncommitted work; mark a committed or pull request change reviewed and advance (only while [reviewing](./review.md)) | `review_stage_hunk` |
+| `Shift-Enter` | Jump back to the previous unstaged review hunk (any previous block when everything is committed; only while [reviewing](./review.md)) | `review_jump_prev` |
 | `U`         | Redo change                                                          | `redo`                    |
 | `Alt-u`     | Move backward in history                                             | `earlier`                 |
 | `Alt-U`     | Move forward in history                                              | `later`                   |
@@ -295,6 +297,7 @@ This layer is a kludge of mappings, mostly pickers.
 | -----   | -----------                                                             | -------                                    |
 | `f`     | Open file picker at LSP workspace root                                  | `file_picker`                              |
 | `F`     | Open file picker at current working directory                           | `file_picker_in_current_directory`         |
+| `A`     | Enter [review mode](#review-mode)                                       | N/A                                        |
 | `e`     | Open file explorer at workspace root                                     | `file_explorer`                            |
 | `.`     | Open file explorer at current buffer's directory                        | `file_explorer_in_current_buffer_directory`|
 | `b`     | Open buffer picker                                                      | `buffer_picker`                            |
@@ -354,6 +357,36 @@ Displays the signature of the selected completion item. Remapping currently not 
 | ----    | -----------        |
 | `Alt-p` | Previous signature |
 | `Alt-n` | Next signature     |
+
+#### Review mode
+
+Accessed by typing `Space A` in [normal mode](#normal-mode). The commands work on
+the [inline review](./review.md) and start one against `HEAD` when needed.
+
+| Key | Description                                                  | Command                  |
+| --- | -----------                                                  | -------                  |
+| `f` | Pick a file changed since the review baseline                | `review_files_picker`    |
+| `d` | Show the review as one diff                                  | `review_diff_buffer`     |
+| `g` | Open the file of the review diff hunk under the cursor       | `review_diff_open_hunk`  |
+| `o` | Focus the old review text nearest the cursor                 | `review_old_text`        |
+| `c` | Send a comment on the selections (opens `:review-comment `)  | `review_comment_prompt`  |
+| `a` | Send a comment to the agent, also on a pull request (opens `:review-ask `) | `review_ask_prompt`      |
+| `C` | Pick a pending review comment                                | `review_comments_picker` |
+| `u` | Drop the latest pending review comment                       | `review_uncomment_latest`|
+| `s` | Stage or unstage the review hunks the selections touch       | `review_toggle_stage`    |
+| `v` | Mark the current committed or pull request change reviewed and advance | `review_mark_change` |
+| `V` | Mark the current change unreviewed without moving             | `review_unmark_change` |
+| `r` | Revert the change under the cursor to the review baseline    | `review_revert_change`   |
+| `x` | Close the review of the buffer                               | `review_close_buffer`    |
+| `b` | Pick the review baseline from the history of HEAD            | `review_baseline_picker` |
+| `B` | Refresh the review of the buffer                             | `review_refresh_buffer`  |
+| `m` | Hand the review back asking to commit the staged hunks (submit the review while reviewing a pull request) | `review_commit_staged`   |
+| `M` | Stage every changed file and hand back asking to commit      | `review_commit_all`      |
+| `S` | Hand the review back now                                     | `review_send_handoff`    |
+| `-` | Move the review baseline one commit older                    | `review_baseline_older`  |
+| `+` | Move the review baseline one commit newer                    | `review_baseline_newer`  |
+| `n` | Go to the next change, on into the next changed file         | `review_next_change`     |
+| `N` | Go to the previous change, back into the previous file       | `review_prev_change`     |
 
 #### Unimpaired
 

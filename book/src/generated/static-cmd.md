@@ -74,6 +74,8 @@
 | `rsearch` | Reverse search for regex pattern | normal: `` ? ``, `` Z? ``, `` z? ``, select: `` ? ``, `` Z? ``, `` z? `` |
 | `search_next` | Select next search match | normal: `` n ``, `` Zn ``, `` zn ``, select: `` Zn ``, `` zn `` |
 | `search_prev` | Select previous search match | normal: `` N ``, `` ZN ``, `` zN ``, select: `` ZN ``, `` zN `` |
+| `search_next_or_review_next` | Search next after a search, the next review change (across files) after a review jump or staging |  |
+| `search_prev_or_review_prev` | Search previous after a search, the previous review change (across files) after a review jump or staging |  |
 | `extend_search_next` | Add next search match to selection | select: `` n `` |
 | `extend_search_prev` | Add previous search match to selection | select: `` N `` |
 | `search_selection` | Use current selection as search pattern | normal: `` <A-*> ``, select: `` <A-*> `` |
@@ -181,6 +183,28 @@
 | `kill_to_line_start` | Delete till start of line | insert: `` <C-u> `` |
 | `kill_to_line_end` | Delete till end of line | insert: `` <C-k> `` |
 | `undo` | Undo change | normal: `` u ``, select: `` u `` |
+| `review_stage_hunk` | Stage or unstage the review hunk under the cursor (only while reviewing) | normal: `` <ret> ``, select: `` <ret> `` |
+| `review_jump_prev` | Go back to the previous unstaged review hunk (only while reviewing) | normal: `` <S-ret> ``, select: `` <S-ret> `` |
+| `review_files_picker` | Pick a file changed since the review baseline | normal: `` <space>Af ``, select: `` <space>Af `` |
+| `review_diff_buffer` | Show the review as one diff | normal: `` <space>Ad ``, select: `` <space>Ad `` |
+| `review_diff_open_hunk` | Open the file of the review diff hunk under the cursor | normal: `` <space>Ag ``, select: `` <space>Ag `` |
+| `review_old_text` | Focus the old review text nearest the cursor | normal: `` <space>Ao ``, select: `` <space>Ao `` |
+| `review_comments_picker` | Pick a pending review comment | normal: `` <space>AC ``, select: `` <space>AC `` |
+| `review_uncomment_latest` | Drop the latest pending review comment | normal: `` <space>Au ``, select: `` <space>Au `` |
+| `review_toggle_stage` | Stage or unstage the review hunks the selections touch | normal: `` <space>As ``, select: `` <space>As `` |
+| `review_revert_change` | Revert the change under the cursor to the review baseline | normal: `` <space>Ar ``, select: `` <space>Ar `` |
+| `review_close_buffer` | Close the review of the buffer | normal: `` <space>Ax ``, select: `` <space>Ax `` |
+| `review_refresh_buffer` | Refresh the review of the buffer | normal: `` <space>AB ``, select: `` <space>AB `` |
+| `review_baseline_picker` | Pick the review baseline from the history of HEAD | normal: `` <space>Ab ``, select: `` <space>Ab `` |
+| `review_commit_staged` | Hand the review back asking to commit the staged hunks | normal: `` <space>Am ``, select: `` <space>Am `` |
+| `review_send_handoff` | Hand the review back now | normal: `` <space>AS ``, select: `` <space>AS `` |
+| `review_commit_all` | Stage every changed file and hand the review back asking to commit | normal: `` <space>AM ``, select: `` <space>AM `` |
+| `review_next_change` | Go to the next review change, across changed files | normal: `` <space>An ``, select: `` <space>An `` |
+| `review_prev_change` | Go to the previous review change, across changed files | normal: `` <space>AN ``, select: `` <space>AN `` |
+| `review_baseline_older` | Move the review baseline one commit older | normal: `` <space>A<minus> ``, select: `` <space>A<minus> `` |
+| `review_baseline_newer` | Move the review baseline one commit newer | normal: `` <space>A+ ``, select: `` <space>A+ `` |
+| `review_comment_prompt` | Send a comment on the selections to the agent (a pending comment on a pull request) | normal: `` <space>Ac ``, select: `` <space>Ac `` |
+| `review_ask_prompt` | Send a comment on the selections to the agent, also while reviewing a pull request | normal: `` <space>Aa ``, select: `` <space>Aa `` |
 | `redo` | Redo change | normal: `` U ``, select: `` U `` |
 | `earlier` | Move backward in history | normal: `` <A-u> ``, select: `` <A-u> `` |
 | `later` | Move forward in history | normal: `` <A-U> ``, select: `` <A-U> `` |

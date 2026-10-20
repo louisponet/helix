@@ -1,0 +1,17 @@
+{
+	"name": "pi-helix-review",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Pi extension that imports a Helix :review-export batch with /helix-review <batch-file>",
+	"type": "module",
+	"keywords": ["pi-package"],
+	"pi": {
+		"extensions": ["./index.ts"]
+	},
+	"scripts": {
+		"test": "node --test helix-review.test.ts"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	}
+}

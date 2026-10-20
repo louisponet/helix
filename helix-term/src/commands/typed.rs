@@ -377,11 +377,15 @@ fn buffer_previous(
     Ok(())
 }
 
-fn write_impl(
+pub(super) fn write_impl(
     cx: &mut compositor::Context,
     path: Option<&str>,
     options: WriteOptions,
 ) -> anyhow::Result<()> {
+    ensure!(
+        !doc!(cx.editor).review_draft,
+        "Suggestion drafts stay in HX; publish them from Review a PR"
+    );
     let config = cx.editor.config();
     let (view, doc) = current!(cx.editor);
     let doc_id = doc.id();
@@ -853,6 +857,8 @@ pub(super) fn buffers_remaining_impl(editor: &mut Editor) -> anyhow::Result<()> 
 pub struct WriteAllOptions {
     pub force: bool,
     pub write_scratch: bool,
+    /// Skips documents under review while a review handoff directory is set.
+    pub auto_save: bool,
     pub auto_format: bool,
     pub code_actions: bool,
 }
@@ -976,6 +982,7 @@ fn write_all(cx: &mut compositor::Context, args: Args, event: PromptEvent) -> an
         WriteAllOptions {
             force: false,
             write_scratch: true,
+            auto_save: false,
             auto_format: !args.has_flag(WRITE_NO_FORMAT_FLAG.name),
             code_actions: !args.has_flag(WRITE_NO_CODE_ACTIONS_FLAG.name),
         },
@@ -996,6 +1003,7 @@ fn force_write_all(
         WriteAllOptions {
             force: true,
             write_scratch: true,
+            auto_save: false,
             auto_format: !args.has_flag(WRITE_NO_FORMAT_FLAG.name),
             code_actions: !args.has_flag(WRITE_NO_CODE_ACTIONS_FLAG.name),
         },
@@ -1015,6 +1023,7 @@ fn write_all_quit(
         WriteAllOptions {
             force: false,
             write_scratch: true,
+            auto_save: false,
             auto_format: !args.has_flag(WRITE_NO_FORMAT_FLAG.name),
             code_actions: !args.has_flag(WRITE_NO_CODE_ACTIONS_FLAG.name),
         },
@@ -1035,6 +1044,7 @@ fn force_write_all_quit(
         WriteAllOptions {
             force: true,
             write_scratch: true,
+            auto_save: false,
             auto_format: !args.has_flag(WRITE_NO_FORMAT_FLAG.name),
             code_actions: !args.has_flag(WRITE_NO_CODE_ACTIONS_FLAG.name),
         },
@@ -1585,7 +1595,11 @@ fn get_character_info(
 }
 
 /// Reload the [`Document`] from its source file.
-fn reload(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyhow::Result<()> {
+pub(super) fn reload(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
     if event != PromptEvent::Validate {
         return Ok(());
     }
@@ -1597,11 +1611,15 @@ fn reload(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyh
         .map(|_| {
             view.ensure_cursor_in_view(doc, scrolloff);
         })?;
+    let doc_id = doc.id();
     if let Some(path) = doc.path().map(ToOwned::to_owned) {
         cx.editor
             .language_servers
             .file_event_handler
             .file_changed(path);
+    }
+    if let Err(err) = cx.editor.start_baseline_review(doc_id) {
+        log::info!("not reviewing the reloaded buffer: {err:#}");
     }
     Ok(())
 }
@@ -1611,72 +1629,68 @@ fn reload_all(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
         return Ok(());
     }
 
-    let scrolloff = cx.editor.config().scrolloff;
-    let view_id = view!(cx.editor).id;
-
-    let docs_view_ids: Vec<(DocumentId, Vec<ViewId>)> = cx
-        .editor
-        .documents_mut()
-        .map(|doc| {
-            let mut view_ids: Vec<_> = doc.selections().keys().cloned().collect();
-
-            if view_ids.is_empty() {
-                doc.ensure_view_init(view_id);
-                view_ids.push(view_id);
-            };
-
-            (doc.id(), view_ids)
-        })
-        .collect();
-
-    for (doc_id, view_ids) in docs_view_ids {
-        let doc = doc_mut!(cx.editor, &doc_id);
-
-        // Every doc is guaranteed to have at least 1 view at this point.
-        let view = view_mut!(cx.editor, view_ids[0]);
-
-        // Ensure that the view is synced with the document's history.
-        view.sync_changes(doc);
-
-        // Per-document trust: each doc's workspace may differ.
-        let trust_full = cx
-            .editor
-            .workspace_trust
-            .query(
-                doc.workspace_root(),
-                helix_loader::workspace_trust::TrustQuery::Git,
-            )
-            .is_trusted();
-        if let Err(error) = doc.reload(view, &cx.editor.diff_providers, trust_full) {
+    let doc_ids: Vec<_> = cx.editor.documents().map(Document::id).collect();
+    for doc_id in doc_ids {
+        if let Err(error) = reload_document(cx.editor, doc_id) {
             cx.editor.set_error(format!("{}", error));
             continue;
         }
-
-        if let Some(path) = doc.path().map(ToOwned::to_owned) {
-            cx.editor
-                .language_servers
-                .file_event_handler
-                .file_changed(path);
-        }
-
-        for view_id in view_ids {
-            let view = view_mut!(cx.editor, view_id);
-            if view.doc.eq(&doc_id) {
-                // Reloading commits the diff against disk through the first view
-                // only (above). Any other view onto this document is left
-                // pointing at the pre-reload revision, so sync it now; otherwise
-                // its jumplist entries keep referencing the old (e.g. larger)
-                // text and a later commit panics when mapping them through a
-                // changeset whose pre-image no longer contains them.
-                view.sync_changes(doc);
-                view.ensure_cursor_in_view(doc, scrolloff);
-            }
+        if let Err(err) = cx.editor.start_baseline_review(doc_id) {
+            log::info!("not reviewing a reloaded buffer: {err:#}");
         }
     }
 
     Ok(())
 }
 
+/// Reloads the document `doc_id` from disk and syncs every view of it.
+pub(super) fn reload_document(editor: &mut Editor, doc_id: DocumentId) -> anyhow::Result<()> {
+    let scrolloff = editor.config().scrolloff;
+    let view_id = view!(editor).id;
+    let doc = doc_mut!(editor, &doc_id);
+    let mut view_ids: Vec<_> = doc.selections().keys().cloned().collect();
+    if view_ids.is_empty() {
+        doc.ensure_view_init(view_id);
+        view_ids.push(view_id);
+    };
+
+    let view = view_mut!(editor, view_ids[0]);
+
+    // Ensure that the view is synced with the document's history.
+    view.sync_changes(doc);
+
+    // Per-document trust: each doc's workspace may differ.
+    let trust_full = editor
+        .workspace_trust
+        .query(
+            doc.workspace_root(),
+            helix_loader::workspace_trust::TrustQuery::Git,
+        )
+        .is_trusted();
+    doc.reload(view, &editor.diff_providers, trust_full)?;
+
+    if let Some(path) = doc.path().map(ToOwned::to_owned) {
+        editor
+            .language_servers
+            .file_event_handler
+            .file_changed(path);
+    }
+
+    for view_id in view_ids {
+        let view = view_mut!(editor, view_id);
+        if view.doc.eq(&doc_id) {
+            // Reloading commits the diff against disk through the first view
+            // only (above). Any other view onto this document is left
+            // pointing at the pre-reload revision, so sync it now; otherwise
+            // its jumplist entries keep referencing the old (e.g. larger)
+            // text and a later commit panics when mapping them through a
+            // changeset whose pre-image no longer contains them.
+            view.sync_changes(doc);
+            view.ensure_cursor_in_view(doc, scrolloff);
+        }
+    }
+    Ok(())
+}
 /// Update the [`Document`] if it has been modified.
 fn update(cx: &mut compositor::Context, args: Args, event: PromptEvent) -> anyhow::Result<()> {
     if event != PromptEvent::Validate {
@@ -2836,6 +2850,10 @@ fn move_buffer_impl(
     new_path: PathBuf,
     options: MoveBufferOptions,
 ) -> anyhow::Result<()> {
+    ensure!(
+        cx.editor.review_mode != Some(helix_view::editor::ReviewMode::Review),
+        "Review a PR keeps checkout files unchanged"
+    );
     let doc = doc!(cx.editor);
     let old_path = doc
         .path()
@@ -3975,6 +3993,380 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         signature: SHELL_SIGNATURE,
     },
     TypableCommand {
+        name: "review",
+        aliases: &[],
+        doc: "Review the buffer against the :review-baseline commit if one is set, else the git index, showing old lines inline. 'index' selects the git index, any other argument a commit revision such as HEAD~1.",
+        fun: review::review,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(1)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-commits",
+        aliases: &[],
+        doc: "Choose a commit baseline from the latest 200 commits reachable from HEAD, then review against the current buffer.",
+        fun: review::review_commits,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-old",
+        aliases: &[],
+        doc: "Focus the old text nearest the cursor. It can be selected, yanked and commented on but not edited; Esc returns.",
+        fun: review::review_old,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-refresh",
+        aliases: &[],
+        doc: "Reload an unmodified reviewed buffer from disk and refresh its index baseline or retain its selected commit.",
+        fun: review::review_refresh,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-comment",
+        aliases: &[],
+        doc: "Send a comment on every selection (or the selected old text) to the agent at once, writing the buffer first if modified; a leading @label addresses that pi session. While reviewing a pull request, add a pending pull request comment on the primary selection instead. Use %% for a literal %.",
+        fun: review::review_comment,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (1, Some(1)),
+            raw_after: Some(0),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-ask",
+        aliases: &[],
+        doc: "Send a comment on every selection (or the selected old text) to the agent at once, writing the buffer first if modified, also while reviewing a pull request; a leading @label addresses that pi session. Use %% for a literal %.",
+        fun: review::review_ask,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (1, Some(1)),
+            raw_after: Some(0),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-comments",
+        aliases: &[],
+        doc: "Pick a pending review comment and jump to its line.",
+        fun: review::review_comments,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-uncomment",
+        aliases: &[],
+        doc: "Drop the most recently added pending review comment, or the given number of latest ones.",
+        fun: review::review_uncomment,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(1)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-export",
+        aliases: &[],
+        doc: "Write pending review comments and reviewed files as JSON to a new file. Reviewed buffers must be written first.",
+        fun: review::review_export,
+        completer: CommandCompleter::positional(&[completers::filename]),
+        signature: Signature {
+            positionals: (1, Some(1)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-revert",
+        aliases: &[],
+        doc: "Replace the changed lines under the cursor, or the focused old text's change, with the review baseline's lines.",
+        fun: review::review_revert,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-mark",
+        aliases: &["review-mark-reviewed"],
+        doc: "Mark the current primary committed or pull request change reviewed without changing the git index, then advance to the next unreviewed change.",
+        fun: review::review_mark,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-unmark",
+        aliases: &["review-unmark-reviewed"],
+        doc: "Mark the current primary change unreviewed without moving or changing the git index.",
+        fun: review::review_unmark,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-stage",
+        aliases: &[],
+        doc: "Stage the unstaged hunks the selections touch (or the focused old text's, or the :review-diff hunk under the cursor) in the git index, like git add -p. Refuses unsaved buffers.",
+        fun: review::review_stage,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-unstage",
+        aliases: &[],
+        doc: "Unstage the staged hunks the selections touch (or the focused old text's, or the :review-diff hunk under the cursor): the index gets the baseline's lines back for them.",
+        fun: review::review_unstage,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-toggle-stage",
+        aliases: &[],
+        doc: "Stage the hunks the selections touch, or unstage them all if all are already staged (Enter while reviewing).",
+        fun: review::review_toggle_stage,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-close",
+        aliases: &[],
+        doc: "Stop reviewing the buffer. Pending comments are kept for :review-export.",
+        fun: review::review_close,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-pr",
+        aliases: &[],
+        doc: "Review a GitHub pull request (number or URL) with gh: check it out and review every buffer against its merge base with the base branch. An optional directory receives the review batch :review-submit hands to gtc. `close` leaves the pull request review and checks out the previous branch.",
+        fun: review_pr::review_pr,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (1, Some(2)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-pr-attach",
+        aliases: &[],
+        doc: "Attach the current checkout to a GitHub pull request without changing branches or saved edits. The checked-out commit must equal the PR head. Takes a PR URL or number.",
+        fun: review_pr::review_pr_attach,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (1, Some(1)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-submit",
+        aliases: &[],
+        doc: "Hand the pending pull request comments and edits to reviewed buffers (as suggested changes) to gtc as a review batch in the directory given to :review-pr: [approve|request-changes|comment] [summary]. Without arguments, opens the submit dialog.",
+        fun: review_pr::review_submit,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(1)),
+            raw_after: Some(0),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-commit-all",
+        aliases: &[],
+        doc: "Stage every file changed since the review baseline (modified, deleted and untracked, like git add -A limited to them), then hand back like :review-commit with an optional subject and a leading @label to address a pi session.",
+        fun: review::review_commit_all,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(1)),
+            raw_after: Some(0),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-next",
+        aliases: &[],
+        doc: "Go to the next changed block not yet committed (any block when everything is committed), continuing with the first block of the next file changed since the review baseline (in :review-files order, wrapping around).",
+        fun: review::review_next,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-prev",
+        aliases: &[],
+        doc: "Go to the previous changed block not yet committed (any block when everything is committed), continuing with the last block of the previous file changed since the review baseline (wrapping around).",
+        fun: review::review_prev,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-baseline-pick",
+        aliases: &[],
+        doc: "Pick the review baseline from the first-parent history of HEAD (up to 300 commits), with the current baseline, the merge base with the base branch and HEAD marked.",
+        fun: review::review_baseline_pick,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-older",
+        aliases: &[],
+        doc: "Move the review baseline one commit older (its first parent), pinning HEAD first when none is set, and refresh every review.",
+        fun: review::review_older,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-newer",
+        aliases: &[],
+        doc: "Move the review baseline one commit newer, towards HEAD on its ancestry path, and refresh every review.",
+        fun: review::review_newer,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-launch-ready",
+        aliases: &[],
+        doc: "Release the launcher's review protocol after its initial location and optional expected PR are ready.",
+        fun: review::review_launch_ready,
+        completer: CommandCompleter::none(),
+        signature: Signature { positionals: (0, Some(1)), ..Signature::DEFAULT },
+    },
+    TypableCommand {
+        name: "review-open",
+        aliases: &[],
+        doc: "Open a thread-bound file location or immutable checkpoint comparison supplied as JSON.",
+        fun: review::review_open,
+        completer: CommandCompleter::none(),
+        signature: Signature { positionals: (1, Some(1)), ..Signature::DEFAULT },
+    },
+    TypableCommand {
+        name: "review-baseline",
+        aliases: &[],
+        doc: "Review every unmodified buffer in the workspace, and buffers opened later, against a commit revision such as HEAD. Repeating the same commit refreshes the reviews; `clear` closes them. A trailing `force` adopts the commit even over a baseline pinned by you.",
+        fun: review::review_baseline,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (1, Some(2)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-handoff",
+        aliases: &[],
+        doc: "Set the directory the explicit handoffs (:review-comment, :review-send, :review-commit, :review-commit-all) export review batches to, with an optional display label shown in the review statusline. Quote labels containing spaces. The label does not address a session. Without a directory, batches go to `<workspace>/.pi/helix-review/outbox` when it exists and every reviewed file is in the workspace. `clear` returns to that default and clears the label; setting a directory without a label also clears the label. Refuses directory changes while a review comment is being saved.",
+        fun: review::review_handoff,
+        completer: CommandCompleter::positional(&[completers::directory]),
+        signature: Signature {
+            positionals: (1, Some(2)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-send",
+        aliases: &[],
+        doc: "Export a review batch to the handoff directory now, as a write would, without writing any file, with optional text as an instruction to the agent, addressed to a pi session by a leading @label. Refuses while a reviewed buffer has unsaved changes.",
+        fun: review::review_send,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(1)),
+            raw_after: Some(0),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-commit",
+        aliases: &[],
+        doc: "Hand the review back like :review-send, asking the agent to commit exactly what is staged in the git index, with an optional commit subject and a leading @label to address a pi session. Refuses when nothing is staged.",
+        fun: review::review_commit,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(1)),
+            raw_after: Some(0),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-diff",
+        aliases: &[],
+        doc: "Show a unified diff of every workspace file changed since the review baseline commit in a scratch buffer.",
+        fun: review::review_diff,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-diff-open",
+        aliases: &[],
+        doc: "In the :review-diff buffer, open the file of the hunk under the cursor at the matching current line.",
+        fun: review::review_diff_open,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-files",
+        aliases: &[],
+        doc: "Pick a workspace file added (A), modified (M) or deleted (D) since the review baseline commit, and open it at its first change.",
+        fun: review::review_files,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
         name: "reset-diff-change",
         aliases: &["diffget", "diffg"],
         doc: "Reset the diff change at the cursor position.",
@@ -4122,7 +4514,7 @@ pub static TYPABLE_COMMAND_MAP: LazyLock<HashMap<&'static str, &'static TypableC
             .collect()
     });
 
-fn execute_command_line(
+pub(crate) fn execute_command_line(
     cx: &mut compositor::Context,
     input: &str,
     event: PromptEvent,
@@ -4151,6 +4543,16 @@ pub(super) fn execute_command(
     args: &str,
     event: PromptEvent,
 ) -> anyhow::Result<()> {
+    if !review::typable_allowed(cx.editor, cmd.name) {
+        return match event {
+            PromptEvent::Validate => Err(anyhow!(
+                "'{}' is not available on old review text (Esc returns)",
+                cmd.name
+            )),
+            _ => Ok(()),
+        };
+    }
+
     let args = if event == PromptEvent::Validate {
         Args::parse(args, cmd.signature, true, |token| {
             expansion::expand(cx.editor, token).map_err(|err| err.into())
@@ -4165,6 +4567,21 @@ pub(super) fn execute_command(
 }
 
 #[allow(clippy::unnecessary_unwrap)]
+/// Opens the command prompt with `line` already typed, as if the user had typed it.
+pub(super) fn command_mode_with_line(cx: &mut Context, line: &str) {
+    command_mode(cx);
+    let callback: crate::compositor::Callback = {
+        let line = line.to_owned();
+        Box::new(move |compositor, cx| {
+            if let Some(prompt) = compositor.find::<Prompt>() {
+                prompt.set_line(line, cx.editor);
+                prompt.recalculate_completion(cx.editor);
+            }
+        })
+    };
+    cx.callback.push(callback);
+}
+
 pub(super) fn command_mode(cx: &mut Context) {
     let mut prompt = Prompt::new(
         ":".into(),
@@ -4546,7 +4963,7 @@ fn current_workspace(cx: &compositor::Context) -> std::path::PathBuf {
 
 /// Whether the currently focused document's workspace is trusted for git operations (gix
 /// `Trust::Full`).
-fn doc_trust_full(editor: &helix_view::Editor) -> bool {
+pub(super) fn doc_trust_full(editor: &helix_view::Editor) -> bool {
     let (_, doc) = current_ref!(editor);
     editor
         .workspace_trust

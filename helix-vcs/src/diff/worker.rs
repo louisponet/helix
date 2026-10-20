@@ -80,20 +80,22 @@ impl DiffWorker {
     }
 
     fn perform_diff(&mut self, input: &InternedInput<RopeSlice>) {
-        self.diff_alloc.compute_with(
-            ALGORITHM,
-            &input.before,
-            &input.after,
-            input.interner.num_tokens(),
-        );
-        self.diff_alloc.postprocess_with(
-            &input.before,
-            &input.after,
-            IndentHeuristic::new(|token| {
-                IndentLevel::for_ascii_line(input.interner[token].bytes(), 4)
-            }),
-        );
+        diff_lines(&mut self.diff_alloc, input);
     }
+}
+
+pub(super) fn diff_lines(diff: &mut imara_diff::Diff, input: &InternedInput<RopeSlice>) {
+    diff.compute_with(
+        ALGORITHM,
+        &input.before,
+        &input.after,
+        input.interner.num_tokens(),
+    );
+    diff.postprocess_with(
+        &input.before,
+        &input.after,
+        IndentHeuristic::new(|token| IndentLevel::for_ascii_line(input.interner[token].bytes(), 4)),
+    );
 }
 
 struct EventAccumulator {

@@ -21,12 +21,14 @@ use tui::backend::Backend;
 
 use crate::{
     args::Args,
+    command_socket::CommandSocket,
+    commands,
     compositor::{Compositor, Event},
     config::Config,
     handlers,
     job::Jobs,
     keymap::Keymaps,
-    ui::{self, overlay::overlaid},
+    ui::{self, overlay::overlaid, PromptEvent},
 };
 
 use log::{debug, error, info, warn};
@@ -79,6 +81,9 @@ pub struct Application {
     lsp_progress: LspProgressMap,
 
     theme_mode: Option<theme::Mode>,
+
+    command_socket: Option<CommandSocket>,
+    review_transport: Option<crate::review_transport::Session>,
 }
 
 #[cfg(feature = "integration")]
@@ -253,6 +258,8 @@ impl Application {
             jobs,
             lsp_progress: LspProgressMap::new(),
             theme_mode,
+            command_socket: CommandSocket::new(),
+            review_transport: crate::review_transport::Session::from_env(),
         };
 
         Ok(app)
@@ -289,6 +296,9 @@ impl Application {
 
         let pos = pos.map(|pos| (pos.col as u16, pos.row as u16));
         self.terminal.draw(pos, kind).unwrap();
+        if let Some(session) = &mut self.review_transport {
+            session.sync_state(&self.editor);
+        }
     }
 
     pub async fn event_loop<S>(&mut self, input_stream: &mut S)
@@ -343,6 +353,10 @@ impl Application {
                     self.editor.status_msg = Some((msg.message, severity));
                     helix_event::request_redraw();
                 }
+                Some((line, reply)) = CommandSocket::next(&mut self.command_socket) => {
+                    let _ = reply.send(self.run_socket_command(&line));
+                    self.render().await;
+                }
                 Some(callback) = self.jobs.wait_futures.next() => {
                     if let Some(job) = self.jobs.handle_callback(&mut self.editor, &mut self.compositor, callback) {
                         self.jobs.add(job);
@@ -372,6 +386,31 @@ impl Application {
                 self.editor.reset_idle_timer();
             }
         }
+    }
+
+    /// Runs the typed command line `line` like the `:` prompt and returns its one-line reply.
+    fn run_socket_command(&mut self, line: &str) -> String {
+        let mut cx = crate::compositor::Context {
+            editor: &mut self.editor,
+            jobs: &mut self.jobs,
+            scroll: None,
+        };
+        cx.editor.clear_status();
+        cx.editor.socket_command = true;
+        let result = commands::typed::execute_command_line(&mut cx, line, PromptEvent::Validate);
+        cx.editor.socket_command = false;
+        let reply = match result {
+            Err(err) => {
+                cx.editor.set_error(err.to_string());
+                format!("error {err}")
+            }
+            Ok(()) => match cx.editor.get_status() {
+                Some((status, Severity::Error)) => format!("error {status}"),
+                Some((status, _)) => format!("ok {status}"),
+                None => "ok".to_owned(),
+            },
+        };
+        reply.replace('\n', " ")
     }
 
     pub fn handle_config_events(&mut self, config_event: ConfigEvent) {
@@ -555,6 +594,10 @@ impl Application {
                     }
                 }
 
+                if let Some(session) = &mut self.review_transport {
+                    session.ready();
+                }
+
                 // redraw the terminal
                 let area = self.terminal.size();
                 self.compositor.resize(area);
@@ -577,6 +620,9 @@ impl Application {
     }
 
     pub async fn handle_idle_timeout(&mut self) {
+        if let Some(socket) = &mut self.command_socket {
+            socket.retry();
+        }
         let mut cx = crate::compositor::Context {
             editor: &mut self.editor,
             jobs: &mut self.jobs,
@@ -654,6 +700,7 @@ impl Application {
             "'{}' written, {lines}L {size}",
             get_relative_path(&doc_save_event.path).to_string_lossy(),
         ));
+        commands::review::document_written(&mut self.editor, doc_save_event.doc_id);
     }
 
     #[inline(always)]
@@ -766,7 +813,23 @@ impl Application {
             }) => false,
             #[cfg(not(windows))]
             event if event.is_escape() => false,
-            event => self.compositor.handle_event(&event.into(), &mut cx),
+            event => {
+                let event = event.into();
+                if let Event::Paste(paste) = &event {
+                    if crate::review_transport::handle_paste(
+                        self.review_transport.as_mut(),
+                        paste,
+                        &mut self.compositor,
+                        &mut cx,
+                    ) {
+                        true
+                    } else {
+                        self.compositor.handle_event(&event, &mut cx)
+                    }
+                } else {
+                    self.compositor.handle_event(&event, &mut cx)
+                }
+            }
         };
 
         if should_redraw && !self.editor.should_close() {
@@ -1271,6 +1334,9 @@ impl Application {
     }
 
     fn restore_term(&mut self) -> std::io::Result<()> {
+        if let Some(session) = &mut self.review_transport {
+            session.closed();
+        }
         use helix_view::graphics::CursorKind;
         self.terminal
             .backend_mut()
@@ -1325,6 +1391,10 @@ impl Application {
     {
         self.terminal.claim()?;
 
+        if let Some(session) = &mut self.review_transport {
+            session.ready();
+        }
+
         self.event_loop(input_stream).await;
 
         let close_errs = self.close().await;
@@ -1357,6 +1427,12 @@ impl Application {
         if let Err(err) = self.editor.flush_writes().await {
             log::error!("Error writing: {}", err);
             errs.push(err);
+        }
+
+        if let Some(pr) = self.editor.review_pr.take() {
+            let restored =
+                crate::commands::review_pr::restore_branch(&pr, &helix_loader::find_workspace().0);
+            log::info!("leaving the review of PR #{}: {restored}", pr.number);
         }
 
         self.editor.close_language_servers(None).await;

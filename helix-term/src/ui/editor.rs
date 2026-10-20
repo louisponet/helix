@@ -8,7 +8,9 @@ use crate::{
     ui::{
         document::{render_document, LinePos, TextRenderer},
         statusline,
-        text_decorations::{self, Decoration, DecorationManager, InlineDiagnostics},
+        text_decorations::{
+            self, Decoration, DecorationManager, InlineDiagnostics, ReviewDecoration,
+        },
         Completion, ProgressSpinners,
     },
 };
@@ -29,6 +31,7 @@ use helix_view::{
     graphics::{Color, CursorKind, Modifier, Rect, Style},
     input::{KeyEvent, MouseButton, MouseEvent, MouseEventKind},
     keyboard::{KeyCode, KeyModifiers},
+    review::HunkStage,
     Document, Editor, Theme, View,
 };
 use std::{mem::take, num::NonZeroUsize, ops, path::PathBuf, rc::Rc};
@@ -58,6 +61,12 @@ pub enum InsertEvent {
 }
 
 impl EditorView {
+    pub(crate) fn review_action_ready(&self) -> bool {
+        self.on_next_key.is_none()
+            && self.pseudo_pending.is_empty()
+            && self.keymaps.pending().is_empty()
+    }
+
     pub fn new(keymaps: Keymaps) -> Self {
         Self {
             keymaps,
@@ -93,12 +102,42 @@ impl EditorView {
 
         let text_annotations = view.text_annotations(doc, Some(theme));
         let mut decorations = DecorationManager::default();
+        // While old review text is focused the current selection is hidden.
+        let old_focus = doc.review.as_ref().and_then(|review| review.focus(view.id));
 
-        if is_focused && config.cursorline {
+        // A background on diff.plus.review shades whole changed rows and leaves the text
+        // colours alone; without one the changed text itself is coloured (see below).
+        // Hunks already in the git index use the .staged scope, falling back to the plain one;
+        // hunks committed since the baseline use the .committed scope, falling back to .staged.
+        let review_style = theme.get("diff.plus.review");
+        let staged_style = theme.get("diff.plus.review.staged");
+        let committed_style = theme
+            .try_get_exact("diff.plus.review.committed")
+            .unwrap_or(staged_style);
+        if let Some(review) = doc.review.as_ref().filter(|_| review_style.bg.is_some()) {
+            let changed: Vec<_> = review.changed_lines_stage().collect();
+            decorations.add_decoration(move |renderer: &mut TextRenderer, pos: LinePos| {
+                let next = changed.partition_point(|(lines, _)| lines.end <= pos.doc_line);
+                if let Some((_, stage)) = changed
+                    .get(next)
+                    .filter(|(lines, _)| lines.start <= pos.doc_line)
+                {
+                    let style = match stage {
+                        HunkStage::Unstaged => review_style,
+                        HunkStage::Staged => staged_style,
+                        HunkStage::Committed => committed_style,
+                    };
+                    let area = Rect::new(inner.x, pos.visual_line, inner.width, 1);
+                    renderer.set_style(area, style);
+                }
+            });
+        }
+
+        if is_focused && config.cursorline && old_focus.is_none() {
             decorations.add_decoration(Self::cursorline(doc, view, theme));
         }
 
-        if is_focused && config.cursorcolumn {
+        if is_focused && config.cursorcolumn && old_focus.is_none() {
             Self::highlight_cursorcolumn(doc, view, surface, theme, inner, &text_annotations);
         }
 
@@ -145,7 +184,38 @@ impl EditorView {
 
         Self::doc_diagnostics_highlights_into(doc, theme, &mut overlays);
 
-        if is_focused {
+        if let Some(review) = doc.review.as_ref().filter(|_| review_style.bg.is_none()) {
+            let text = doc.text().slice(..);
+            let committed = theme
+                .find_highlight_exact("diff.plus.review.committed")
+                .or_else(|| theme.find_highlight("diff.plus.review.staged"));
+            for (highlight, stage) in [
+                (
+                    theme.find_highlight("diff.plus.review"),
+                    HunkStage::Unstaged,
+                ),
+                (
+                    theme.find_highlight("diff.plus.review.staged"),
+                    HunkStage::Staged,
+                ),
+                (committed, HunkStage::Committed),
+            ] {
+                if let Some(highlight) = highlight {
+                    overlays.push(OverlayHighlights::Homogeneous {
+                        highlight,
+                        ranges: review
+                            .changed_lines_stage()
+                            .filter(|(_, hunk)| *hunk == stage)
+                            .map(|(lines, _)| {
+                                text.line_to_char(lines.start)..text.line_to_char(lines.end)
+                            })
+                            .collect(),
+                    });
+                }
+            }
+        }
+
+        if is_focused && old_focus.is_none() {
             if config.lsp.auto_document_highlight {
                 if let Some(overlay) = Self::doc_document_highlights(doc, view, theme) {
                     overlays.push(overlay);
@@ -186,11 +256,24 @@ impl EditorView {
             .selection(view.id)
             .primary()
             .cursor(doc.text().slice(..));
-        if is_focused {
+        if is_focused && old_focus.is_none() {
             decorations.add_decoration(text_decorations::Cursor {
                 cache: &editor.cursor_cache,
                 primary_cursor,
             });
+        } else if is_focused {
+            editor.cursor_cache.set(None);
+        }
+        if let Some(review) = &doc.review {
+            // Added before inline diagnostics, matching the order of their line annotations.
+            decorations.add_decoration(ReviewDecoration::new(
+                review,
+                doc.text().slice(..),
+                doc.text_format(inner.width, Some(theme)),
+                old_focus,
+                (inner.x > area.x).then(|| inner.x - 1),
+                theme,
+            ));
         }
         let width = view.inner_width(doc);
         let config = doc.config.load();
@@ -1426,6 +1509,102 @@ impl EditorView {
             _ => EventResult::Ignored(None),
         }
     }
+    /// Handles a key while the focused view inspects old review text. Keys resolve through the
+    /// normal mode keymap but only commands that cannot modify a document are run.
+    fn handle_review_old_key(
+        &mut self,
+        mut key: KeyEvent,
+        cx: &mut commands::Context,
+    ) -> EventResult {
+        canonicalize_key(&mut key);
+        cx.editor.reset_idle_timer();
+        cx.editor.status_msg = None;
+        // Pending one-key callbacks (like `r`) would act on the current text.
+        self.on_next_key = None;
+        self.pseudo_pending.clear();
+
+        match (key, cx.editor.count) {
+            (key!(i @ '0'..='9'), Some(count)) => {
+                let count = count.get() * 10 + i.to_digit(10).unwrap() as usize;
+                if count <= 100_000_000 {
+                    cx.editor.count = NonZeroUsize::new(count);
+                }
+                return EventResult::Consumed(None);
+            }
+            (key!(i @ '1'..='9'), None) if !self.keymaps.contains_key(Mode::Normal, key) => {
+                cx.editor.count = NonZeroUsize::new(i.to_digit(10).unwrap() as usize);
+                return EventResult::Consumed(None);
+            }
+            _ => (),
+        }
+
+        if key == key!(Esc) {
+            self.keymaps.sticky = None;
+            cx.editor.autoinfo = None;
+        }
+        let commands = if key == key!(Esc) && self.keymaps.pending().is_empty() {
+            vec![commands::MappableCommand::normal_mode]
+        } else {
+            let result = self.keymaps.get(Mode::Normal, key);
+            cx.editor.autoinfo = self.keymaps.sticky().map(|node| node.infobox());
+            match result {
+                KeymapResult::Matched(command) => vec![command],
+                KeymapResult::MatchedSequence(commands) => commands,
+                KeymapResult::Pending(node) => {
+                    cx.editor.autoinfo = Some(node.infobox());
+                    return EventResult::Consumed(None);
+                }
+                KeymapResult::NotFound | KeymapResult::Cancelled(_) => {
+                    cx.editor.count = None;
+                    cx.editor
+                        .set_error("Old review text is read-only (Esc returns)");
+                    return EventResult::Consumed(None);
+                }
+            }
+        };
+        cx.count = cx.editor.count.take();
+
+        for command in &commands {
+            let allowed = match command {
+                // Typable commands are restricted in `typed::execute_command`.
+                commands::MappableCommand::Typable { .. } => {
+                    command.execute(cx);
+                    true
+                }
+                commands::MappableCommand::Static { name, .. } if *name == "command_mode" => {
+                    command.execute(cx);
+                    true
+                }
+                commands::MappableCommand::Static { name, .. } => {
+                    commands::review::old_focus_command(cx, name)
+                }
+                commands::MappableCommand::Macro { .. } => false,
+            };
+            if !allowed {
+                cx.editor.set_error(format!(
+                    "'{}' is not available on old review text (Esc returns)",
+                    command.name()
+                ));
+                break;
+            }
+        }
+
+        let scrolloff = cx.editor.config().scrolloff;
+        let (view, doc) = current!(cx.editor);
+        view.ensure_cursor_in_view(doc, scrolloff);
+
+        let callbacks = take(&mut cx.callback);
+        let callback = (!callbacks.is_empty()).then(|| {
+            let callback: crate::compositor::Callback = Box::new(move |compositor, cx| {
+                for callback in callbacks {
+                    callback(compositor, cx)
+                }
+            });
+            callback
+        });
+        EventResult::Consumed(callback)
+    }
+
     fn on_next_key(
         &mut self,
         kind: OnKeyCallbackKind,
@@ -1460,6 +1639,19 @@ impl Component for EditorView {
             on_next_key_callback: None,
             jobs: context.jobs,
         };
+
+        if commands::review::old_focused(cx.editor) {
+            match event {
+                Event::Key(key) => return self.handle_review_old_key(*key, &mut cx),
+                Event::Paste(_) => {
+                    cx.editor
+                        .set_error("Old review text is read-only (Esc returns)");
+                    return EventResult::Consumed(None);
+                }
+                Event::Mouse(_) => return EventResult::Consumed(None),
+                _ => (),
+            }
+        }
 
         match event {
             Event::Paste(contents) => {
@@ -1602,6 +1794,7 @@ impl Component for EditorView {
                     let options = commands::WriteAllOptions {
                         force: false,
                         write_scratch: false,
+                        auto_save: true,
                         auto_format: false,
                         code_actions: false,
                     };

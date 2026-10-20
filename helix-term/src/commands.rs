@@ -1,5 +1,8 @@
 pub(crate) mod dap;
 pub(crate) mod lsp;
+pub(crate) mod review;
+pub(crate) mod review_mobile;
+pub(crate) mod review_pr;
 pub(crate) mod syntax;
 pub(crate) mod typed;
 
@@ -46,7 +49,7 @@ use helix_core::{
 };
 use helix_view::{
     document::{FormatterError, Mode, SCRATCH_BUFFER_NAME},
-    editor::{Action, Motion},
+    editor::{Action, Motion, NavMode},
     expansion,
     info::Info,
     input::KeyEvent,
@@ -377,6 +380,8 @@ impl MappableCommand {
         rsearch, "Reverse search for regex pattern",
         search_next, "Select next search match",
         search_prev, "Select previous search match",
+        search_next_or_review_next, "Search next after a search, the next review change (across files) after a review jump or staging",
+        search_prev_or_review_prev, "Search previous after a search, the previous review change (across files) after a review jump or staging",
         extend_search_next, "Add next search match to selection",
         extend_search_prev, "Add previous search match to selection",
         search_selection, "Use current selection as search pattern",
@@ -484,6 +489,30 @@ impl MappableCommand {
         kill_to_line_start, "Delete till start of line",
         kill_to_line_end, "Delete till end of line",
         undo, "Undo change",
+        review_stage_hunk, "Stage or unstage an uncommitted review hunk; mark a committed or pull request change reviewed and advance",
+        review_mark_change, "Mark the current committed or pull request change reviewed and advance",
+        review_unmark_change, "Mark the current change unreviewed without advancing",
+        review_jump_prev, "Go back to the previous unstaged review hunk (only while reviewing)",
+        review_files_picker, "Pick a file changed since the review baseline",
+        review_diff_buffer, "Show the review as one diff",
+        review_diff_open_hunk, "Open the file of the review diff hunk under the cursor",
+        review_old_text, "Focus the old review text nearest the cursor",
+        review_comments_picker, "Pick a pending review comment",
+        review_uncomment_latest, "Drop the latest pending review comment",
+        review_toggle_stage, "Stage or unstage uncommitted changes; mark a committed or pull request change reviewed and advance",
+        review_revert_change, "Revert the change under the cursor to the review baseline",
+        review_close_buffer, "Close the review of the buffer",
+        review_refresh_buffer, "Refresh the review of the buffer",
+        review_baseline_picker, "Pick the review baseline from the history of HEAD",
+        review_commit_staged, "Hand the review back asking to commit the staged hunks",
+        review_send_handoff, "Hand the review back now",
+        review_commit_all, "Stage every changed file and hand the review back asking to commit",
+        review_next_change, "Go to the next review change, across changed files",
+        review_prev_change, "Go to the previous review change, across changed files",
+        review_baseline_older, "Move the review baseline one commit older",
+        review_baseline_newer, "Move the review baseline one commit newer",
+        review_comment_prompt, "Send a comment on the selections to the agent (a pending comment on a pull request)",
+        review_ask_prompt, "Send a comment on the selections to the agent, also while reviewing a pull request",
         redo, "Redo change",
         earlier, "Move backward in history",
         later, "Move forward in history",
@@ -2378,6 +2407,7 @@ fn searcher(cx: &mut Context, direction: Direction) {
         move |cx, regex, event| {
             if event == PromptEvent::Validate {
                 cx.editor.registers.last_search_register = reg;
+                cx.editor.nav_mode = NavMode::Search;
             } else if event != PromptEvent::Update {
                 return;
             }
@@ -2399,6 +2429,15 @@ fn search_next_or_prev_impl(cx: &mut Context, movement: Movement, direction: Dir
     let register = cx
         .register
         .unwrap_or(cx.editor.registers.last_search_register);
+    // Under review with nothing searched yet, n/N walk the change hunks like ]g/[g.
+    let reviewing = doc!(cx.editor)
+        .review
+        .as_ref()
+        .is_some_and(|review| !review.is_suspended());
+    if reviewing && cx.editor.registers.first(register, cx.editor).is_none() {
+        goto_next_change_impl(cx, direction);
+        return;
+    }
     let config = cx.editor.config();
     let scrolloff = config.scrolloff;
     if let Some(query) = cx.editor.registers.first(register, cx.editor) {
@@ -2444,19 +2483,48 @@ fn search_next(cx: &mut Context) {
 fn search_prev(cx: &mut Context) {
     search_next_or_prev_impl(cx, Movement::Move, Direction::Backward);
 }
+
+/// Whether the search register `n` would use holds a non-empty search.
+fn has_search(cx: &Context) -> bool {
+    let register = cx.register.unwrap_or('/');
+    cx.editor
+        .registers
+        .first(register, cx.editor)
+        .is_some_and(|query| !query.is_empty())
+}
+
+fn search_next_or_review_next(cx: &mut Context) {
+    if cx.editor.nav_mode == NavMode::Search && has_search(cx) {
+        search_next(cx)
+    } else {
+        review_next_change(cx)
+    }
+}
+
+fn search_prev_or_review_prev(cx: &mut Context) {
+    if cx.editor.nav_mode == NavMode::Search && has_search(cx) {
+        search_prev(cx)
+    } else {
+        review_prev_change(cx)
+    }
+}
 fn extend_search_next(cx: &mut Context) {
+    cx.editor.nav_mode = NavMode::Search;
     search_next_or_prev_impl(cx, Movement::Extend, Direction::Forward);
 }
 
 fn extend_search_prev(cx: &mut Context) {
+    cx.editor.nav_mode = NavMode::Search;
     search_next_or_prev_impl(cx, Movement::Extend, Direction::Backward);
 }
 
 fn search_selection(cx: &mut Context) {
+    cx.editor.nav_mode = NavMode::Search;
     search_selection_impl(cx, false)
 }
 
 fn search_selection_detect_word_boundaries(cx: &mut Context) {
+    cx.editor.nav_mode = NavMode::Search;
     search_selection_impl(cx, true)
 }
 
@@ -4776,6 +4844,110 @@ fn undo(cx: &mut Context) {
             break;
         }
     }
+}
+
+fn review_stage_hunk(cx: &mut Context) {
+    review::review_stage_hunk(cx)
+}
+
+fn review_mark_change(cx: &mut Context) {
+    review::run_typed(cx, review::review_mark)
+}
+
+fn review_unmark_change(cx: &mut Context) {
+    review::run_typed(cx, review::review_unmark)
+}
+
+fn review_jump_prev(cx: &mut Context) {
+    review::review_jump_prev(cx)
+}
+
+fn review_files_picker(cx: &mut Context) {
+    review::run_typed(cx, review::review_files)
+}
+
+fn review_diff_buffer(cx: &mut Context) {
+    review::run_typed(cx, review::review_diff)
+}
+
+fn review_diff_open_hunk(cx: &mut Context) {
+    review::run_typed(cx, review::review_diff_open)
+}
+
+fn review_old_text(cx: &mut Context) {
+    review::run_typed(cx, review::review_old)
+}
+
+fn review_comments_picker(cx: &mut Context) {
+    review::run_typed(cx, review::review_comments)
+}
+
+fn review_uncomment_latest(cx: &mut Context) {
+    review::run_typed(cx, review::review_uncomment)
+}
+
+fn review_toggle_stage(cx: &mut Context) {
+    review::review_toggle_stage_key(cx)
+}
+
+fn review_revert_change(cx: &mut Context) {
+    review::run_typed(cx, review::review_revert)
+}
+
+fn review_close_buffer(cx: &mut Context) {
+    review::run_typed(cx, review::review_close)
+}
+
+fn review_baseline_picker(cx: &mut Context) {
+    review::run_typed(cx, review::review_baseline_pick)
+}
+
+fn review_refresh_buffer(cx: &mut Context) {
+    review::run_typed(cx, review::review_refresh)
+}
+
+fn review_commit_staged(cx: &mut Context) {
+    // While reviewing a pull request, the commit key submits the review instead.
+    if let Some(pr) = cx.editor.review_pr.clone() {
+        match review_pr::SubmitModal::new(cx.editor, pr) {
+            Ok(modal) => cx.push_layer(Box::new(modal)),
+            Err(err) => cx.editor.set_error(format!("{err:#}")),
+        }
+    } else {
+        review::run_typed(cx, review::review_commit)
+    }
+}
+
+fn review_send_handoff(cx: &mut Context) {
+    review::run_typed(cx, review::review_send)
+}
+
+fn review_commit_all(cx: &mut Context) {
+    review::run_typed(cx, review::review_commit_all)
+}
+
+fn review_next_change(cx: &mut Context) {
+    review::run_jump(cx, true)
+}
+
+fn review_prev_change(cx: &mut Context) {
+    review::run_jump(cx, false)
+}
+
+fn review_baseline_older(cx: &mut Context) {
+    review::run_typed(cx, review::review_older)
+}
+
+fn review_baseline_newer(cx: &mut Context) {
+    review::run_typed(cx, review::review_newer)
+}
+
+fn review_comment_prompt(cx: &mut Context) {
+    typed::command_mode_with_line(cx, "review-comment ")
+}
+
+fn review_ask_prompt(cx: &mut Context) {
+    typed::command_mode_with_line(cx, "review-ask ")
 }
 
 fn redo(cx: &mut Context) {
