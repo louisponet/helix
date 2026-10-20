@@ -16,6 +16,9 @@
 
 </div>
 
+This fork's `daily-driver` branch includes our HX review and T3 integration.
+See [the fork workflow](docs/fork-workflow.md) for feature branches and upstream updates.
+
 ![Screenshot](./screenshot.png)
 
 A [Kakoune](https://github.com/mawww/kakoune) / [Neovim](https://github.com/neovim/neovim) inspired editor, written in Rust.

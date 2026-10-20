@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - daily-driver
   merge_group:
   schedule:
     - cron: "00 01 * * *"
