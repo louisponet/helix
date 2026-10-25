@@ -587,6 +587,8 @@ export interface HandoffOptions {
 	/** Pi's original handoff schema omits comment baselines; new consumers should retain them. */
 	includeCommentBaselines?: boolean;
 	commitPatch?: CommitPatch;
+	/** The commit a pull request review diffs against, so every file uses the same one. Default: HEAD. */
+	head?: string;
 }
 
 function wireBaseline(baseline: Baseline): WireBaseline {
@@ -598,9 +600,9 @@ function wireBaseline(baseline: Baseline): WireBaseline {
 /**
  * Build a transport-independent handoff using raw Git blobs and saved files. Ask requests
  * contain only commented files and nearby hunks, with bounded diff context. Pull request reviews
- * diff against HEAD without context, so each hunk maps onto the pull request's lines. No hooks,
- * external diff drivers or text conversions are run. This may store content in Git's object
- * database, but never stages, commits, or changes a working file.
+ * diff against `options.head` without context, so each hunk maps onto the pull request's lines.
+ * No hooks, external diff drivers or text conversions are run. This may store content in Git's
+ * object database, but never stages, commits, or changes a working file.
  */
 export async function buildHandoff(
 	batch: ReviewBatch,
@@ -622,7 +624,7 @@ export async function buildHandoff(
 		let against: HandoffFile["user_edits"]["against"];
 		let base: string | null;
 		if (review) {
-			const head = await readGitEntry(file, { kind: "git-commit", commitOid: "HEAD", blobOid: null }, options.repo);
+			const head = await readGitEntry(file, { kind: "git-commit", commitOid: options.head ?? "HEAD", blobOid: null }, options.repo);
 			if (head.problem) throw new BatchError(`${q(file)} ${head.problem}.`);
 			against = "head";
 			base = head.oid ?? null;

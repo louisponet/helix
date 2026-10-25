@@ -1308,8 +1308,9 @@ pub struct Editor {
     pub review_user_pin: Option<String>,
     /// The baseline the pi hook last sent over the command socket.
     pub review_hook_baseline: Option<String>,
-    /// The document `:review-comment` is writing, whose save exports the review batch.
-    pub review_send_on_write: Option<DocumentId>,
+    /// The document an ask (`:review-ask`) is writing, and the ask's own batch, exported once the
+    /// save is done.
+    pub review_send_on_write: Option<(DocumentId, ReviewBatch)>,
     /// What `search_next_or_review_next` and `search_prev_or_review_prev` move between: the last
     /// used of searching and walking review changes.
     pub nav_mode: NavMode,

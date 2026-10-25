@@ -11,7 +11,8 @@ use helix_core::line_ending::line_end_char_index;
 use helix_core::text_annotations::TextAnnotations;
 use helix_view::editor::ReviewMode;
 use helix_view::review::{
-    HunkStage, NavFile, OldFocus, Review, ReviewComment, ReviewNav, ReviewRequest, ReviewSide,
+    HunkStage, NavFile, OldFocus, Review, ReviewBaseline, ReviewBatch, ReviewComment, ReviewNav,
+    ReviewRequest, ReviewSide,
 };
 
 use helix_loader::workspace_trust::TrustQuery;
@@ -50,7 +51,7 @@ pub(crate) fn run_terminal_action(
                 cx.editor.review_mode != Some(ReviewMode::Review),
                 "Use a pull request comment draft in Review a PR"
             );
-            save_comments(cx, text.unwrap_or_default())
+            save_comments(cx, None, text.unwrap_or_default())
         }
         Action::Files if cx.editor.review_handoff_dir().is_none() => {
             open_plain_file_picker(cx);
@@ -1689,7 +1690,8 @@ pub(super) fn review_comment(
     if cx.editor.review_pr.is_none() {
         // A T3 work session has no other way to collect comments for :review-send-pr.
         if cx.editor.review_mode == Some(ReviewMode::Work) {
-            return save_comments(cx, &args[0]);
+            let (target, text) = split_target(Some(&args[0]));
+            return save_comments(cx, target, text.unwrap_or_default());
         }
         return send_comments(cx, &args[0]);
     }
@@ -1822,8 +1824,12 @@ fn enclosing_text(doc: &Document, range: Range) -> Option<String> {
 }
 
 /// Adds a pending comment with `text` on every selection (or the selected old text), handed off
-/// with the next send.
-fn save_comments(cx: &mut compositor::Context, text: &str) -> anyhow::Result<()> {
+/// with the next send, addressed to the session `target` if given.
+fn save_comments(
+    cx: &mut compositor::Context,
+    target: Option<String>,
+    text: &str,
+) -> anyhow::Result<()> {
     ensure!(
         cx.editor.review_handoff_dir().is_some(),
         "no review handoff directory"
@@ -1833,6 +1839,9 @@ fn save_comments(cx: &mut compositor::Context, text: &str) -> anyhow::Result<()>
     for comment in selection_comments(cx.editor, text, true)? {
         cx.editor.review_batch.add_comment(comment);
     }
+    if let Some(target) = target {
+        cx.editor.review_batch.set_target(target);
+    }
     cx.editor.share_review_comments();
     cx.editor.set_status(
         "Comment saved; Space A S sends pending feedback, Space A P sends it as a PR review",
@@ -1840,8 +1849,8 @@ fn save_comments(cx: &mut compositor::Context, text: &str) -> anyhow::Result<()>
     Ok(())
 }
 
-/// Comments with `text` on every selection (or the selected old text) and hands the review off
-/// at once as a question, writing the buffer first if it is modified.
+/// Comments with `text` on every selection (or the selected old text) and hands those comments
+/// off at once as a question, writing the buffer first if it is modified.
 fn send_comments(cx: &mut compositor::Context, text: &str) -> anyhow::Result<()> {
     send_comments_inner(cx, text, true)
 }
@@ -1865,17 +1874,25 @@ fn send_comments_inner(
     let message = message.context("the comment is empty")?;
     let comments = selection_comments(cx.editor, message, true)?;
     let count = comments.len();
+    // An ask hands off only its own selections; pending comments wait for the next send.
+    let mut ask = ReviewBatch::default();
     for comment in comments {
-        cx.editor.review_batch.add_comment(comment);
+        ask.add_comment(comment);
     }
-    cx.editor.share_review_comments();
-    cx.editor.review_batch.set_request(ReviewRequest::Ask);
+    ask.set_request(ReviewRequest::Ask);
     if let Some(target) = target {
-        cx.editor.review_batch.set_target(target);
+        ask.set_target(target);
     }
     if doc!(cx.editor).is_modified() && !doc!(cx.editor).review_draft {
-        // The batch takes the saved file: it is exported once the write is done.
-        cx.editor.review_send_on_write = Some(doc!(cx.editor).id());
+        // The ask takes the saved file: it is exported once the write is done.
+        let ask = match cx.editor.review_send_on_write.take() {
+            Some((_, mut earlier)) => {
+                earlier.absorb(ask);
+                earlier
+            }
+            None => ask,
+        };
+        cx.editor.review_send_on_write = Some((doc!(cx.editor).id(), ask));
         typed::write_impl(
             cx,
             None,
@@ -1886,7 +1903,11 @@ fn send_comments_inner(
             },
         )?;
     } else {
-        hand_off(cx.editor, None, None, ":review-comment")?;
+        let dir = cx
+            .editor
+            .review_handoff_dir()
+            .context("no review handoff directory, use :review-handoff <dir> first")?;
+        export_ask(cx.editor, ask, &dir)?;
     }
     cx.editor
         .set_status(format!("Sent {} to the agent", plural(count, "comment")));
@@ -2634,14 +2655,6 @@ fn send_message(
         cx.editor.review_mode != Some(ReviewMode::Review),
         "Use Ask to discuss the pull request and Publish review to send feedback"
     );
-    if matches!(request, Some(ReviewRequest::PrReview { summary: None }))
-        && cx.editor.review_batch.comments().is_empty()
-    {
-        ensure!(
-            !changed_files_since(cx.editor, "HEAD")?.is_empty(),
-            "nothing to publish: no pending comments, no changes since HEAD and no summary"
-        );
-    }
     if let Err(err) = ensure_review(cx) {
         log::info!("not enabling review: {err:#}");
     }
@@ -2707,17 +2720,19 @@ pub(super) fn review_commit(
 
 /// Refuses `command` while a reviewed buffer has unsaved changes.
 pub(super) fn ensure_reviews_saved(editor: &Editor, command: &str) -> anyhow::Result<()> {
+    refuse_unsaved(editor, command, |_| true)
+}
+
+/// Refuses `command` while a reviewed buffer that `relevant` accepts has unsaved changes.
+fn refuse_unsaved(
+    editor: &Editor,
+    command: &str,
+    relevant: impl Fn(&Document) -> bool,
+) -> anyhow::Result<()> {
     let unsaved: Vec<_> = editor
         .documents()
         .filter(|doc| doc.review.is_some() && doc.is_modified() && !doc.review_draft)
-        .filter(|doc| {
-            command != ":review-comment"
-                || editor
-                    .review_batch
-                    .comments()
-                    .iter()
-                    .any(|comment| Some(comment.path.as_path()) == doc.path())
-        })
+        .filter(|&doc| relevant(doc))
         .map(|doc| doc.display_name().into_owned())
         .collect();
     ensure!(
@@ -2813,6 +2828,13 @@ fn hand_off(
         .review_handoff_dir()
         .context("no review handoff directory, use :review-handoff <dir> first")?;
     ensure_reviews_saved(editor, command)?;
+    if let Some(ReviewRequest::PrReview { summary }) = &request {
+        let changed = add_head_changes(editor)?;
+        ensure!(
+            changed > 0 || summary.is_some() || !editor.review_batch.comments().is_empty(),
+            "nothing to publish: no pending comments, no changes since HEAD and no summary"
+        );
+    }
     if let Some(request) = request {
         editor.review_batch.set_request(request);
     }
@@ -2822,33 +2844,90 @@ fn hand_off(
     export_handoff(editor, &dir)
 }
 
-/// Starts reviewing the written document against the review baseline, and exports the review
-/// batch when `:review-comment` wrote it to send its comments.
+/// Adds every file changed since `HEAD`, open in a buffer or not, to the review batch against
+/// `HEAD`, and returns how many changed. Entries that are not regular files in `HEAD`, such as
+/// symlinks and submodules, cannot carry suggestions and are left out.
+fn add_head_changes(editor: &mut Editor) -> anyhow::Result<usize> {
+    let workspace = helix_loader::find_workspace().0;
+    let trust_full = editor
+        .workspace_trust
+        .query(&workspace, TrustQuery::Git)
+        .is_trusted();
+    let head = editor
+        .diff_providers
+        .resolve_commit(&workspace, "HEAD", trust_full)?;
+    let changes = changed_files_since(editor, &head)?;
+    for change in &changes {
+        let path = change.path();
+        match editor
+            .diff_providers
+            .get_commit_base(path, &head, trust_full)
+        {
+            Ok(base) => editor.review_batch.add_file(
+                path.to_path_buf(),
+                ReviewBaseline::GitCommit {
+                    commit_oid: base.commit_id,
+                    blob_oid: base.blob_id,
+                },
+            ),
+            Err(err) => log::info!("{} left out of the review: {err:#}", path.display()),
+        }
+    }
+    Ok(changes.len())
+}
+
+/// Starts reviewing the written document against the review baseline, and exports the ask that
+/// wrote it.
 pub(crate) fn document_written(editor: &mut Editor, doc_id: DocumentId) {
     if let Err(err) = editor.start_baseline_review(doc_id) {
         log::info!("not reviewing document {doc_id}: {err:#}");
     }
-    if editor.review_send_on_write != Some(doc_id) {
-        return;
-    }
-    editor.review_send_on_write = None;
-    let Some(dir) = editor.review_handoff_dir() else {
+    let Some((_, ask)) = editor.review_send_on_write.take_if(|(id, _)| *id == doc_id) else {
         return;
     };
-    let comments = editor.review_batch.comments().len();
-    match export_handoff(editor, &dir) {
-        Ok(_) if comments > 0 => {
-            editor.set_status(format!("Sent {} to the agent", plural(comments, "comment")))
-        }
-        Ok(path) => editor.set_status(format!("Exported review batch {}", path.display())),
+    let Some(dir) = editor.review_handoff_dir() else {
+        editor.review_batch.absorb(ask);
+        editor.share_review_comments();
+        return;
+    };
+    let comments = ask.comments().len();
+    match export_ask(editor, ask, &dir) {
+        Ok(_) => editor.set_status(format!("Sent {} to the agent", plural(comments, "comment"))),
         Err(err) => editor.set_error(format!("review handoff failed: {err:#}")),
     }
 }
 
-/// Exports every unmodified reviewed document and its comments to a new file in `dir`.
+/// Exports the ask `batch` on its own, leaving the pending comments for the next send. An ask
+/// that cannot be exported joins the pending comments.
+fn export_ask(editor: &mut Editor, mut batch: ReviewBatch, dir: &Path) -> anyhow::Result<PathBuf> {
+    let asked = |doc: &Document| {
+        (batch.comments().iter()).any(|comment| Some(comment.path.as_path()) == doc.path())
+    };
+    let result = refuse_unsaved(editor, ":review-comment", asked)
+        .and_then(|()| export_batch(editor, &mut batch, dir));
+    if result.is_err() {
+        editor.review_batch.absorb(batch);
+        editor.share_review_comments();
+    }
+    result
+}
+
+/// Exports the pending review batch to a new file in `dir`.
 fn export_handoff(editor: &mut Editor, dir: &Path) -> anyhow::Result<PathBuf> {
+    let mut batch = std::mem::take(&mut editor.review_batch);
+    let result = export_batch(editor, &mut batch, dir);
+    editor.review_batch = batch;
+    editor.share_review_comments();
+    result
+}
+
+/// Exports every unmodified reviewed document and the comments of `batch` to a new file in `dir`.
+fn export_batch(
+    editor: &mut Editor,
+    batch: &mut ReviewBatch,
+    dir: &Path,
+) -> anyhow::Result<PathBuf> {
     let mut modified = HashSet::new();
-    let mut reviewed = Vec::new();
     for doc in editor.documents() {
         let Some(path) = doc.path() else {
             continue;
@@ -2856,21 +2935,15 @@ fn export_handoff(editor: &mut Editor, dir: &Path) -> anyhow::Result<PathBuf> {
         if doc.is_modified() && !doc.review_draft {
             modified.insert(path.to_path_buf());
         } else if let Some(review) = &doc.review {
-            reviewed.push((path.to_path_buf(), review.baseline().clone()));
+            batch.add_file(path.to_path_buf(), review.baseline().clone());
         }
     }
-    for (file, baseline) in reviewed {
-        editor.review_batch.add_file(file, baseline);
-    }
-    let target = editor.review_batch.target().map(str::to_owned);
+    let target = batch.target().map(str::to_owned);
 
     let millis = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
     let path = dir.join(format!("{millis}-{}.json", std::process::id()));
     let temp = path.with_extension("json.tmp");
-    editor
-        .review_batch
-        .export(&temp, |file| !modified.contains(file))?;
-    editor.share_review_comments();
+    batch.export(&temp, |file| !modified.contains(file))?;
     std::fs::rename(&temp, &path)
         .with_context(|| format!("failed to rename {} to {}", temp.display(), path.display()))?;
     editor.review_target = target;

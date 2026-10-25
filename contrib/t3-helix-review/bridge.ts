@@ -304,8 +304,9 @@ export class ReviewBridge {
     return thread;
   }
 
-  async tick(): Promise<void> {
-    if (this.closed) return;
+  /** Delivers pending feedback and refreshes the editor; resolves to whether anything changed. */
+  async tick(): Promise<boolean> {
+    if (this.closed) return false;
     try {
       const thread = await this.validateBinding();
       const pending = (await readdir(this.outbox)).filter(name => name.endsWith(".json")).sort();
@@ -313,20 +314,23 @@ export class ReviewBridge {
         try { await this.deliver(name, true); }
         catch (error) { await this.announce(`T3: feedback kept — ${(error as Error).message}`); }
       }
+      const run = thread.latestRunId !== this.thread.latestRunId || thread.status !== this.thread.status;
       if (this.mode === "work" && !isActive(thread) && thread.latestRunId !== this.state.lastRun) {
         await this.snapshot(); this.state.lastRun = thread.latestRunId; await this.save();
         await this.announce(`T3: ${thread.title} — ${thread.status}; review updated`);
       }
       this.thread = thread;
-      await this.refresh();
+      const refreshed = await this.refresh();
       for (const name of pending) {
         try { await this.deliver(name); }
         catch (error) { await this.announce(`T3: feedback kept — ${(error as Error).message}`); }
       }
-    } catch (error) { await this.announce(`T3: ${(error as Error).message}`); }
+      return pending.length > 0 || run || refreshed;
+    } catch (error) { await this.announce(`T3: ${(error as Error).message}`); return false; }
   }
 
-  async refresh(): Promise<void> {
+  /** Binds a new or renamed editor and refreshes its review; resolves to whether it sent anything. */
+  async refresh(): Promise<boolean> {
     const info = await stat(this.socketPath).catch(error => {
       this.socketIdentity = undefined;
       throw error;
@@ -334,7 +338,8 @@ export class ReviewBridge {
     const identity = `${info.ino}:${info.ctimeMs}`;
     const newSocket = identity !== this.socketIdentity;
     const title = [...`T3: ${this.title.replace(/[\p{Cc}\u2028\u2029]/gu, " ")}`].slice(0, 120).join("");
-    if (newSocket || title !== this.socketLabel) {
+    const bound = newSocket || title !== this.socketLabel;
+    if (bound) {
       await sendCommands(this.socketPath, [`review-handoff ${quoteCommand(this.outbox)} ${quoteCommand(title)}`,
         ...(this.mode === "work" ? [`review-baseline ${this.baseline}`] : [])]);
       if (newSocket && this.state.pullRequest) {
@@ -345,17 +350,17 @@ export class ReviewBridge {
       this.fingerprint = undefined;
       await this.announce(`${title} — connected; Space A a asks about your selection`);
     }
-    if (this.mode === "review") return;
+    if (this.mode === "review") return bound;
     const paths = await this.paths();
     const files = await Promise.all(paths.map(async path => {
       const value = await stat(path).catch(() => undefined);
       return `${path}:${value?.mtimeMs}:${value?.size}`;
     }));
     const fingerprint = digest((await git(this.repo, ["rev-parse", "HEAD"])) + files.join("\0") + await git(this.repo, ["diff", "--cached", "--raw", "--"]));
-    if (fingerprint !== this.fingerprint) {
-      await sendCommands(this.socketPath, [`review-baseline ${this.baseline}`]);
-      this.fingerprint = fingerprint;
-    }
+    if (fingerprint === this.fingerprint) return bound;
+    await sendCommands(this.socketPath, [`review-baseline ${this.baseline}`]);
+    this.fingerprint = fingerprint;
+    return true;
   }
 
   async deliver(name: string, prepareOnly = false): Promise<T3SendResult | undefined> {
@@ -390,13 +395,16 @@ export class ReviewBridge {
           throw new Error(`Cannot verify ${file}: ${state.problem}. Feedback is kept; no deletion has been inferred.`);
         }
         const { warnings } = batch.render(path, states);
-        let handoff: Awaited<ReturnType<typeof buildHandoff>>;
-        try { handoff = await buildHandoff(batch, { repo: this.repo, snapshots: this.state.snapshots, baseline: this.baseline, strictCurrentReads: true }); }
-        catch (error) {
-          if (!(error instanceof EmptyReviewError)) throw error;
-          if (!prepareOnly) { await rm(path); await this.announce(`T3: nothing published — ${error.message}`); }
+        // Every file and the message use one HEAD: an agent commit meanwhile would mix commits.
+        const head = review ? (await git(this.repo, ["rev-parse", "HEAD"])).trim() : undefined;
+        const built = await buildHandoff(batch, { repo: this.repo, snapshots: this.state.snapshots, baseline: this.baseline, strictCurrentReads: true, head })
+          .catch(error => { if (error instanceof EmptyReviewError) return error; throw error; });
+        if (head && (await git(this.repo, ["rev-parse", "HEAD"])).trim() !== head) throw new Error("HEAD moved while the pull request review was prepared");
+        if (built instanceof EmptyReviewError) {
+          if (!prepareOnly) { await rm(path); await this.announce(`T3: nothing published — ${built.message}`); }
           return;
         }
+        const handoff = built;
         let message: string;
         if (handoff) message = handoff.content;
         else if (batch.files.length) {
@@ -416,7 +424,6 @@ export class ReviewBridge {
         if (review) {
           const target = pullRequests.length === 1 ? pullRequests[0]
             : `the one of ${pullRequests.join(", ")} whose head branch is ${this.state.branch || "this checkout's HEAD"}`;
-          const head = (await git(this.repo, ["rev-parse", "HEAD"])).trim();
           delivery.message += `\n\nThe user wrote this review against the checkout's HEAD, ${head}. Publish the review on ${target} with T3's submit_pull_request_review MCP tool, instead of the host's tools: pass the pull request, headSha "${head}", event "comment", the review body, and comments as {path, line, startLine, side, body}, with path relative to the repository root, line the last and startLine the first line of a multi-line range, side "right" (head lines, the default) or "left" (removed base lines), and each suggestion's body a \`\`\`suggestion fence. If the tool reports that the pull request's head is not ${head}, stop and tell the user instead of posting anything. Only if that tool is unavailable, publish the same review with the host's CLI, and only when the pull request's head commit is ${head}.`;
         }
       }

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createServer } from "node:net";
 import { mkdtemp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -554,4 +554,54 @@ test("a pull request review on a thread with several linked PRs targets the chec
   await f.bridge.tick();
   assert.equal(f.calls.length, 1);
   assert(f.calls[0].message.includes("Publish the review on the one of https://github.com/team/project/pull/7, https://github.com/team/project/pull/8 whose head branch is main"));
+});
+
+test("a pull request review is prepared again when HEAD moves while it is built", async t => {
+  const f = await fixture(t);
+  f.linked.push("https://github.com/team/project/pull/7");
+  const file = join(f.repo, "file.txt");
+  const other = join(f.repo, "other.txt");
+  await writeFile(other, "other\n");
+  await git(f.repo, ["add", "other.txt"]); await git(f.repo, ["commit", "-m", "other"]);
+  const head = (await git(f.repo, ["rev-parse", "HEAD"])).trim();
+  const files = await Promise.all([file, other].map(async path => ({ path,
+    baseline: { kind: "git-commit", commit_oid: head, blob_oid: (await git(f.repo, ["rev-parse", `${head}:${relative(f.repo, path)}`])).trim() } })));
+  await writeFile(file, "keep\nnew check\nend\n");
+  await writeFile(other, "OTHER\n");
+  await f.writeBatch("pr.json", { files, request: { kind: "pr-review" } });
+  // The agent commits file.txt's edit after the handoff read file.txt against HEAD.
+  const originalStat = fs.stat;
+  let reads = 0;
+  const probe = t.mock.method(fs, "stat", async (...args: Parameters<typeof originalStat>) => {
+    if (args[0] === other && ++reads === 2) { await git(f.repo, ["add", "file.txt"]); await git(f.repo, ["commit", "-m", "agent"]); }
+    return originalStat(...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { probe.mock.restore(); syncBuiltinESMExports(); });
+  await f.bridge.tick();
+  assert(f.commands.some(command => command.startsWith("echo ") && command.includes("HEAD moved while the pull request review was prepared")));
+  const moved = (await git(f.repo, ["rev-parse", "HEAD"])).trim();
+  assert.notEqual(moved, head);
+  assert.equal(f.calls.length, 1);
+  assert(f.calls[0].message.includes(`headSha "${moved}"`));
+  assert(!f.calls[0].message.includes(head));
+  // file.txt's edit is in the new HEAD, so only other.txt's edit is left to suggest.
+  assert.deepEqual(handoffDetails(f.calls[0].message).files.map((entry: { path: string }) => entry.path), [other]);
+  assert.equal((await readdir(join(f.bridge.dir, "deliveries"))).length, 1);
+  assert.deepEqual(await f.bridge.pending(), []);
+});
+
+test("a tick reports whether anything changed, so an idle bridge can sync less often", async t => {
+  const f = await fixture(t);
+  assert.equal(await f.bridge.tick(), true, "connecting the editor");
+  assert.equal(await f.bridge.tick(), false);
+  await writeFile(join(f.repo, "file.txt"), "keep\nnew check\nend\n");
+  assert.equal(await f.bridge.tick(), true, "a saved edit");
+  assert.equal(await f.bridge.tick(), false);
+  f.thread.status = "running"; f.thread.activeRunId = "run-2"; f.thread.latestRunId = "run-2";
+  assert.equal(await f.bridge.tick(), true, "a new run");
+  assert.equal(await f.bridge.tick(), false);
+  await f.batch();
+  assert.equal(await f.bridge.tick(), true, "a batch to deliver");
+  assert.equal(f.calls.length, 1);
 });

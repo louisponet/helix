@@ -306,7 +306,11 @@ pub fn stage_paths(cwd: &Path, paths: &[std::path::PathBuf], trust_full: bool) -
 
 pub fn get_commit_base(file: &Path, revision: &str, trust_full: bool) -> Result<CommitBase> {
     let file = gix::path::realpath(file).context("resolve symlinks")?;
-    let repo = open_repo(get_repo_dir(&file)?, trust_full)?.to_thread_local();
+    // A deleted file's directory may be gone too; the repository is found from what is left.
+    let dir = (file.ancestors().skip(1))
+        .find(|dir| dir.is_dir())
+        .context("file has no parent directory")?;
+    let repo = open_repo(dir, trust_full)?.to_thread_local();
     let commit = repo
         .rev_parse_single(revision)?
         .object()?

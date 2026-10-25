@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { watch } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, readFile, realpath, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -204,10 +205,64 @@ async function openPlainEditor(program: string, cwd: string, location: object, a
   }
 }
 
-// Consecutive 1.5 s ticks without a listening socket after which an attached editor counts as
-// gone; one starting alongside this process gets longer to bind its socket.
-const EDITOR_GONE_TICKS = 3;
-const EDITOR_START_TICKS = 20;
+const CHECK_INTERVAL = 1500;
+// Consecutive checks without a listening socket after which an attached editor counts as gone;
+// one starting alongside this process gets longer to bind its socket.
+const EDITOR_GONE_CHECKS = 3;
+const EDITOR_START_CHECKS = 20;
+// An idle attached bridge syncs at least every 10 checks (15 s).
+const MAX_IDLE_CHECKS = 10;
+
+export interface SyncLoopOptions {
+  signal: AbortSignal;
+  /** An attached bridge watches for its editor to go away, and syncs less often while idle. */
+  attach: boolean;
+  /** New batches here wake the loop. */
+  outbox: string;
+  listening(): Promise<boolean>;
+  /** Sets up the editor; resolves to false while it is not ready for that yet. */
+  open(): Promise<boolean>;
+  /** Syncs with the thread; resolves to whether anything changed. */
+  tick(): Promise<boolean>;
+  sleep?(ms: number, signal: AbortSignal): Promise<void>;
+}
+
+/**
+ * Checks the editor every 1.5 s and syncs with the thread after each check, or, while an attached
+ * bridge finds nothing changed, after twice as many checks as the last time, up to 15 s. A batch
+ * landing in the outbox syncs at once.
+ */
+export async function syncLoop({ signal, attach, outbox, listening, open, tick,
+  sleep = (ms, signal) => delay(ms, undefined, { signal }).catch(() => {}) }: SyncLoopOptions): Promise<void> {
+  let woken = false;
+  let wakeUp = () => {};
+  const watcher = watch(outbox, () => { woken = true; wakeUp(); });
+  watcher.on("error", () => watcher.close());
+  let opened = false, answered = false, misses = 0, interval = 1, due = 0;
+  try {
+    while (!signal.aborted) {
+      if (attach && !await listening()) {
+        if (++misses >= (answered ? EDITOR_GONE_CHECKS : EDITOR_START_CHECKS)) break;
+      } else {
+        answered = true; misses = 0;
+        if (!opened) opened = await open();
+        else if (woken || --due <= 0) {
+          woken = false;
+          interval = (await tick()) || !attach ? 1 : Math.min(interval * 2, MAX_IDLE_CHECKS);
+          due = interval;
+        }
+      }
+      // Only a wake the next check can act on cuts the wait short.
+      const wakeable = opened && misses === 0;
+      await new Promise<void>(done => {
+        if (wakeable && woken) return done();
+        if (wakeable) wakeUp = done;
+        void sleep(CHECK_INTERVAL, signal).then(done);
+      });
+      wakeUp = () => {};
+    }
+  } finally { watcher.close(); }
+}
 
 function parseOptions(args: string[]) {
   return parseArgs({ args, allowPositionals: true, options: {
@@ -329,39 +384,32 @@ async function run({ values, positionals }: ReturnType<typeof parseOptions>): Pr
       // Keep the rejection observed while the bridge waits for the socket.
       void childDone.catch(() => {});
     }
-    let opened = false;
-    let answered = false;
-    let misses = 0;
-    while (!controller.signal.aborted) {
-      if (values.attach && !await editorListening(bridge.socketPath)) {
-        if (++misses >= (answered ? EDITOR_GONE_TICKS : EDITOR_START_TICKS)) break;
-      } else {
-        answered = true; misses = 0;
-        if (!opened) {
-          try {
-            if (values.attach) await sendCommands(bridge.socketPath, [`review-open ${quoteCommand(JSON.stringify({ mode }))}`]);
-            await bridge.refresh();
-            if (Object.keys(location).some(key => key !== "mode")) {
-              if (location.worktreePath && await realpath(location.worktreePath) !== await realpath(thread.cwd)) throw new Error("The requested location belongs to another worktree.");
-              await sendCommands(bridge.socketPath, [`review-open ${quoteCommand(JSON.stringify(location))}`]);
-            } else if (!values.attach) {
-              // An attached editor's client chooses what it shows.
-              await sendCommands(bridge.socketPath, ["review-next"]).catch(error => {
-                if (!/no (uncommitted )?changes/u.test(error.message)) throw error;
-                return sendCommands(bridge.socketPath, [`echo ${quoteCommand("No changes in this review range. Space A b chooses an earlier baseline.")}`]);
-              });
-            }
-            await sendCommands(bridge.socketPath, [`review-launch-ready${bridge.pullRequest ? ` ${quoteCommand(bridge.pullRequest)}` : ""}`]);
-            opened = true;
-          } catch (error) {
-            // HX may still be loading its runtime or refreshing a large review.
-            // Keep the editor open while these read-only startup commands retry.
-            if (!/ENOENT|ECONNREFUSED|did not acknowledge|closed before acknowledging|pull request is loading; navigation will be ready when checkout finishes/u.test((error as Error).message)) throw error;
+    await syncLoop({ signal: controller.signal, attach: values.attach ?? false, outbox: bridge.outbox,
+      listening: () => editorListening(bridge.socketPath),
+      tick: () => bridge.tick(),
+      open: async () => {
+        try {
+          if (values.attach) await sendCommands(bridge.socketPath, [`review-open ${quoteCommand(JSON.stringify({ mode }))}`]);
+          await bridge.refresh();
+          if (Object.keys(location).some(key => key !== "mode")) {
+            if (location.worktreePath && await realpath(location.worktreePath) !== await realpath(thread.cwd)) throw new Error("The requested location belongs to another worktree.");
+            await sendCommands(bridge.socketPath, [`review-open ${quoteCommand(JSON.stringify(location))}`]);
+          } else if (!values.attach) {
+            // An attached editor's client chooses what it shows.
+            await sendCommands(bridge.socketPath, ["review-next"]).catch(error => {
+              if (!/no (uncommitted )?changes/u.test(error.message)) throw error;
+              return sendCommands(bridge.socketPath, [`echo ${quoteCommand("No changes in this review range. Space A b chooses an earlier baseline.")}`]);
+            });
           }
-        } else await bridge.tick();
-      }
-      await delay(1500, undefined, { signal: controller.signal }).catch(() => {});
-    }
+          await sendCommands(bridge.socketPath, [`review-launch-ready${bridge.pullRequest ? ` ${quoteCommand(bridge.pullRequest)}` : ""}`]);
+          return true;
+        } catch (error) {
+          // HX may still be loading its runtime or refreshing a large review.
+          // Keep the editor open while these read-only startup commands retry.
+          if (!/ENOENT|ECONNREFUSED|did not acknowledge|closed before acknowledging|pull request is loading; navigation will be ready when checkout finishes/u.test((error as Error).message)) throw error;
+          return false;
+        }
+      } });
     if (childDone) {
       const code = await childDone;
       if (code) throw new Error(`HX exited with status ${code}.`);

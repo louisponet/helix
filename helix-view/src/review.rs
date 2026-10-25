@@ -1365,6 +1365,22 @@ impl ReviewBatch {
         self.files.is_empty() && self.comments.is_empty() && self.request.is_none()
     }
 
+    /// Adds the files and comments of the later batch `other`, keeping comments in the order they
+    /// were made; its request and target replace this batch's.
+    pub fn absorb(&mut self, other: ReviewBatch) {
+        for (path, baseline) in other.files {
+            self.files.entry(path).or_insert(baseline);
+        }
+        self.comments.extend(other.comments);
+        self.comments.sort_by_key(|comment| comment.created);
+        if let Some(request) = other.request {
+            self.request = Some(request);
+        }
+        if let Some(target) = other.target {
+            self.target = Some(target);
+        }
+    }
+
     /// Sets the request the next export carries, replacing any earlier one.
     pub fn set_request(&mut self, request: ReviewRequest) {
         self.request = Some(request);

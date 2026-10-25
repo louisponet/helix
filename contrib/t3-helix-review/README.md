@@ -43,14 +43,15 @@ HX's status line shows the bound thread as `T3: <title>`.
 In HX:
 
 - `Space A a` asks the agent about the selection right away, including
-  deleted text focused with `:review-old`.
+  deleted text focused with `:review-old`. Pending comments stay pending.
 - `Space A c` adds a pending comment on the selection. `Space A C` lists
   pending comments and `Space A u` drops the latest one.
 - `Space A S` (`:review-send [instruction]`) sends the pending comments and
   your saved edits to the agent.
 - `Space A P` (`:review-send-pr [summary]`) asks the agent to post them on the
-  thread's pull request: each comment as an inline review comment, each edit as
-  a suggestion on the lines it replaces, and the summary as the review body.
+  thread's pull request: each comment as an inline review comment, each saved
+  edit since `HEAD` (also in files you closed) as a suggestion on the lines it
+  replaces, and the summary as the review body.
   The agent publishes with T3's pull request review tool and leaves your edits
   uncommitted in the checkout.
 - `Space A m` (`:review-commit [subject]`) asks the agent to commit exactly

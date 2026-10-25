@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
-import { hasReviewCommit, spawnReviewEditor } from "./cli.ts";
+import { hasReviewCommit, spawnReviewEditor, syncLoop } from "./cli.ts";
 
 const execute = promisify(execFile);
 async function environment(t: { after(fn: () => Promise<void>): void }, id: string) {
@@ -225,4 +225,47 @@ test("an attached bridge without a saved login says so in the editor instead of 
   await assert.rejects(f.run(["--attach", "--socket", socketPath, "--thread", "thread"]), /No saved T3 connection/u);
   assert.equal(editor.commands.length, 1);
   assert.match(editor.commands[0], /^echo 'hx-t3: No saved T3 connection\. Run hx-t3 setup in a T3 terminal/u);
+});
+
+test("an idle attached bridge syncs less often, catches up on a change and still notices its editor leave", async t => {
+  const outbox = await mkdtemp(join(tmpdir(), "hx-outbox-"));
+  t.after(() => rm(outbox, { recursive: true, force: true }));
+  const changes = [false, false, false, false, false, true, false, false];
+  const ticks: number[] = [];
+  const sleeps: number[] = [];
+  let checks = 0;
+  await syncLoop({ signal: new AbortController().signal, attach: true, outbox,
+    listening: async () => { checks++; return ticks.length < changes.length; },
+    open: async () => true,
+    tick: async () => { ticks.push(checks); return changes[ticks.length - 1]; },
+    sleep: async ms => { sleeps.push(ms); } });
+  // Checks between syncs double up to the 15 s cap and drop back after a change.
+  assert.deepEqual(ticks.slice(1).map((check, i) => check - ticks[i]), [2, 4, 8, 10, 10, 1, 2]);
+  // The editor still counts as gone after three 1.5 s checks without it.
+  assert.equal(checks - ticks.at(-1)!, 3);
+  assert(sleeps.every(ms => ms === 1500));
+});
+
+test("a batch landing in the outbox wakes a waiting bridge at once", { timeout: 10_000 }, async t => {
+  const outbox = await mkdtemp(join(tmpdir(), "hx-outbox-"));
+  t.after(() => rm(outbox, { recursive: true, force: true }));
+  const controller = new AbortController();
+  let opened!: () => void;
+  const ready = new Promise<void>(done => { opened = done; });
+  let synced!: () => void;
+  const ticked = new Promise<void>(done => { synced = done; });
+  const loop = syncLoop({ signal: controller.signal, attach: true, outbox,
+    listening: async () => true,
+    open: async () => { opened(); return true; },
+    tick: async () => { synced(); return false; },
+    // No time passes: only the outbox, or stopping, ends a wait.
+    sleep: (_ms, signal) => new Promise<void>(done => {
+      if (signal.aborted) return done();
+      signal.addEventListener("abort", () => done(), { once: true });
+    }) });
+  await ready;
+  await writeFile(join(outbox, "batch.json"), "{}");
+  await ticked;
+  controller.abort();
+  await loop;
 });

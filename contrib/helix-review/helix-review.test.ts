@@ -215,6 +215,19 @@ test("pull request reviews read HEAD from the repository root after a deletion r
 	assert.match(handoff!.files[0].user_edits.hunks.join(""), /^@@ -1 \+0,0 @@.*\n-removed\n$/);
 });
 
+test("pull request reviews diff every file against the head they are given, not a HEAD that moved since", async (t) => {
+	const w = workspace(t);
+	const path = join(w.repo, "a.rs");
+	const blob = w.stage("a.rs", "one\n");
+	const head = w.commit();
+	w.stage("a.rs", "two\n");
+	w.commit();
+	writeFileSync(path, "three\n");
+	const batch = parse(doc([{ path, baseline: commit(head, blob) }], [], { kind: "pr-review" }));
+	const handoff = await buildHandoff(batch, { repo: w.repo, head });
+	assert.match(handoff!.files[0].user_edits.hunks.join(""), /^@@ -1 \+1 @@.*\n-one\n\+three\n$/);
+});
+
 test("an empty pull request review is refused, but a summary alone is a review", async (t) => {
 	const w = workspace(t);
 	const path = join(w.repo, "a.rs");
