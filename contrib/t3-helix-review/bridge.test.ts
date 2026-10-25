@@ -489,3 +489,38 @@ test("pending lists only batches in order and discard archives the original with
   assert.ok(!f.calls[0].message.includes("Discard this request"));
   assert.deepEqual(await f.bridge.pending(), []);
 });
+
+test("a pull request review waits for a linked PR, then asks the agent to publish it through T3", async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.repo, "file.txt"), "keep\nnew check\nend\n");
+  await f.writeBatch("pr.json", { request: { kind: "pr-review", summary: "Two nits" } });
+  await f.bridge.tick();
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(await f.bridge.pending(), ["pr.json"]);
+  assert.deepEqual(await readdir(join(f.bridge.dir, "deliveries")), []);
+  assert(f.commands.some(command => command.startsWith("echo ") && command.includes("Link a pull request to this thread first")));
+
+  f.linked.push("https://github.com/team/project/pull/7");
+  await f.bridge.tick();
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].mode, "auto");
+  const { message } = f.calls[0];
+  assert(message.includes("Publish the review on https://github.com/team/project/pull/7 with T3's submit_pull_request_review MCP tool"));
+  assert.match(message, /suggestion fence/u);
+  assert.match(message, /Only if that tool is unavailable, publish the same review with the host's CLI/u);
+  const details = handoffDetails(message);
+  assert.deepEqual(details.request, { kind: "pr-review", summary: "Two nits" });
+  assert.equal(details.files[0].user_edits.against, "head");
+  assert.match(details.files[0].user_edits.hunks.join(""), /^@@ -2 \+2 @@.*\n-old check\n\+new check\n$/u);
+  assert.deepEqual(await f.bridge.pending(), []);
+});
+
+test("a pull request review on a thread with several linked PRs targets the checkout's branch", async t => {
+  const f = await fixture(t);
+  f.linked.push("https://github.com/team/project/pull/7", "https://github.com/team/project/pull/8");
+  await writeFile(join(f.repo, "file.txt"), "keep\nnew check\nend\n");
+  await f.writeBatch("pr.json", { request: { kind: "pr-review" } });
+  await f.bridge.tick();
+  assert.equal(f.calls.length, 1);
+  assert(f.calls[0].message.includes("Publish the review on the one of https://github.com/team/project/pull/7, https://github.com/team/project/pull/8 whose head branch is main"));
+});

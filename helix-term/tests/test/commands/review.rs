@@ -4618,6 +4618,56 @@ async fn review_send_exports_the_handoff_batch_without_writing() -> anyhow::Resu
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn work_session_comments_wait_for_a_send_as_pull_request_review() -> anyhow::Result<()> {
+    use helix_view::editor::ReviewMode;
+    let repo = Repo::new("a\nb\n", "a\nb\n", "a\nB\n");
+    let _cwd = Cwd::enter(repo.dir.path());
+    let outbox = tempfile::tempdir()?;
+    let mut app = repo.app()?;
+    app.editor.review_mode = Some(ReviewMode::Work);
+    let keys = format!(
+        ":review-handoff {}<ret>:review HEAD<ret>2gg:review-comment rename this<ret>",
+        outbox.path().display()
+    );
+    send_keys(&mut app, &keys).await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(app.editor.review_batch.comments().len(), 1);
+    assert!(take_batches(outbox.path()).is_empty());
+
+    send_keys(&mut app, ":review-send-pr Looks close<ret>").await?;
+    assert_status_not_error(&app.editor);
+    let batches = take_batches(outbox.path());
+    assert_eq!(batches.len(), 1);
+    assert_eq!(
+        batches[0]["request"],
+        serde_json::json!({ "kind": "pr-review", "summary": "Looks close" })
+    );
+    assert_eq!(batches[0]["comments"][0]["comment"], "rename this");
+    assert_eq!(batches[0]["comments"][0]["start_line"], 2);
+    assert_eq!(
+        batches[0]["files"][0]["path"],
+        serde_json::json!(helix_stdx::path::canonicalize(&repo.file))
+    );
+    assert!(app.editor.review_batch.comments().is_empty());
+
+    send_keys(&mut app, "<space>AP").await?;
+    assert_status_not_error(&app.editor);
+    let batches = take_batches(outbox.path());
+    assert_eq!(batches.len(), 1);
+    assert_eq!(
+        batches[0]["request"],
+        serde_json::json!({ "kind": "pr-review" })
+    );
+    assert_eq!(batches[0]["comments"], serde_json::json!([]));
+
+    app.editor.review_mode = Some(ReviewMode::Review);
+    send_keys(&mut app, ":review-send-pr<ret>").await?;
+    assert_error(&app, "Publish review");
+    assert!(take_batches(outbox.path()).is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn handoff_labels_stay_visible_without_review_and_do_not_address_batches(
 ) -> anyhow::Result<()> {
     let repo = Repo::new("old\n", "old\n", "new\n");

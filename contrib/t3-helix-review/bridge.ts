@@ -94,6 +94,15 @@ export function sendCommands(path: string, commands: string[]): Promise<string[]
   });
 }
 
+/** Whether an editor accepts connections on `path`; a missing or refusing socket means it is gone. */
+export function editorListening(path: string): Promise<boolean> {
+  return new Promise(done => {
+    const socket = connect(path);
+    socket.once("connect", () => { socket.end(); done(true); });
+    socket.once("error", error => done(!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")));
+  });
+}
+
 async function readJson<T>(path: string): Promise<T | undefined> {
   try { return JSON.parse(await readFile(path, "utf8")); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
@@ -343,6 +352,9 @@ export class ReviewBridge {
         const message = `You are helping the user review ${this.pullRequest} at commit ${this.state.reviewHead}. Read the reviewed files from that commit with git show; the current checkout may contain unrelated work. Analyze the PR and the selection below as a co-reviewer. Selected text may contain a proposed edit held only in an HX suggestion buffer; it is not a saved checkout change. Return findings, explanations, and suggested replacement code in this conversation. Do not edit checkout files, stage, commit, push, switch branches, or publish to GitHub. The user will turn proposals into HX drafts and explicitly publish their review.\n\n${JSON.stringify({ request: batch.request, selections: batch.comments }, null, 2)}`;
         delivery = { id, message };
       } else {
+        const review = batch.request?.kind === "pr-review";
+        const pullRequests = review ? await this.client.linkedPullRequests(this.threadId) : [];
+        if (review && !pullRequests.length) throw new Error("Link a pull request to this thread first");
         const states = await batch.inspect();
         for (const [file, state] of states) {
           if (!state.problem) continue;
@@ -367,6 +379,11 @@ export class ReviewBridge {
           delivery.indexTree = (await git(this.repo, ["write-tree"])).trim();
           delivery.head = (await git(this.repo, ["rev-parse", "HEAD"])).trim();
           delivery.message += `\n\nBefore committing, verify HEAD is ${delivery.head} and git write-tree is ${delivery.indexTree}. If either differs, stop and ask the user to review the staged content again. Do not stage other changes, push, or change branches.`;
+        }
+        if (review) {
+          const target = pullRequests.length === 1 ? pullRequests[0]
+            : `the one of ${pullRequests.join(", ")} whose head branch is ${this.state.branch || "this checkout's HEAD"}`;
+          delivery.message += `\n\nPublish the review on ${target} with T3's submit_pull_request_review MCP tool, instead of the host's tools: pass the pull request, event "comment", the review body, and comments as {path, line, startLine, side, body}, with path relative to the repository root, line the last and startLine the first line of a multi-line range, side "right" (head lines, the default) or "left" (removed base lines), and each suggestion's body a \`\`\`suggestion fence. Only if that tool is unavailable, publish the same review with the host's CLI.`;
         }
       }
       await writeJson(deliveryPath, delivery);

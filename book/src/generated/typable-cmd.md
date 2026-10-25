@@ -91,7 +91,7 @@
 | `:review-commits` | Choose a commit baseline from the latest 200 commits reachable from HEAD, then review against the current buffer. |
 | `:review-old` | Focus the old text nearest the cursor. It can be selected, yanked and commented on but not edited; Esc returns. |
 | `:review-refresh` | Reload an unmodified reviewed buffer from disk and refresh its index baseline or retain its selected commit. |
-| `:review-comment` | Send a comment on every selection (or the selected old text) to the agent at once, writing the buffer first if modified; a leading @label addresses that pi session. While reviewing a pull request, add a pending pull request comment on the primary selection instead. Use %% for a literal %. |
+| `:review-comment` | Send a comment on every selection (or the selected old text) to the agent at once, writing the buffer first if modified; a leading @label addresses that pi session. In a T3 Work together session (HELIX_REVIEW_MODE=work), add pending comments for :review-send or :review-send-pr instead. While reviewing a pull request, add a pending pull request comment on the primary selection instead. Use %% for a literal %. |
 | `:review-ask` | Send a comment on every selection (or the selected old text) to the agent at once, writing the buffer first if modified, also while reviewing a pull request; a leading @label addresses that pi session. Use %% for a literal %. |
 | `:review-comments` | Pick a pending review comment and jump to its line. |
 | `:review-uncomment` | Drop the most recently added pending review comment, or the given number of latest ones. |
@@ -112,6 +112,7 @@
 | `:review-baseline` | Review every unmodified buffer in the workspace, and buffers opened later, against a commit revision such as HEAD. Repeating the same commit refreshes the reviews; `clear` closes them. A trailing `force` adopts the commit even over a baseline pinned by you. |
 | `:review-handoff` | Set the directory the explicit handoffs (:review-comment, :review-send, :review-commit, :review-commit-all) export review batches to. Without it, batches go to `<workspace>/.pi/helix-review/outbox` when that directory exists and every reviewed file is in the workspace. `clear` returns to that default. |
 | `:review-send` | Export a review batch to the handoff directory now, as a write would, without writing any file, with optional text as an instruction to the agent, addressed to a pi session by a leading @label. Refuses while a reviewed buffer has unsaved changes. |
+| `:review-send-pr` | Hand the review back like :review-send, asking the agent to post the pending comments and saved edits on the pull request as one review (comments inline, edits as suggestions), with optional text as the review summary and a leading @label to address a pi session. |
 | `:review-commit` | Hand the review back like :review-send, asking the agent to commit exactly what is staged in the git index, with an optional commit subject and a leading @label to address a pi session. Refuses when nothing is staged. |
 | `:review-diff` | Show a unified diff of every workspace file changed since the review baseline commit in a scratch buffer. |
 | `:review-diff-open` | In the :review-diff buffer, open the file of the hunk under the cursor at the matching current line. |

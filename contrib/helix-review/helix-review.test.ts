@@ -66,6 +66,7 @@ test("invalid versions, old selections from absent files, invalid requests and e
 		[doc([file], [comment(file.path, commit("a".repeat(40), null), { side: "old" })]), /cannot select old text from an absent file/],
 		[doc([file], [], { kind: "shell", text: "ignored" }), /request.kind/],
 		[doc([file], [], { kind: "message", text: 3 }), /request.text must be a string/],
+		[doc([file], [], { kind: "pr-review", summary: 3 }), /request.summary must be a string/],
 		[doc([file, file]), /more than once/],
 		[doc(Array(1001).fill(file)), /more than 1000/],
 		[doc([], [comment(file.path, file.baseline, { start_line: 0 })]), /1-based line number/],
@@ -159,6 +160,45 @@ test("request-only handoffs preserve fenced text and spell out staged commit con
 	assert.match(staged!.content, /git commit` without `-a` and without staging anything first/);
 	assert.match(staged!.content, /Use this subject: "fix: correction"/);
 	assert.match(staged!.content, /leave unstaged changes alone, and report the commit hash/);
+});
+
+test("pull request reviews diff saved files against HEAD without context and ask for inline comments and suggestions", async (t) => {
+	const w = workspace(t);
+	const path = join(w.repo, "a.rs");
+	const added = join(w.repo, "new.rs");
+	const mergeBase = w.stage("a.rs", "zero\n");
+	const base = w.commit();
+	w.stage("a.rs", "one\ntwo\nthree\nfour\nfive\nsix\nseven\n");
+	const head = w.commit();
+	writeFileSync(path, "one\nTWO\nthree\nfour\nfive\nsix\nSEVEN\n");
+	writeFileSync(added, "fresh\n");
+	const files = [{ path, baseline: commit(base, mergeBase) }, { path: added, baseline: commit(base, null) }];
+	const note = comment(path, commit(base, mergeBase), {
+		start_line: 2, end_line: 2, current_line: 2, selected_text: "TWO\n", context_before: "one\n", context_after: "three\n", comment: "Name this better.",
+	});
+	const batch = parse(doc(files, [note], { kind: "pr-review", summary: "Close, two nits." }));
+	assert.deepEqual(batch.request, { kind: "pr-review", summary: "Close, two nits." });
+	const before = readFileSync(path);
+	const staged = w.git("rev-parse", ":a.rs");
+	// The turn snapshot and the comment baseline are not the pull request's lines; HEAD is.
+	const handoff = await buildHandoff(batch, { repo: w.repo, snapshots: { [path]: mergeBase } });
+	assert.ok(handoff);
+	assert.deepEqual(handoff.files.map((file) => [file.path, file.user_edits.against]), [[path, "head"], [added, "head"]]);
+	assert.match(handoff.files[0].user_edits.hunks.join(""), /^@@ -2 \+2 @@.*\n-two\n\+TWO\n@@ -7 \+7 @@.*\n-seven\n\+SEVEN\n$/);
+	assert.match(handoff.files[1].user_edits.hunks.join(""), /^@@ -0,0 \+1 @@.*\n\+fresh\n$/);
+	assert.equal(handoff.files[0].review_comments[0].comment, "Name this better.");
+	assert.deepEqual(handoff.details.request, { kind: "pr-review", summary: "Close, two nits." });
+	assert.match(handoff.content, /head commit is the local HEAD/);
+	assert.match(handoff.content, /```suggestion fence/);
+	assert.match(handoff.content, /do not commit, stage, push or revert them/);
+	assert.ok(!handoff.content.includes("continue editing or committing normally"));
+	assert.ok(handoff.content.includes("Review body:\n```\nClose, two nits.\n```"));
+	assert.deepEqual(readFileSync(path), before);
+	assert.equal(w.git("rev-parse", ":a.rs"), staged);
+	assert.equal(w.git("rev-parse", "HEAD"), head);
+	const unsummarized = await buildHandoff(parse(doc(files, [], { kind: "pr-review" })), { repo: w.repo });
+	assert.deepEqual(unsummarized!.details.request, { kind: "pr-review" });
+	assert.match(unsummarized!.content, /write a short summary/);
 });
 
 test("ask handoffs use relocated selections and nearest hunks, excluding distant edits, other files and enclosing code", async (t) => {

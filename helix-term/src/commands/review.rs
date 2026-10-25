@@ -50,22 +50,7 @@ pub(crate) fn run_terminal_action(
                 cx.editor.review_mode != Some(ReviewMode::Review),
                 "Use a pull request comment draft in Review a PR"
             );
-            ensure!(
-                cx.editor.review_handoff_dir().is_some(),
-                "no review handoff directory"
-            );
-            let text = text
-                .filter(|text| !text.trim().is_empty())
-                .context("the comment is empty")?;
-            ensure_review(cx)?;
-            let comments = selection_comments(cx.editor, text, true)?;
-            for comment in comments {
-                cx.editor.review_batch.add_comment(comment);
-            }
-            cx.editor.share_review_comments();
-            cx.editor
-                .set_status("Comment saved; Send delivers pending feedback");
-            Ok(())
+            save_comments(cx, text.unwrap_or_default())
         }
         Action::Files if cx.editor.review_handoff_dir().is_none() => {
             open_plain_file_picker(cx);
@@ -81,7 +66,14 @@ pub(crate) fn run_terminal_action(
         Action::MarkReviewed => set_change_reviewed(cx, true),
         Action::UnmarkReviewed => set_change_reviewed(cx, false),
         Action::Ask => send_comments_inner(cx, text.context("the comment is empty")?, false),
-        Action::Send => send_message(cx, None, text),
+        Action::Send => send_message(
+            cx,
+            None,
+            text.map(|text| ReviewRequest::Message {
+                text: text.to_owned(),
+            }),
+            ":review-send",
+        ),
         Action::PrReview | Action::PrComment | Action::PrSuggestion | Action::PrComplete => {
             unreachable!("PR draft actions are handled by the review transport")
         }
@@ -868,6 +860,7 @@ const OLD_FOCUS_TYPABLE: &[&str] = &[
     "review-uncomment",
     "review-export",
     "review-send",
+    "review-send-pr",
     "review-commit",
     "review-commit-all",
     "review-close",
@@ -892,6 +885,7 @@ const OLD_FOCUS_STATIC: &[&str] = &[
     "review_commit_staged",
     "review_commit_all",
     "review_send_handoff",
+    "review_send_pr_review",
     "review_next_change",
     "review_prev_change",
 ];
@@ -1693,6 +1687,10 @@ pub(super) fn review_comment(
         return Ok(());
     }
     if cx.editor.review_pr.is_none() {
+        // A T3 work session has no other way to collect comments for :review-send-pr.
+        if cx.editor.review_mode == Some(ReviewMode::Work) {
+            return save_comments(cx, &args[0]);
+        }
         return send_comments(cx, &args[0]);
     }
     ensure_review(cx)?;
@@ -1821,6 +1819,25 @@ fn enclosing_text(doc: &Document, range: Range) -> Option<String> {
         node.end_byte() as usize
     };
     Some(text.byte_slice(start..end).to_string())
+}
+
+/// Adds a pending comment with `text` on every selection (or the selected old text), handed off
+/// with the next send.
+fn save_comments(cx: &mut compositor::Context, text: &str) -> anyhow::Result<()> {
+    ensure!(
+        cx.editor.review_handoff_dir().is_some(),
+        "no review handoff directory"
+    );
+    ensure!(!text.trim().is_empty(), "the comment is empty");
+    ensure_review(cx)?;
+    for comment in selection_comments(cx.editor, text, true)? {
+        cx.editor.review_batch.add_comment(comment);
+    }
+    cx.editor.share_review_comments();
+    cx.editor.set_status(
+        "Comment saved; Space A S sends pending feedback, Space A P sends it as a PR review",
+    );
+    Ok(())
 }
 
 /// Comments with `text` on every selection (or the selected old text) and hands the review off
@@ -2586,13 +2603,32 @@ pub(super) fn review_send(
         return Ok(());
     }
     let (target, text) = split_target(args.first());
-    send_message(cx, target, text)
+    let request = text.map(|text| ReviewRequest::Message {
+        text: text.to_owned(),
+    });
+    send_message(cx, target, request, ":review-send")
+}
+
+pub(super) fn review_send_pr(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    let (target, summary) = split_target(args.first());
+    let request = ReviewRequest::PrReview {
+        summary: summary.map(str::to_owned),
+    };
+    send_message(cx, target, Some(request), ":review-send-pr")
 }
 
 fn send_message(
     cx: &mut compositor::Context,
     target: Option<String>,
-    text: Option<&str>,
+    request: Option<ReviewRequest>,
+    command: &str,
 ) -> anyhow::Result<()> {
     ensure!(
         cx.editor.review_mode != Some(ReviewMode::Review),
@@ -2601,10 +2637,7 @@ fn send_message(
     if let Err(err) = ensure_review(cx) {
         log::info!("not enabling review: {err:#}");
     }
-    let request = text.map(|text| ReviewRequest::Message {
-        text: text.to_owned(),
-    });
-    let path = hand_off(cx.editor, request, target, ":review-send")?;
+    let path = hand_off(cx.editor, request, target, command)?;
     cx.editor
         .set_status(format!("Exported review batch {}", path.display()));
     Ok(())

@@ -43,7 +43,9 @@ files, the nearest/overlapping baseline diff hunks for each selection and the
 corresponding user edits. Current selections are located by their quoted text
 and context before consulting comment-time line hints. Full enclosing syntax
 nodes and unrelated changes are omitted for asks. Diffs explicitly use three context lines and no inter-hunk context,
-independent of repository diff settings. Whole hunks are capped at
+independent of repository diff settings. A `pr-review` diffs each file against
+`HEAD` instead (`against: "head"`) without context lines, so every hunk maps
+onto the pull request's head lines. Whole hunks are capped at
 200 lines; oversized remaining hunks are summarized with `truncated: true`.
 
 Per-comment baselines are retained in new handoffs. Pi passes

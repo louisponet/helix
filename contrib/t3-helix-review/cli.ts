@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { createInterface } from "node:readline/promises";
 import { setTimeout as delay } from "node:timers/promises";
-import { ReviewBridge, quoteCommand, sendCommands, writeJson } from "./bridge.ts";
+import { ReviewBridge, editorListening, quoteCommand, sendCommands, writeJson } from "./bridge.ts";
 import type { ReviewMode } from "./bridge.ts";
 import { T3Client, connectionFromEnvironment, defaultT3BaseDir, discoverLocalEndpoint, readEnvironment } from "./t3.ts";
 import type { T3Connection, T3ThreadInfo } from "./t3.ts";
@@ -27,10 +27,10 @@ const help = `Work together or review a pull request in Helix.
   hx-t3 pending                 List feedback waiting to be delivered
   hx-t3 discard --batch <name>  Cancel a pending batch (keeps an archive)
 
-In HX: Space A a asks about the selection; Space A f picks a changed file.
-Work together: save corrections, then Send to agent or :review-send <instruction>.
+In HX: Space A a asks about the selection; Space A c adds a comment; Space A f picks a changed file.
+Work together: save corrections, then Space A S (:review-send [instruction]) sends them
+with your comments, or Space A P (:review-send-pr [summary]) has the agent post them as a PR review.
 Review a PR: edit suggestion buffers without saving over source files.
-Draft PR comments and suggestions, then preview and publish the review in T3.
 Ask agent discusses your selection in either mode; saving alone never starts a turn.
 Answers appear in the T3 thread. Quitting HX stops the bridge.
 
@@ -41,7 +41,7 @@ Options:
   --pr <url>       GitHub PR to review; --mode review uses the thread's linked PR
   --file <path>    Relative to the bound worktree; basic editing also works before the first Git commit
   --hx <program>   HX executable (default: hx or HELIX_BIN)
-  --attach        Attach to an existing editor instead of launching HX
+  --attach        Attach to an existing editor instead of launching HX; exits when it closes
   --socket <path>  Override this thread's private HX socket
   --state-dir     Override the private review state directory
   --config <path>  Override the private connection file
@@ -204,13 +204,33 @@ async function openPlainEditor(program: string, cwd: string, location: object, a
   }
 }
 
-export async function main(args = process.argv.slice(2)): Promise<void> {
-  const { values, positionals } = parseArgs({ args, allowPositionals: true, options: {
+// Consecutive 1.5 s ticks without a listening socket after which an attached editor counts as
+// gone; one starting alongside this process gets longer to bind its socket.
+const EDITOR_GONE_TICKS = 3;
+const EDITOR_START_TICKS = 20;
+
+function parseOptions(args: string[]) {
+  return parseArgs({ args, allowPositionals: true, options: {
     help: { type: "boolean", short: "h" }, thread: { type: "string" }, base: { type: "string" }, pr: { type: "string" }, mode: { type: "string" }, file: { type: "string" }, line: { type: "string" }, column: { type: "string" }, worktree: { type: "string" }, revision: { type: "string" }, location: { type: "string" },
     hx: { type: "string" }, attach: { type: "boolean" }, socket: { type: "string" }, "state-dir": { type: "string" },
     config: { type: "string" }, t3: { type: "string" }, "base-dir": { type: "string" },
     "environment-id": { type: "string" }, batch: { type: "string" },
   } });
+}
+
+export async function main(args = process.argv.slice(2)): Promise<void> {
+  const options = parseOptions(args);
+  try { await run(options); }
+  catch (error) {
+    // An attached bridge runs in a terminal nobody may be watching; say why in the editor.
+    const socket = options.values.attach ? options.values.socket : undefined;
+    const reason = `hx-t3: ${(error as Error).message}`.replace(/[\p{Cc}\u2028\u2029]/gu, " ").slice(0, 500);
+    if (socket) await sendCommands(socket, [`echo ${quoteCommand(reason)}`]).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function run({ values, positionals }: ReturnType<typeof parseOptions>): Promise<void> {
   if (values.help) { console.log(help); return; }
   if (process.platform === "win32") throw new Error("HX review requires a Unix command socket. Run hx-t3 in WSL or on your Linux/macOS workspace host.");
   const location = values.location ? JSON.parse(values.location) : {
@@ -248,6 +268,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (actual.environmentId !== environmentId) throw new Error("The configured MCP connection belongs to another T3 environment. Remove conflicting MCP environment variables or run hx-t3 setup with the intended --base-dir.");
   }
   if (!connection) {
+    if (values.attach) throw new Error("No saved T3 connection. Run hx-t3 setup in a T3 terminal, then open the file in T3 again.");
     console.log("Connecting Helix review to your local T3 server…");
     connection = await pairLocalClient({ baseDir, endpoint, runtimeStatePath, environmentId,
       cliPath: values.t3 ?? process.env.T3CODE_CLI_PATH ?? join(homedir(), ".t3", "bin", "t3") });
@@ -294,7 +315,6 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const stop = () => { controller.abort(); child?.kill("SIGTERM"); };
   process.once("SIGINT", stop); process.once("SIGTERM", stop);
   try {
-    if (values.attach) await sendCommands(bridge.socketPath, [`review-open ${quoteCommand(JSON.stringify({ mode }))}`]);
     const thread = await client.readThread(threadId);
     console.log(mode === "review"
       ? `Reviewing ${bridge.pullRequest} · suggestion drafts leave checkout files unchanged`
@@ -308,27 +328,36 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       void childDone.catch(() => {});
     }
     let opened = false;
+    let answered = false;
+    let misses = 0;
     while (!controller.signal.aborted) {
-      if (!opened) {
-        try {
-          await bridge.refresh();
-          if (Object.keys(location).some(key => key !== "mode")) {
-            if (location.worktreePath && await realpath(location.worktreePath) !== await realpath(thread.cwd)) throw new Error("The requested location belongs to another worktree.");
-            await sendCommands(bridge.socketPath, [`review-open ${quoteCommand(JSON.stringify(location))}`]);
-          } else {
-            await sendCommands(bridge.socketPath, ["review-next"]).catch(error => {
-              if (!/no (uncommitted )?changes/u.test(error.message)) throw error;
-              return sendCommands(bridge.socketPath, [`echo ${quoteCommand("No changes in this review range. Space A b chooses an earlier baseline.")}`]);
-            });
+      if (values.attach && !await editorListening(bridge.socketPath)) {
+        if (++misses >= (answered ? EDITOR_GONE_TICKS : EDITOR_START_TICKS)) break;
+      } else {
+        answered = true; misses = 0;
+        if (!opened) {
+          try {
+            if (values.attach) await sendCommands(bridge.socketPath, [`review-open ${quoteCommand(JSON.stringify({ mode }))}`]);
+            await bridge.refresh();
+            if (Object.keys(location).some(key => key !== "mode")) {
+              if (location.worktreePath && await realpath(location.worktreePath) !== await realpath(thread.cwd)) throw new Error("The requested location belongs to another worktree.");
+              await sendCommands(bridge.socketPath, [`review-open ${quoteCommand(JSON.stringify(location))}`]);
+            } else if (!values.attach) {
+              // An attached editor's client chooses what it shows.
+              await sendCommands(bridge.socketPath, ["review-next"]).catch(error => {
+                if (!/no (uncommitted )?changes/u.test(error.message)) throw error;
+                return sendCommands(bridge.socketPath, [`echo ${quoteCommand("No changes in this review range. Space A b chooses an earlier baseline.")}`]);
+              });
+            }
+            await sendCommands(bridge.socketPath, [`review-launch-ready${bridge.pullRequest ? ` ${quoteCommand(bridge.pullRequest)}` : ""}`]);
+            opened = true;
+          } catch (error) {
+            // HX may still be loading its runtime or refreshing a large review.
+            // Keep the editor open while these read-only startup commands retry.
+            if (!/ENOENT|ECONNREFUSED|did not acknowledge|closed before acknowledging|pull request is loading; navigation will be ready when checkout finishes/u.test((error as Error).message)) throw error;
           }
-          await sendCommands(bridge.socketPath, [`review-launch-ready${bridge.pullRequest ? ` ${quoteCommand(bridge.pullRequest)}` : ""}`]);
-          opened = true;
-        } catch (error) {
-          // HX may still be loading its runtime or refreshing a large review.
-          // Keep the editor open while these read-only startup commands retry.
-          if (!/ENOENT|ECONNREFUSED|did not acknowledge|closed before acknowledging|pull request is loading; navigation will be ready when checkout finishes/u.test((error as Error).message)) throw error;
-        }
-      } else await bridge.tick();
+        } else await bridge.tick();
+      }
       await delay(1500, undefined, { signal: controller.signal }).catch(() => {});
     }
     if (childDone) {

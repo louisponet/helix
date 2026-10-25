@@ -198,6 +198,7 @@
 | `review_baseline_picker` | Pick the review baseline from the history of HEAD | normal: `` <space>Ab ``, select: `` <space>Ab `` |
 | `review_commit_staged` | Hand the review back asking to commit the staged hunks | normal: `` <space>Am ``, select: `` <space>Am `` |
 | `review_send_handoff` | Hand the review back now | normal: `` <space>AS ``, select: `` <space>AS `` |
+| `review_send_pr_review` | Send as PR review | normal: `` <space>AP ``, select: `` <space>AP `` |
 | `review_commit_all` | Stage every changed file and hand the review back asking to commit | normal: `` <space>AM ``, select: `` <space>AM `` |
 | `review_next_change` | Go to the next review change, across changed files | normal: `` <space>An ``, select: `` <space>An `` |
 | `review_prev_change` | Go to the previous review change, across changed files | normal: `` <space>AN ``, select: `` <space>AN `` |

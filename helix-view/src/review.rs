@@ -1315,6 +1315,11 @@ pub enum ReviewRequest {
     Message { text: String },
     /// Do what the batch's comments ask (`:review-ask`).
     Ask,
+    /// Publish the comments and saved edits as a pull request review, with an optional summary.
+    PrReview {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+    },
 }
 
 /// Pending review comments and reviewed files, exported together as one batch.

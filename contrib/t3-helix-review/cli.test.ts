@@ -178,3 +178,51 @@ test("startup retries an asynchronous PR attachment before opening its file and 
   assert.equal(commands.filter(command => command.startsWith("review-pr-attach ")).length, 1);
   assert.equal(commands.filter(command => command.startsWith("review-launch-ready ")).length, 1);
 });
+
+async function fakeEditor(t: { after(fn: () => Promise<void>): void }, path: string, onLine: (line: string) => void = () => {}) {
+  const commands: string[] = [];
+  const server = createSocketServer(socket => {
+    let pending = "";
+    socket.on("data", bytes => {
+      const lines = (pending + bytes.toString()).split("\n");
+      pending = lines.pop()!;
+      for (const line of lines) { commands.push(line); socket.write("ok\n"); onLine(line); }
+    });
+  });
+  await new Promise<void>(done => server.listen(path, done));
+  t.after(() => new Promise<void>(done => server.close(() => done())));
+  return { commands, server };
+}
+
+test("an attached bridge leaves navigation to its client and exits cleanly once the editor is gone", async t => {
+  const f = await fixture(t);
+  const repo = join(f.dir, "repo");
+  await mkdir(repo);
+  await execute("git", ["-C", repo, "init", "-q", "-b", "main"]);
+  await execute("git", ["-C", repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "first"]);
+  const socketPath = join(f.dir, "hx.sock");
+  // The editor quits after the bridge's startup commands.
+  const editor = await fakeEditor(t, socketPath, line => { if (line.startsWith("review-launch-ready")) editor.server.close(); });
+  const thread = { threadId: "thread", title: "Test", status: "completed", latestRunId: null, cwd: repo, branch: "main", archived: false };
+  const script = `
+    import { T3Client } from './contrib/t3-helix-review/t3.ts';
+    import { main } from './contrib/t3-helix-review/cli.ts';
+    T3Client.prototype.readThread = async () => (${JSON.stringify(thread)});
+    await main(${JSON.stringify(["--thread", "thread", "--attach", "--socket", socketPath, "--state-dir", join(f.dir, "state")])});
+  `;
+  await execute(process.execPath, ["--input-type=module", "-e", script], {
+    env: { ...f.env, HX_T3_MCP_URL: "http://127.0.0.1:1/mcp", HX_T3_MCP_TOKEN: "test" }, timeout: 15000,
+  });
+  assert.equal(editor.commands[0], `review-open '{"mode":"work"}'`);
+  assert(editor.commands.some(command => command.startsWith("review-handoff ")));
+  assert(!editor.commands.some(command => command === "review-next" || command.startsWith("review-open '{\"filePath\"")));
+});
+
+test("an attached bridge without a saved login says so in the editor instead of pairing", async t => {
+  const f = await fixture(t);
+  const socketPath = join(f.dir, "hx.sock");
+  const editor = await fakeEditor(t, socketPath);
+  await assert.rejects(f.run(["--attach", "--socket", socketPath, "--thread", "thread"]), /No saved T3 connection/u);
+  assert.equal(editor.commands.length, 1);
+  assert.match(editor.commands[0], /^echo 'hx-t3: No saved T3 connection\. Run hx-t3 setup in a T3 terminal/u);
+});

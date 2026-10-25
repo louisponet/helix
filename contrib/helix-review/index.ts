@@ -49,7 +49,11 @@ export interface FileState {
 }
 
 /** What the reviewer asks the agent to do with a handoff, beyond the edits and comments. */
-export type ReviewRequest = { kind: "commit-staged"; subject?: string } | { kind: "message"; text: string } | { kind: "ask" };
+export type ReviewRequest =
+	| { kind: "commit-staged"; subject?: string }
+	| { kind: "message"; text: string }
+	| { kind: "ask" }
+	| { kind: "pr-review"; summary?: string };
 
 export class ReviewBatch {
 	files: ReviewFile[];
@@ -268,7 +272,12 @@ function parseRequest(value: unknown): ReviewRequest {
 	}
 	if (request.kind === "message") return { kind: "message", text: text(request.text, "request.text") };
 	if (request.kind === "ask") return { kind: "ask" };
-	throw new BatchError(`request.kind must be "commit-staged", "message" or "ask"`);
+	if (request.kind === "pr-review") {
+		return request.summary === undefined || request.summary === null
+			? { kind: "pr-review" }
+			: { kind: "pr-review", summary: text(request.summary, "request.summary") };
+	}
+	throw new BatchError(`request.kind must be "commit-staged", "message", "ask" or "pr-review"`);
 }
 
 /** The "User request" section of a handoff message; `comments` are the batch's comments. */
@@ -287,6 +296,19 @@ function requestSection(request: ReviewRequest, comments: ReviewComment[]): stri
 					...quote("Message", comment.comment),
 				];
 			}),
+		];
+	}
+	if (request.kind === "pr-review") {
+		return [
+			"User request:",
+			"Publish this review as one review with event \"comment\" on the pull request whose head is this checkout's branch. Before posting, check that the pull request's head commit is the local HEAD; if it is not (unpushed commits, or the pull request moved on), stop and tell the user instead of posting.",
+			'- Post each review comment inline on its lines. Find a "current" comment\'s selected text, by its quoted text and context, in the head version (`git show HEAD:<path>`) and an "old" comment\'s in its baseline commit. Lines that exist only in the pull request\'s base go on the left side; all others on the right side.',
+			"- Post each user_edits hunk (against HEAD, so its - lines are the pull request's head lines) as a suggestion on those original lines: a comment whose body is a ```suggestion fence holding the hunk's + lines (empty for a deletion). For a pure insertion, comment on the line before it (line 1 at the top of a file) and suggest that line together with the new lines. When a comment covers exactly a hunk's lines, put its text above that suggestion instead of posting it separately. Leave out uncommitted changes you made yourself.",
+			"- Lines outside the pull request's diff cannot carry inline comments: mention those in the review body with their path and lines.",
+			...(request.summary
+				? quote("Review body", request.summary)
+				: ["Review body: write a short summary of the comments and suggestions."]),
+			"Post it with the host's tools (for GitHub, `gh api repos/{owner}/{repo}/pulls/{number}/reviews`) unless told otherwise below, then report the review's URL.",
 		];
 	}
 	const subject = request.subject ? ` Use this subject: ${JSON.stringify(request.subject)}.` : "";
@@ -524,7 +546,7 @@ export interface HandoffComment {
 
 export interface HandoffFile {
 	path: string;
-	user_edits: { against: "turn-snapshot" | "baseline"; hunks: string[]; truncated: boolean };
+	user_edits: { against: "turn-snapshot" | "baseline" | "head"; hunks: string[]; truncated: boolean };
 	review_comments: HandoffComment[];
 }
 
@@ -558,7 +580,8 @@ function wireBaseline(baseline: Baseline): WireBaseline {
 
 /**
  * Build a transport-independent handoff using raw Git blobs and saved files. Ask requests
- * contain only commented files and nearby hunks, with bounded diff context. No hooks,
+ * contain only commented files and nearby hunks, with bounded diff context. Pull request reviews
+ * diff against HEAD without context, so each hunk maps onto the pull request's lines. No hooks,
  * external diff drivers or text conversions are run. This may store content in Git's object
  * database, but never stages, commits, or changes a working file.
  */
@@ -567,6 +590,7 @@ export async function buildHandoff(
 	options: HandoffOptions,
 ): Promise<{ details: HandoffDetails; content: string; files: HandoffFile[] } | undefined> {
 	const scoped = batch.request?.kind === "ask";
+	const review = batch.request?.kind === "pr-review";
 	const baselines = new Map<string, Baseline>();
 	for (const { path, baseline } of scoped ? batch.comments : [...batch.files, ...batch.comments]) {
 		if (!baselines.has(path) && !options.excludePath?.(path)) baselines.set(path, baseline);
@@ -578,14 +602,24 @@ export async function buildHandoff(
 			throw new BatchError(`Cannot verify ${q(file)}: ${saved.problem}. No deletion has been inferred.`);
 		}
 		const current = saved.text ?? "";
-		const snapshot = options.snapshots?.[file];
-		const against = snapshot ? "turn-snapshot" : "baseline";
-		const oldOid = snapshot ?? baseline.blobOid ?? (await git(options.repo, ["hash-object", "-w", "--stdin"], "")).trim();
+		let against: HandoffFile["user_edits"]["against"];
+		let base: string | null;
+		if (review) {
+			const head = await readGitEntry(file, { kind: "git-commit", commitOid: "HEAD", blobOid: null });
+			if (head.problem) throw new BatchError(`${q(file)} ${head.problem}.`);
+			against = "head";
+			base = head.oid ?? null;
+		} else {
+			const snapshot = options.snapshots?.[file];
+			against = snapshot ? "turn-snapshot" : "baseline";
+			base = snapshot ?? baseline.blobOid;
+		}
+		const oldOid = base ?? (await git(options.repo, ["hash-object", "-w", "--stdin"], "")).trim();
 		const old = await git(options.repo, ["cat-file", "blob", oldOid]);
 		let hunks: string[] = [];
 		if (old !== current) {
 			const newOid = (await git(options.repo, ["hash-object", "-w", "--no-filters", "--stdin"], current)).trim();
-			const diff = await git(options.repo, ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--unified=3", "--inter-hunk-context=0", oldOid, newOid]);
+			const diff = await git(options.repo, ["diff", "--no-color", "--no-ext-diff", "--no-textconv", `--unified=${review ? 0 : 3}`, "--inter-hunk-context=0", oldOid, newOid]);
 			hunks = diff.split(/^(?=@@ )/m).slice(1);
 		}
 		const comments = batch.comments.filter((comment) => comment.path === file);
@@ -646,10 +680,12 @@ export async function buildHandoff(
 		...(own ? { commit_patch: own } : {}),
 	};
 	const content = [
-		`The user reviewed your changes in Helix and handed back ${files.length} file(s).`,
+		`The user reviewed ${review ? "a pull request" : "your changes"} in Helix and handed back ${files.length} file(s).`,
 		scoped ? "Act on these comments using the selections and nearby hunks; unrelated changes are outside this request." : "Re-read those files from disk and act on the handoff below.",
 		...quote("Handoff", JSON.stringify(details, null, 2)),
-		"Integrate the user's edits and never revert them. Then continue editing or committing normally; that refreshes the review in Helix.",
+		review
+			? "Leave the user's edits in the working tree: do not commit, stage, push or revert them."
+			: "Integrate the user's edits and never revert them. Then continue editing or committing normally; that refreshes the review in Helix.",
 		...(own && request?.kind === "commit-staged" ? patchSection(own, request.subject) : request ? requestSection(request, batch.comments) : []),
 	].join("\n");
 	return { details, content, files };

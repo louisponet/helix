@@ -383,6 +383,7 @@ the [inline review](./review.md) and start one against `HEAD` when needed.
 | `m` | Hand the review back asking to commit the staged hunks (submit the review while reviewing a pull request) | `review_commit_staged`   |
 | `M` | Stage every changed file and hand back asking to commit      | `review_commit_all`      |
 | `S` | Hand the review back now                                     | `review_send_handoff`    |
+| `P` | Send as PR review                                            | `review_send_pr_review`  |
 | `-` | Move the review baseline one commit older                    | `review_baseline_older`  |
 | `+` | Move the review baseline one commit newer                    | `review_baseline_newer`  |
 | `n` | Go to the next change, on into the next changed file         | `review_next_change`     |
