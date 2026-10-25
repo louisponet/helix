@@ -2634,6 +2634,14 @@ fn send_message(
         cx.editor.review_mode != Some(ReviewMode::Review),
         "Use Ask to discuss the pull request and Publish review to send feedback"
     );
+    if matches!(request, Some(ReviewRequest::PrReview { summary: None }))
+        && cx.editor.review_batch.comments().is_empty()
+    {
+        ensure!(
+            !changed_files_since(cx.editor, "HEAD")?.is_empty(),
+            "nothing to publish: no pending comments, no changes since HEAD and no summary"
+        );
+    }
     if let Err(err) = ensure_review(cx) {
         log::info!("not enabling review: {err:#}");
     }

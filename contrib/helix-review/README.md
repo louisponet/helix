@@ -9,7 +9,7 @@ adapter's directory alone is not a standalone distribution.
 import { ReviewBatch, buildHandoff } from "../helix-review/index.ts";
 
 const batch = await ReviewBatch.read(batchPath);
-const states = await batch.inspect();
+const states = await batch.inspect(repo);
 const { warnings } = batch.render(batchPath, states);
 const handoff = await buildHandoff(batch, {
   repo,
@@ -29,6 +29,8 @@ The batch schema remains documented in
 [the Pi adapter's schema](../pi-helix-review/schema.md).
 
 `inspect` reads current saved files and checks raw Git index/commit entries.
+Pass the repository root so entries are read from there: without it, Git runs
+in each file's directory, which fails once a deletion removed that directory.
 `render` creates a readable batch handoff and reports missing files, changed
 index entries, inconsistent commit metadata and current selections that cannot
 be located with their original context. Immutable commits are checked against
@@ -52,7 +54,9 @@ Per-comment baselines are retained in new handoffs. Pi passes
 `includeCommentBaselines: false` to preserve its existing payload. A supplied
 `commitPatch: { patch, hunks }` replaces the ordinary staged-commit request
 with instructions to commit that patch through a temporary index. A batch
-with neither edits, comments nor a request produces `undefined`.
+with neither edits, comments nor a request produces `undefined`. A `pr-review`
+with no edits, no comments and no summary throws `EmptyReviewError`, a
+`BatchError` that retrying cannot resolve, so adapters can drop the batch.
 
 The builder may store raw content in Git's object database. It does not change
 working files, stage content, or create commits. It propagates Git failures,

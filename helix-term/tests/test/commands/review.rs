@@ -4660,6 +4660,20 @@ async fn work_session_comments_wait_for_a_send_as_pull_request_review() -> anyho
     );
     assert_eq!(batches[0]["comments"], serde_json::json!([]));
 
+    // Without comments, changes since HEAD or a summary there is nothing to publish.
+    git_ok(repo.dir.path(), &["commit", "-am", "edit"]);
+    send_keys(&mut app, "<space>AP").await?;
+    assert_error(&app, "nothing to publish");
+    assert!(take_batches(outbox.path()).is_empty());
+    send_keys(&mut app, ":review-send-pr Ship it<ret>").await?;
+    assert_status_not_error(&app.editor);
+    let batches = take_batches(outbox.path());
+    assert_eq!(batches.len(), 1);
+    assert_eq!(
+        batches[0]["request"],
+        serde_json::json!({ "kind": "pr-review", "summary": "Ship it" })
+    );
+
     app.editor.review_mode = Some(ReviewMode::Review);
     send_keys(&mut app, ":review-send-pr<ret>").await?;
     assert_error(&app, "Publish review");

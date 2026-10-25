@@ -1,7 +1,7 @@
 /** Provider-independent Helix review batch parsing and handoff construction. */
 import { execFile } from "node:child_process";
 import { readFile, realpath, stat } from "node:fs/promises";
-import { basename, dirname, isAbsolute } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 
 const MAX_BATCH_BYTES = 4 * 1024 * 1024;
@@ -12,6 +12,9 @@ const MAX_MATCHES = 20;
 const run = promisify(execFile);
 
 export class BatchError extends Error {}
+
+/** A pull request review with nothing to publish; retrying cannot change that. */
+export class EmptyReviewError extends BatchError {}
 
 export type Baseline =
 	| { kind: "git-index"; blobOid: string }
@@ -150,13 +153,14 @@ export class ReviewBatch {
 		return new ReviewBatch(files, comments, request, target);
 	}
 
-	async inspect(): Promise<Map<string, FileState>> {
+	/** Reads each file's saved text and Git entries, from the root of `repo` when given. */
+	async inspect(repo?: string): Promise<Map<string, FileState>> {
 		const states = new Map<string, FileState>();
 		for (const { path, baseline } of [...this.files, ...this.comments]) {
 			let state = states.get(path);
 			if (!state) states.set(path, (state = { ...(await readCurrent(path)), git: new Map() }));
 			const key = baseline.kind === "git-index" ? "index" : baseline.commitOid;
-			if (!state.git.has(key)) state.git.set(key, await readGitEntry(path, baseline));
+			if (!state.git.has(key)) state.git.set(key, await readGitEntry(path, baseline, repo));
 		}
 		return states;
 	}
@@ -390,11 +394,14 @@ async function readCurrent(path: string): Promise<Omit<FileState, "git"> & { mis
 
 // Reads the raw index or commit tree entry without hooks or filters: plain `ls-files` runs a configured
 // core.fsmonitor hook. An empty core.fsmonitor disables it on every Git version; before 2.36, "false"
-// is run as the hook command.
-async function readGitEntry(path: string, baseline: Baseline): Promise<GitEntry> {
+// is run as the hook command. Without `repo`, Git runs in the file's directory, which fails once a
+// deletion removed that directory.
+async function readGitEntry(path: string, baseline: Baseline, repo?: string): Promise<GitEntry> {
 	// Helix exports the entry of the symlink target, not of the link itself.
-	const real = await realpath(path).catch(() => path);
-	const name = basename(real);
+	const real = await resolveExisting(path);
+	const [cwd, name] = repo
+		? [repo, relative(await realpath(repo).catch(() => repo), real)]
+		: [dirname(real), basename(real)];
 	const commit = baseline.kind === "git-commit" ? baseline.commitOid : undefined;
 	const command = commit ? ["ls-tree", "-z", `${commit}^{commit}`] : ["ls-files", "--stage", "-z"];
 	const env: NodeJS.ProcessEnv = { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
@@ -405,7 +412,7 @@ async function readGitEntry(path: string, baseline: Baseline): Promise<GitEntry>
 	try {
 		({ stdout } = await run(
 			"git",
-			["--literal-pathspecs", "-c", "core.fsmonitor=", "-C", dirname(real), ...command, "--", name],
+			["--literal-pathspecs", "-c", "core.fsmonitor=", "-C", cwd, ...command, "--", name],
 			{ env, encoding: "utf8", timeout: 10_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
 		));
 	} catch (error) {
@@ -428,6 +435,16 @@ async function readGitEntry(path: string, baseline: Baseline): Promise<GitEntry>
 		else oid = second;
 	}
 	return commit || oid ? { oid } : { problem: "is not in the Git index" };
+}
+
+/** `path` with symlinks resolved; a missing file keeps its name under its deepest existing directory. */
+async function resolveExisting(path: string): Promise<string> {
+	try {
+		return await realpath(path);
+	} catch {
+		const parent = dirname(path);
+		return parent === path ? path : join(await resolveExisting(parent), basename(path));
+	}
 }
 
 function locateSelection(
@@ -605,7 +622,7 @@ export async function buildHandoff(
 		let against: HandoffFile["user_edits"]["against"];
 		let base: string | null;
 		if (review) {
-			const head = await readGitEntry(file, { kind: "git-commit", commitOid: "HEAD", blobOid: null });
+			const head = await readGitEntry(file, { kind: "git-commit", commitOid: "HEAD", blobOid: null }, options.repo);
 			if (head.problem) throw new BatchError(`${q(file)} ${head.problem}.`);
 			against = "head";
 			base = head.oid ?? null;
@@ -669,6 +686,9 @@ export async function buildHandoff(
 		}
 	}
 	const request = batch.request;
+	if (files.length === 0 && request?.kind === "pr-review" && !request.summary) {
+		throw new EmptyReviewError("the pull request review has no comments, no edits against HEAD and no summary");
+	}
 	if (files.length === 0 && !request) return undefined;
 	const own = options.commitPatch;
 	const details: HandoffDetails = {

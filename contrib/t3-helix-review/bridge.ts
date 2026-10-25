@@ -4,7 +4,8 @@ import { connect } from "node:net";
 import { mkdir, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import { ReviewBatch, buildHandoff } from "../helix-review/index.ts";
+import { setTimeout as delay } from "node:timers/promises";
+import { EmptyReviewError, ReviewBatch, buildHandoff } from "../helix-review/index.ts";
 import type { T3ThreadInfo, T3SendResult } from "./t3.ts";
 import { pullRequestUrl } from "./t3.ts";
 
@@ -23,6 +24,8 @@ export interface BridgeOptions {
   baseline?: string;
   pullRequest?: string;
   mode?: ReviewMode;
+  /** How long, in ms, to wait for a live bridge holding this thread's lock to exit. */
+  lockWait?: number;
   onStatus?: (message: string) => void;
 }
 interface State {
@@ -108,6 +111,62 @@ async function readJson<T>(path: string): Promise<T | undefined> {
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
 }
 
+/**
+ * Takes the bridge lock in `dir` for `token`, recovering it from a dead owner. While a live owner
+ * holds it, or another bridge is between creating or removing it and its owner file, retries for
+ * `wait` ms.
+ */
+async function acquireLock(dir: string, token: string, wait: number): Promise<void> {
+  const path = join(dir, "bridge.lock");
+  const deadline = Date.now() + wait;
+  const retry = async () => {
+    if (Date.now() >= deadline) return false;
+    await delay(250);
+    return true;
+  };
+  let recoveries = 0;
+  while (recoveries < 8) {
+    try { await mkdir(path, { mode: 0o700 }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      let owner: { pid: number; token: string } | undefined;
+      try { owner = await readJson(join(path, "owner.json")); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOTDIR") throw error;
+        throw new Error(`A legacy review lock exists at ${path}. Close other bridges, then remove that file before reopening.`);
+      }
+      if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || !/^[0-9a-f-]{36}$/u.test(owner.token)) {
+        if (await retry()) continue;
+        throw new Error(`An incomplete review lock exists at ${path}. Close other bridges before removing that directory.`);
+      }
+      try { process.kill(owner.pid, 0); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        // Keep each nonempty quarantine: a delayed contender must not rename a
+        // newer owner's lock over the same dead owner's recovery destination.
+        try { await rename(path, `${path}.stale-${owner.token}`); }
+        catch (error) {
+          if (!["ENOENT", "EEXIST", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+        }
+        recoveries++;
+        continue;
+      }
+      if (await retry()) continue;
+      throw new Error("This thread already has an HX review open. Return to that editor or close it first.");
+    }
+    await writeFile(join(path, "owner.json"), JSON.stringify({ pid: process.pid, token }), { flag: "wx", mode: 0o600 });
+    return;
+  }
+  throw new Error("The HX review lock kept changing. Close other bridges before reopening.");
+}
+
+async function releaseLock(dir: string, token: string): Promise<void> {
+  const path = join(dir, "bridge.lock");
+  const ownerPath = join(path, "owner.json");
+  const owner = await readJson<{ token: string }>(ownerPath);
+  if (owner?.token === token) { await rm(ownerPath); await rmdir(path); }
+}
+
 export class ReviewBridge {
   readonly client: ReviewClient;
   readonly dir: string;
@@ -121,12 +180,12 @@ export class ReviewBridge {
   private socketLabel?: string;
   private fingerprint?: string;
   private lastStatus?: string;
-  private lockToken = randomUUID();
+  private lockToken: string;
   private closed = false;
 
-  private constructor(options: BridgeOptions, thread: T3ThreadInfo, dir: string, socketPath: string, state: State) {
+  private constructor(options: BridgeOptions, thread: T3ThreadInfo, dir: string, socketPath: string, state: State, lockToken: string) {
     this.options = options; this.client = options.client; this.thread = thread; this.threadId = thread.threadId;
-    this.dir = dir; this.outbox = join(dir, "outbox"); this.socketPath = socketPath; this.state = state;
+    this.dir = dir; this.outbox = join(dir, "outbox"); this.socketPath = socketPath; this.state = state; this.lockToken = lockToken;
   }
 
   get repo(): string { return this.state.repo; }
@@ -149,33 +208,35 @@ export class ReviewBridge {
     const root = options.stateRoot ?? join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "helix", "t3-review");
     const dir = join(root, id);
     await mkdir(dir, { recursive: true, mode: 0o700 });
-    const previous = await readJson<State>(join(dir, "state.json"));
-    if (previous && (previous.version !== 1 || previous.threadId !== thread.threadId || previous.cwd !== thread.cwd || previous.repo !== repo)) {
-      throw new Error("The saved HX review binding does not match this thread and worktree.");
-    }
-    if (previous && previous.branch !== branch) throw new Error("This review belongs to a different branch. Restore that branch to resume its pending feedback.");
-    const revision = options.baseline ?? previous?.baseline ?? "HEAD";
-    const baseline = (await git(repo, ["rev-parse", "--verify", "--end-of-options", `${revision}^{commit}`])).trim();
-    await git(repo, ["merge-base", "--is-ancestor", baseline, "HEAD"]).catch(() => {
-      throw new Error("The review baseline is no longer in this branch. Reopen with --base <revision> to choose the review range.");
-    });
-    const runtime = process.env.XDG_RUNTIME_DIR || join(tmpdir(), `helix-${process.getuid?.() ?? "user"}`);
-    const socketPath = options.socketPath ?? join(runtime, "helix", `t3-${id}.sock`);
-    if (Buffer.byteLength(socketPath) > 103) throw new Error("HX socket path is too long. Use --socket with a shorter private path.");
-    let prUrl = mode === "review" ? options.pullRequest ?? thread.linkedPullRequest?.url ?? previous?.pullRequest : undefined;
-    if (mode === "review" && !prUrl) {
-      const linked = await options.client.linkedPullRequests(thread.threadId);
-      if (linked.length > 1) throw new Error("This thread links several pull requests. Pass --pr <url> to choose one.");
-      prUrl = linked[0];
-    }
-    if (mode === "review" && !prUrl) throw new Error("Link a pull request to this thread or pass --pr <url> before opening Review a PR.");
-    const state: State = { version: 1, threadId: thread.threadId, cwd: thread.cwd, repo, branch, baseline, mode,
-      ...(prUrl ? { pullRequest: pullRequestUrl(prUrl) } : {}),
-      ...(mode === "review" ? { reviewHead: (await git(repo, ["rev-parse", "HEAD"])).trim() } : {}),
-      snapshots: previous?.snapshots ?? {}, lastRun: previous?.lastRun };
-    const bridge = new ReviewBridge(options, thread, dir, socketPath, state);
-    await bridge.acquireLock();
+    const lockToken = randomUUID();
+    // Read the saved state only under the lock: a predecessor still shutting down may save it.
+    await acquireLock(dir, lockToken, options.lockWait ?? 0);
     try {
+      const previous = await readJson<State>(join(dir, "state.json"));
+      if (previous && (previous.version !== 1 || previous.threadId !== thread.threadId || previous.cwd !== thread.cwd || previous.repo !== repo)) {
+        throw new Error("The saved HX review binding does not match this thread and worktree.");
+      }
+      if (previous && previous.branch !== branch) throw new Error("This review belongs to a different branch. Restore that branch to resume its pending feedback.");
+      const revision = options.baseline ?? previous?.baseline ?? "HEAD";
+      const baseline = (await git(repo, ["rev-parse", "--verify", "--end-of-options", `${revision}^{commit}`])).trim();
+      await git(repo, ["merge-base", "--is-ancestor", baseline, "HEAD"]).catch(() => {
+        throw new Error("The review baseline is no longer in this branch. Reopen with --base <revision> to choose the review range.");
+      });
+      const runtime = process.env.XDG_RUNTIME_DIR || join(tmpdir(), `helix-${process.getuid?.() ?? "user"}`);
+      const socketPath = options.socketPath ?? join(runtime, "helix", `t3-${id}.sock`);
+      if (Buffer.byteLength(socketPath) > 103) throw new Error("HX socket path is too long. Use --socket with a shorter private path.");
+      let prUrl = mode === "review" ? options.pullRequest ?? thread.linkedPullRequest?.url ?? previous?.pullRequest : undefined;
+      if (mode === "review" && !prUrl) {
+        const linked = await options.client.linkedPullRequests(thread.threadId);
+        if (linked.length > 1) throw new Error("This thread links several pull requests. Pass --pr <url> to choose one.");
+        prUrl = linked[0];
+      }
+      if (mode === "review" && !prUrl) throw new Error("Link a pull request to this thread or pass --pr <url> before opening Review a PR.");
+      const state: State = { version: 1, threadId: thread.threadId, cwd: thread.cwd, repo, branch, baseline, mode,
+        ...(prUrl ? { pullRequest: pullRequestUrl(prUrl) } : {}),
+        ...(mode === "review" ? { reviewHead: (await git(repo, ["rev-parse", "HEAD"])).trim() } : {}),
+        snapshots: previous?.snapshots ?? {}, lastRun: previous?.lastRun };
+      const bridge = new ReviewBridge(options, thread, dir, socketPath, state, lockToken);
       for (const name of ["outbox", "deliveries", "receipts"]) await mkdir(join(dir, name), { mode: 0o700, recursive: true });
       if (mode === "work" && !previous && !isActive(thread)) {
         await bridge.snapshot();
@@ -183,41 +244,7 @@ export class ReviewBridge {
       }
       await bridge.save();
       return bridge;
-    } catch (error) { await bridge.close(); throw error; }
-  }
-
-  private async acquireLock(): Promise<void> {
-    const path = join(this.dir, "bridge.lock");
-    for (let attempt = 0; attempt < 8; attempt++) {
-      try { await mkdir(path, { mode: 0o700 }); }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        let owner: { pid: number; token: string } | undefined;
-        try { owner = await readJson(join(path, "owner.json")); }
-        catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ENOTDIR") throw error;
-          throw new Error(`A legacy review lock exists at ${path}. Close other bridges, then remove that file before reopening.`);
-        }
-        if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || !/^[0-9a-f-]{36}$/u.test(owner.token)) {
-          throw new Error(`An incomplete review lock exists at ${path}. Close other bridges before removing that directory.`);
-        }
-        try { process.kill(owner.pid, 0); }
-        catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-          // Keep each nonempty quarantine: a delayed contender must not rename a
-          // newer owner's lock over the same dead owner's recovery destination.
-          try { await rename(path, `${path}.stale-${owner.token}`); }
-          catch (error) {
-            if (!["ENOENT", "EEXIST", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
-          }
-          continue;
-        }
-        throw new Error("This thread already has an HX review open. Return to that editor or close it first.");
-      }
-      await writeFile(join(path, "owner.json"), JSON.stringify({ pid: process.pid, token: this.lockToken }), { flag: "wx", mode: 0o600 });
-      return;
-    }
-    throw new Error("The HX review lock kept changing. Close other bridges before reopening.");
+    } catch (error) { await releaseLock(dir, lockToken); throw error; }
   }
 
   private save(): Promise<void> { return writeJson(join(this.dir, "state.json"), this.state); }
@@ -355,7 +382,7 @@ export class ReviewBridge {
         const review = batch.request?.kind === "pr-review";
         const pullRequests = review ? await this.client.linkedPullRequests(this.threadId) : [];
         if (review && !pullRequests.length) throw new Error("Link a pull request to this thread first");
-        const states = await batch.inspect();
+        const states = await batch.inspect(this.repo);
         for (const [file, state] of states) {
           if (!state.problem) continue;
           try { await stat(file); }
@@ -363,7 +390,13 @@ export class ReviewBridge {
           throw new Error(`Cannot verify ${file}: ${state.problem}. Feedback is kept; no deletion has been inferred.`);
         }
         const { warnings } = batch.render(path, states);
-        const handoff = await buildHandoff(batch, { repo: this.repo, snapshots: this.state.snapshots, baseline: this.baseline, strictCurrentReads: true });
+        let handoff: Awaited<ReturnType<typeof buildHandoff>>;
+        try { handoff = await buildHandoff(batch, { repo: this.repo, snapshots: this.state.snapshots, baseline: this.baseline, strictCurrentReads: true }); }
+        catch (error) {
+          if (!(error instanceof EmptyReviewError)) throw error;
+          if (!prepareOnly) { await rm(path); await this.announce(`T3: nothing published — ${error.message}`); }
+          return;
+        }
         let message: string;
         if (handoff) message = handoff.content;
         else if (batch.files.length) {
@@ -383,7 +416,8 @@ export class ReviewBridge {
         if (review) {
           const target = pullRequests.length === 1 ? pullRequests[0]
             : `the one of ${pullRequests.join(", ")} whose head branch is ${this.state.branch || "this checkout's HEAD"}`;
-          delivery.message += `\n\nPublish the review on ${target} with T3's submit_pull_request_review MCP tool, instead of the host's tools: pass the pull request, event "comment", the review body, and comments as {path, line, startLine, side, body}, with path relative to the repository root, line the last and startLine the first line of a multi-line range, side "right" (head lines, the default) or "left" (removed base lines), and each suggestion's body a \`\`\`suggestion fence. Only if that tool is unavailable, publish the same review with the host's CLI.`;
+          const head = (await git(this.repo, ["rev-parse", "HEAD"])).trim();
+          delivery.message += `\n\nThe user wrote this review against the checkout's HEAD, ${head}. Publish the review on ${target} with T3's submit_pull_request_review MCP tool, instead of the host's tools: pass the pull request, headSha "${head}", event "comment", the review body, and comments as {path, line, startLine, side, body}, with path relative to the repository root, line the last and startLine the first line of a multi-line range, side "right" (head lines, the default) or "left" (removed base lines), and each suggestion's body a \`\`\`suggestion fence. If the tool reports that the pull request's head is not ${head}, stop and tell the user instead of posting anything. Only if that tool is unavailable, publish the same review with the host's CLI, and only when the pull request's head commit is ${head}.`;
         }
       }
       await writeJson(deliveryPath, delivery);
@@ -407,10 +441,7 @@ export class ReviewBridge {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    const path = join(this.dir, "bridge.lock");
-    const ownerPath = join(path, "owner.json");
-    const owner = await readJson<{ token: string }>(ownerPath);
-    if (owner?.token === this.lockToken) { await rm(ownerPath); await rmdir(path); }
+    await releaseLock(this.dir, this.lockToken);
   }
 
   async pending(): Promise<string[]> {

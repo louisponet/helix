@@ -275,6 +275,24 @@ test("simultaneous stale-lock recovery cannot rename the new owner's lock", { ti
   finally { await reopened.close(); }
 });
 
+test("a bridge allowed to wait takes the lock once its live predecessor closes", async t => {
+  const f = await fixture(t);
+  const originalKill = process.kill;
+  let liveOwnerSeen!: () => void;
+  const ownerChecked = new Promise<void>(done => { liveOwnerSeen = done; });
+  t.mock.method(process, "kill", (pid: number, signal?: NodeJS.Signals | number) => {
+    if (pid === process.pid && signal === 0) liveOwnerSeen();
+    return originalKill(pid, signal);
+  });
+  const opening = ReviewBridge.open({ ...f.options, lockWait: 10_000 });
+  await ownerChecked;
+  await f.bridge.close();
+  const successor = await opening;
+  t.after(() => successor.close());
+  assert.equal(successor.baseline, f.baseline);
+  await assert.rejects(ReviewBridge.open({ ...f.options, lockWait: 1 }), /already has an HX review open/u);
+});
+
 test("legacy and incomplete lock owners require explicit cleanup", async t => {
   const f = await fixture(t);
   await f.bridge.close();
@@ -506,6 +524,8 @@ test("a pull request review waits for a linked PR, then asks the agent to publis
   assert.equal(f.calls[0].mode, "auto");
   const { message } = f.calls[0];
   assert(message.includes("Publish the review on https://github.com/team/project/pull/7 with T3's submit_pull_request_review MCP tool"));
+  assert(message.includes(`headSha "${f.baseline}"`));
+  assert(message.includes(`If the tool reports that the pull request's head is not ${f.baseline}, stop and tell the user`));
   assert.match(message, /suggestion fence/u);
   assert.match(message, /Only if that tool is unavailable, publish the same review with the host's CLI/u);
   const details = handoffDetails(message);
@@ -513,6 +533,17 @@ test("a pull request review waits for a linked PR, then asks the agent to publis
   assert.equal(details.files[0].user_edits.against, "head");
   assert.match(details.files[0].user_edits.hunks.join(""), /^@@ -2 \+2 @@.*\n-old check\n\+new check\n$/u);
   assert.deepEqual(await f.bridge.pending(), []);
+});
+
+test("an empty pull request review is dropped without asking the agent to publish anything", async t => {
+  const f = await fixture(t);
+  f.linked.push("https://github.com/team/project/pull/7");
+  await f.writeBatch("empty.json", { request: { kind: "pr-review" } });
+  await f.bridge.tick();
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(await f.bridge.pending(), []);
+  assert.deepEqual(await readdir(join(f.bridge.dir, "deliveries")), []);
+  assert(f.commands.some(command => command.startsWith("echo ") && command.includes("nothing published")));
 });
 
 test("a pull request review on a thread with several linked PRs targets the checkout's branch", async t => {

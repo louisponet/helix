@@ -62,8 +62,9 @@ Before `Space A P`, link the pull request to the thread and push your branch.
 With several linked pull requests, the agent uses the one whose head branch is
 the checkout's branch. With none, the review stays pending and HX shows
 `Link a pull request to this thread first`; link one and the bridge sends it.
-The agent stops without posting when the pull request's head is not your local
-`HEAD`.
+The bridge gives the agent your local `HEAD`, and T3's review tool refuses to
+post when the pull request's head is a different commit. A review with no
+comments, no changes since `HEAD` and no summary is not sent.
 
 T3 no longer shows **Work together in HX** or **Review a PR**. HX's keys
 replace the Helix toolbar and comment form.
@@ -115,9 +116,10 @@ original batch.
 
 T3 runs `hx-t3 --attach --socket <path> --thread <id>` next to its editor.
 This attached bridge never starts pairing. It exits when the editor closes.
-When it cannot start (no saved login, an archived thread, a branch mismatch,
-or another bridge already open for the thread), it shows the reason in HX's
-status line and exits.
+When another bridge for the thread is still open, it waits up to 10 seconds
+for that one to exit. When it cannot start (no saved login, an archived
+thread, a branch mismatch, or another bridge still open for the thread), it
+shows the reason in HX's status line and exits.
 
 Setup uses T3's official CLI and OAuth pairing. Run `hx-t3 setup` in a T3
 terminal again when the login expires, and revoke **Helix review** in T3
