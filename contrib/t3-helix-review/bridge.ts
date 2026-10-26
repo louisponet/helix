@@ -205,7 +205,7 @@ export class ReviewBridge {
     const thread = await options.client.readThread(options.threadId);
     const mode = options.mode ?? (options.pullRequest ? "review" : "work");
     if (mode === "work" && options.pullRequest) throw new Error("Open Review a PR mode to attach a pull request.");
-    if (thread.archived) throw new Error("This T3 thread is archived. Reopen it before reviewing.");
+    if (thread.archived) throw new Error("This T3 thread is archived. Unarchive it, then open the file in T3 again.");
     const repo = await realpath((await git(thread.cwd, ["rev-parse", "--show-toplevel"])).trim());
     const branch = (await git(repo, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "")).trim();
     if (thread.branch !== null && thread.branch !== branch) {
@@ -308,7 +308,7 @@ export class ReviewBridge {
 
   private async validateBinding(): Promise<T3ThreadInfo> {
     const thread = await this.client.readThread(this.threadId);
-    if (thread.archived || thread.cwd !== this.state.cwd) throw new Error("The T3 thread was archived or moved to another worktree. Reopen Review in HX; feedback has been kept.");
+    if (thread.archived || thread.cwd !== this.state.cwd) throw new Error("This T3 thread was archived or moved to another worktree. Feedback is kept: unarchive the thread or restore its worktree, then open the file in T3 again.");
     const branch = (await git(this.repo, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "")).trim();
     if (branch !== this.state.branch || (thread.branch !== null && thread.branch !== branch)) throw new Error("The checkout no longer matches this thread's branch. Restore that branch before sending feedback.");
     return thread;

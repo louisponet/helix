@@ -48,7 +48,7 @@ Options:
   --config <path>  Override the private connection file
   --t3 <program>  T3 CLI used for local setup
   --base-dir      T3 home directory (default: T3CODE_HOME or ~/.t3)
-  --environment-id <id>  Require this T3 environment (set by Review in HX)
+  --environment-id <id>  Require this T3 environment (set when T3 opens a file in Helix)
   --batch <name>   Batch from pending to cancel with discard
   --help          Show this help
 
@@ -126,7 +126,7 @@ async function install(): Promise<void> {
   if (previous && !previous.startsWith("#!/bin/sh\n# Helix review for T3 Code\n")) throw new Error(`${path} already exists and is not this launcher's file.`);
   await writeFile(path, script, { mode: 0o755 });
   await chmod(path, 0o755);
-  console.log(`Installed ${path}. Run hx-t3 from a T3 terminal, or use Review in HX.`);
+  console.log(`Installed ${path}. Open a file in T3 with Use Helix on, or run hx-t3 from a T3 terminal.`);
 }
 
 export function spawnReviewEditor(program: string, cwd: string, socketPath: string,
@@ -349,10 +349,10 @@ async function run({ values, positionals }: ReturnType<typeof parseOptions>): Pr
   let environmentId = values["environment-id"];
   let endpoint: string | undefined;
   if (environmentId || values["base-dir"] || runtimeStatePath) {
-    if (environmentId && !runtimeStatePath && !values["base-dir"]) throw new Error("The T3 terminal did not supply its environment. Relaunch Review in HX from the updated T3 server, or pass --base-dir explicitly.");
+    if (environmentId && !runtimeStatePath && !values["base-dir"]) throw new Error("The T3 terminal did not supply its environment. Open the file in T3 again from the updated T3 server, or pass --base-dir explicitly.");
     endpoint = await discoverLocalEndpoint(baseDir, runtimeStatePath);
     const actual = await readEnvironment(endpoint);
-    if (environmentId && environmentId !== actual.environmentId) throw new Error("This terminal belongs to a different T3 environment. Reopen Review in HX in the intended environment.");
+    if (environmentId && environmentId !== actual.environmentId) throw new Error("This terminal belongs to a different T3 environment. Open the file in T3 from the intended environment.");
     environmentId = actual.environmentId;
   }
   const path = values.config ?? configPath(environmentId, endpoint);
@@ -379,7 +379,7 @@ async function run({ values, positionals }: ReturnType<typeof parseOptions>): Pr
     if (await realpath(location.worktreePath) !== await realpath(thread.cwd)) throw new Error("The requested location belongs to another worktree.");
   }
   const boundThread = await client.readThread(threadId);
-  if (boundThread.archived) throw new Error("This T3 thread is archived. Reopen it before editing.");
+  if (boundThread.archived) throw new Error("This T3 thread is archived. Unarchive it, then open the file in T3 again.");
   const history = command === "open" ? await gitHistory(boundThread.cwd) : "committed";
   if (history !== "committed") {
     if (mode === "review" || location.baseline || location.revision || values.base || values.pr)
