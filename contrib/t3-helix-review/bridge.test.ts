@@ -610,6 +610,20 @@ test("a tick reports whether anything changed, so an idle bridge can sync less o
   assert.equal(f.calls.length, 1);
 });
 
+test("a tick with only an undeliverable batch reports no change, so the bridge can back off while it waits", async t => {
+  const f = await fixture(t);
+  await f.bridge.tick();
+  await writeFile(join(f.repo, "file.txt"), "keep\nnew check\nend\n");
+  await f.bridge.tick();
+  await f.writeBatch("pr.json", { request: { kind: "pr-review" } });
+  assert.equal(await f.bridge.tick(), false, "a pull request review waiting for a linked PR");
+  assert.deepEqual(await f.bridge.pending(), ["pr.json"]);
+  f.linked.push("https://github.com/team/project/pull/7");
+  assert.equal(await f.bridge.tick(), true, "the review delivered");
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(await f.bridge.pending(), []);
+});
+
 test("an amended HEAD reviews from the new HEAD and still delivers a pending batch", async t => {
   const f = await fixture(t);
   await f.bridge.tick();

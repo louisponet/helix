@@ -335,11 +335,12 @@ export class ReviewBridge {
         await this.announce(`T3: ${error.message}`);
         return false;
       });
+      let delivered = 0;
       for (const name of pending) {
-        try { await this.deliver(name); }
+        try { await this.deliver(name); delivered++; }
         catch (error) { if (this.loginRejected(error)) throw error; await this.announce(`T3: feedback kept — ${(error as Error).message}`); }
       }
-      return pending.length > 0 || run || refreshed;
+      return delivered > 0 || run || refreshed;
     } catch (error) {
       if (this.loginRejected(error)) throw error;
       await this.announce(`T3: ${(error as Error).message}`);
