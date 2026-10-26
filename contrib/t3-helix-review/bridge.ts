@@ -7,7 +7,7 @@ import { homedir, tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { EmptyReviewError, ReviewBatch, buildHandoff } from "../helix-review/index.ts";
 import type { T3ThreadInfo, T3SendResult } from "./t3.ts";
-import { pullRequestUrl } from "./t3.ts";
+import { T3Error, pullRequestUrl } from "./t3.ts";
 
 export interface ReviewClient {
   readThread(id: string): Promise<T3ThreadInfo>;
@@ -322,7 +322,7 @@ export class ReviewBridge {
       const pending = (await readdir(this.outbox)).filter(name => name.endsWith(".json")).sort();
       for (const name of pending) {
         try { await this.deliver(name, true); }
-        catch (error) { await this.announce(`T3: feedback kept — ${(error as Error).message}`); }
+        catch (error) { if (this.loginRejected(error)) throw error; await this.announce(`T3: feedback kept — ${(error as Error).message}`); }
       }
       const run = thread.latestRunId !== this.thread.latestRunId || thread.status !== this.thread.status;
       if (this.mode === "work" && !isActive(thread) && thread.latestRunId !== this.state.lastRun) {
@@ -337,10 +337,19 @@ export class ReviewBridge {
       });
       for (const name of pending) {
         try { await this.deliver(name); }
-        catch (error) { await this.announce(`T3: feedback kept — ${(error as Error).message}`); }
+        catch (error) { if (this.loginRejected(error)) throw error; await this.announce(`T3: feedback kept — ${(error as Error).message}`); }
       }
       return pending.length > 0 || run || refreshed;
-    } catch (error) { await this.announce(`T3: ${(error as Error).message}`); return false; }
+    } catch (error) {
+      if (this.loginRejected(error)) throw error;
+      await this.announce(`T3: ${(error as Error).message}`);
+      return false;
+    }
+  }
+
+  /** An attached bridge cannot pair again; it ends, and T3's next open relaunches it with the current login. */
+  private loginRejected(error: unknown): boolean {
+    return this.options.attach === true && error instanceof T3Error && error.code === "authentication";
   }
 
   /** Binds a new or renamed editor and refreshes its review; resolves to whether it sent anything. */

@@ -217,7 +217,7 @@ pub(super) fn open_terminal_location(
     if let Some(expected) = &location.worktree_path {
         ensure!(
             std::fs::canonicalize(expected)? == workspace,
-            "location belongs to another worktree"
+            "Helix's working directory is not the location's worktree"
         );
     }
     let repo = if reviewing || location.baseline.is_some() || location.revision.is_some() {
@@ -407,7 +407,13 @@ pub(super) fn open_terminal_location(
             }
         }
         pin_review_baseline(cx.editor, &commit)?;
-        set_user_pin(cx.editor, &commit);
+        if baseline == "HEAD" {
+            // T3's uncommitted view compares with HEAD as it moves, even when it is the hook's
+            // fixed baseline today.
+            cx.editor.review_user_pin = Some("HEAD".to_owned());
+        } else {
+            set_user_pin(cx.editor, &commit);
+        }
     }
     if let Some(path) = path {
         if reviewing || path.exists() {
@@ -2285,15 +2291,15 @@ pub(super) fn review_baseline(
         return pin_review_baseline(cx.editor, &commit);
     }
     if cx.editor.socket_command {
-        // The hook never overrides a baseline the reviewer chose: it only refreshes it.
+        // The hook never overrides a baseline the reviewer chose: it only refreshes it, and a
+        // `HEAD` pin resolves to the current HEAD.
         if let Some(pin) = cx
             .editor
             .review_user_pin
             .clone()
             .filter(|pin| *pin != commit)
         {
-            let current = cx.editor.review_baseline.clone().unwrap_or(pin);
-            return pin_review_baseline(cx.editor, &current);
+            return pin_review_baseline(cx.editor, &pin);
         }
         cx.editor.review_user_pin = None;
         return pin_review_baseline(cx.editor, &commit);

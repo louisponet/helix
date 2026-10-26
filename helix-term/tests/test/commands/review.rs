@@ -5656,6 +5656,27 @@ async fn conversation_checkpoint_opens_editable_current_file_and_keeps_its_pin(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn head_baseline_from_t3_follows_head_after_a_commit() -> anyhow::Result<()> {
+    let repo = Repo::new("head\n", "head\n", "edited\n");
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let old = git_ok(dir, &["rev-parse", "HEAD"]);
+    let mut app = repo.app()?;
+    let location = serde_json::json!({"baseline": "HEAD", "filePath": "file.txt"});
+    send_keys(&mut app, &format!(":review-open '{location}'<ret>")).await?;
+    assert_eq!(app.editor.review_baseline.as_deref(), Some(old.as_str()));
+    assert_eq!(app.editor.review_user_pin.as_deref(), Some("HEAD"));
+    git_ok(dir, &["commit", "-am", "edited"]);
+    let new = git_ok(dir, &["rev-parse", "HEAD"]);
+    // The attached bridge re-sends its own fixed baseline after the commit.
+    app.editor.socket_command = true;
+    send_keys(&mut app, &format!(":review-baseline {old}<ret>")).await?;
+    app.editor.socket_command = false;
+    assert_eq!(app.editor.review_baseline.as_deref(), Some(new.as_str()));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn conversation_checkpoint_rejects_non_checkpoint_refs_outside_history() -> anyhow::Result<()>
 {
     let repo = Repo::new("head\n", "before\n", "after\n");

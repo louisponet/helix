@@ -11,7 +11,7 @@ import { createInterface } from "node:readline/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { ReviewBridge, editorListening, quoteCommand, sendCommands, writeJson } from "./bridge.ts";
 import type { ReviewMode } from "./bridge.ts";
-import { T3Client, connectionFromEnvironment, defaultT3BaseDir, discoverLocalEndpoint, readEnvironment } from "./t3.ts";
+import { T3Client, T3Error, connectionFromEnvironment, defaultT3BaseDir, discoverLocalEndpoint, readEnvironment } from "./t3.ts";
 import type { T3Connection, T3ThreadInfo } from "./t3.ts";
 import { pairLocalClient } from "./auth.ts";
 
@@ -149,7 +149,9 @@ export function spawnReviewEditor(program: string, cwd: string, socketPath: stri
   return { child, done };
 }
 
-export async function hasReviewCommit(cwd: string): Promise<boolean> {
+export type GitHistory = "not-a-repository" | "unborn" | "committed";
+
+export async function gitHistory(cwd: string): Promise<GitHistory> {
   const git = (args: string[]) => new Promise<string>((done, fail) => {
     execFile("git", ["-C", cwd, ...args], { encoding: "utf8" }, (error, stdout, stderr) => {
       if (error) fail(Object.assign(error, { stderr })); else done(stdout.trim());
@@ -158,16 +160,16 @@ export async function hasReviewCommit(cwd: string): Promise<boolean> {
   try { await git(["rev-parse", "--show-toplevel"]); }
   catch (error) {
     const failure = error as NodeJS.ErrnoException & { stderr?: string };
-    if (failure.code === "ENOENT" || /not a git repository/iu.test(failure.stderr ?? "")) return false;
+    if (failure.code === "ENOENT" || /not a git repository/iu.test(failure.stderr ?? "")) return "not-a-repository";
     throw error;
   }
-  try { await git(["rev-parse", "--verify", "HEAD^{commit}"]); return true; }
+  try { await git(["rev-parse", "--verify", "HEAD^{commit}"]); return "committed"; }
   catch (error) {
     // A missing symbolic branch is an unborn checkout; other HEAD failures stay errors.
     const branch = await git(["symbolic-ref", "--quiet", "HEAD"]).catch(() => undefined);
     if (!branch) throw error;
     try { await git(["show-ref", "--verify", "--quiet", branch]); }
-    catch (missing) { if ((missing as { code?: number }).code === 1) return false; throw error; }
+    catch (missing) { if ((missing as { code?: number }).code === 1) return "unborn"; throw error; }
     throw error;
   }
 }
@@ -213,6 +215,37 @@ const EDITOR_START_CHECKS = 20;
 // An idle attached bridge syncs at least every 10 checks (15 s).
 const MAX_IDLE_CHECKS = 10;
 
+const pause = (ms: number, signal: AbortSignal) => delay(ms, undefined, { signal }).catch(() => {});
+
+export interface CommitWaitOptions {
+  signal: AbortSignal;
+  listening(): Promise<boolean>;
+  committed(): Promise<boolean>;
+  sleep?(ms: number, signal: AbortSignal): Promise<void>;
+}
+
+/**
+ * Waits for the first commit in an attached editor's checkout, checking less often while none
+ * appears, as an idle {@link syncLoop} does. Resolves to false once the editor is gone.
+ */
+export async function waitForFirstCommit({ signal, listening, committed, sleep = pause }: CommitWaitOptions): Promise<boolean> {
+  let answered = false, misses = 0, interval = 1, due = 0;
+  while (!signal.aborted) {
+    if (!await listening()) {
+      if (++misses >= (answered ? EDITOR_GONE_CHECKS : EDITOR_START_CHECKS)) return false;
+    } else {
+      answered = true; misses = 0;
+      if (--due <= 0) {
+        if (await committed()) return true;
+        interval = Math.min(interval * 2, MAX_IDLE_CHECKS);
+        due = interval;
+      }
+    }
+    await sleep(CHECK_INTERVAL, signal);
+  }
+  return false;
+}
+
 export interface SyncLoopOptions {
   signal: AbortSignal;
   /** An attached bridge watches for its editor to go away, and syncs less often while idle. */
@@ -232,8 +265,7 @@ export interface SyncLoopOptions {
  * bridge finds nothing changed, after twice as many checks as the last time, up to 15 s. A batch
  * landing in the outbox syncs at once.
  */
-export async function syncLoop({ signal, attach, outbox, listening, open, tick,
-  sleep = (ms, signal) => delay(ms, undefined, { signal }).catch(() => {}) }: SyncLoopOptions): Promise<void> {
+export async function syncLoop({ signal, attach, outbox, listening, open, tick, sleep = pause }: SyncLoopOptions): Promise<void> {
   let woken = false;
   let wakeUp = () => {};
   const watcher = watch(outbox, () => { woken = true; wakeUp(); });
@@ -279,8 +311,15 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   catch (error) {
     // An attached bridge runs in a terminal nobody may be watching; say why in the editor.
     const socket = options.values.attach ? options.values.socket : undefined;
-    const reason = `hx-t3: ${(error as Error).message}`.replace(/[\p{Cc}\u2028\u2029]/gu, " ").slice(0, 500);
-    if (socket) await sendCommands(socket, [`echo ${quoteCommand(reason)}`]).catch(() => undefined);
+    if (!socket) throw error;
+    const message = error instanceof T3Error && error.code === "authentication"
+      ? "Your T3 login expired or was revoked. Run hx-t3 setup in a T3 terminal, then open the file in T3 again."
+      : (error as Error).message;
+    const reason = `hx-t3: ${message}`.replace(/[\p{Cc}\u2028\u2029]/gu, " ").slice(0, 500);
+    // The editor may still hand feedback to a previous thread's outbox that no bridge drains now.
+    // Only failure clears it: a sidecar stopped for a restart leaves its successor's binding alone.
+    await sendCommands(socket, ["review-handoff clear"]).catch(() => undefined);
+    await sendCommands(socket, [`echo ${quoteCommand(reason)}`]).catch(() => undefined);
     throw error;
   }
 }
@@ -341,12 +380,22 @@ async function run({ values, positionals }: ReturnType<typeof parseOptions>): Pr
   }
   const boundThread = await client.readThread(threadId);
   if (boundThread.archived) throw new Error("This T3 thread is archived. Reopen it before editing.");
-  if (command === "open" && !await hasReviewCommit(boundThread.cwd)) {
+  const history = command === "open" ? await gitHistory(boundThread.cwd) : "committed";
+  if (history !== "committed") {
     if (mode === "review" || location.baseline || location.revision || values.base || values.pr)
       throw new Error("Review comparisons need a Git repository with a commit. Open a current file without a comparison to edit it.");
     console.log(`Editing ${boundThread.title || "Untitled"} in ${boundThread.cwd} · review feedback becomes available after the first Git commit`);
-    await openPlainEditor(values.hx ?? process.env.HELIX_BIN ?? "hx", boundThread.cwd, location, values.attach ?? false, values.socket);
-    return;
+    if (!values.attach || history === "not-a-repository") {
+      await openPlainEditor(values.hx ?? process.env.HELIX_BIN ?? "hx", boundThread.cwd, location, values.attach ?? false, values.socket);
+      return;
+    }
+    // An attached editor stays open across the first commit (usually the agent's), so wait for it.
+    const socket = values.socket;
+    if (!socket) throw new Error("Attaching before the first Git commit needs --socket.");
+    const committed = await waitForFirstCommit({ signal: new AbortController().signal,
+      listening: () => editorListening(socket),
+      committed: async () => await gitHistory(boundThread.cwd) === "committed" });
+    if (!committed) return;
   }
   const bridge = await ReviewBridge.open({ client, endpoint: connection.endpoint, threadId,
     mode, baseline: location.revision ? undefined : values.base, pullRequest: values.pr, stateRoot: values["state-dir"], socketPath: values.socket,
@@ -407,7 +456,7 @@ async function run({ values, positionals }: ReturnType<typeof parseOptions>): Pr
         } catch (error) {
           // HX may still be loading its runtime or refreshing a large review.
           // Keep the editor open while these read-only startup commands retry.
-          if (!/ENOENT|ECONNREFUSED|did not acknowledge|closed before acknowledging|pull request is loading; navigation will be ready when checkout finishes/u.test((error as Error).message)) throw error;
+          if (!/ENOENT|ECONNREFUSED|did not acknowledge|closed before acknowledging|pull request is loading; navigation will be ready when checkout finishes|review comment is being saved/u.test((error as Error).message)) throw error;
           return false;
         }
       } });

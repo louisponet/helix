@@ -1304,7 +1304,8 @@ pub struct Editor {
     /// Display name for the handoff destination, independent of a batch's `@target`.
     pub review_handoff_label: Option<String>,
     /// The baseline the reviewer chose (`G b`, `G -`, `G +` or a typed `:review-baseline`) over
-    /// the one the pi hook sent; while set, the hook's `:review-baseline` only refreshes it.
+    /// the one the pi hook sent; while set, the hook's `:review-baseline` only refreshes it. `HEAD`,
+    /// set by a T3 open against HEAD, follows HEAD.
     pub review_user_pin: Option<String>,
     /// The baseline the pi hook last sent over the command socket.
     pub review_hook_baseline: Option<String>,

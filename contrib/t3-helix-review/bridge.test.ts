@@ -8,6 +8,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { ReviewBridge, git, quoteCommand, sendCommands } from "./bridge.ts";
 import type { ReviewClient } from "./bridge.ts";
+import { T3Error } from "./t3.ts";
 import type { T3ThreadInfo, T3SendResult } from "./t3.ts";
 import { threadIdFromArgument } from "./cli.ts";
 
@@ -654,4 +655,19 @@ test("an attached bridge restarted after HEAD was rewritten reviews from HEAD an
   await bridge.tick();
   assert.equal(f.calls.length, 1);
   assert.deepEqual(await bridge.pending(), []);
+});
+
+test("a rejected login ends an attached bridge, while a launched one keeps reporting it", async t => {
+  const f = await fixture(t);
+  const readThread = f.client.readThread;
+  const rejected = async () => { throw new T3Error("authentication", "T3 MCP returned HTTP 401."); };
+  f.client.readThread = rejected;
+  assert.equal(await f.bridge.tick(), false);
+  assert(f.commands.some(command => command.startsWith("echo ") && command.includes("HTTP 401")));
+  f.client.readThread = readThread;
+  await f.bridge.close();
+  const bridge = await ReviewBridge.open({ ...f.options, attach: true });
+  t.after(() => bridge.close());
+  f.client.readThread = rejected;
+  await assert.rejects(bridge.tick(), (error: unknown) => error instanceof T3Error && error.code === "authentication");
 });
