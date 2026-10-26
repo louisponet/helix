@@ -412,7 +412,8 @@ pub(super) fn open_terminal_location(
             // fixed baseline today.
             cx.editor.review_user_pin = Some("HEAD".to_owned());
         } else {
-            set_user_pin(cx.editor, &commit);
+            // T3 asked for this comparison explicitly, even when it is the hook's baseline.
+            cx.editor.review_user_pin = Some(commit);
         }
     }
     if let Some(path) = path {

@@ -398,14 +398,20 @@ async function run({ values, positionals }: ReturnType<typeof parseOptions>): Pr
     if (!committed) return;
   }
   const controller = new AbortController();
-  const bridge = await ReviewBridge.open({ client, endpoint: connection.endpoint, threadId,
-    mode, baseline: location.revision ? undefined : values.base, pullRequest: values.pr, stateRoot: values["state-dir"], socketPath: values.socket,
-    attach: values.attach, signal: controller.signal,
-    // A restarted sidecar waits out its predecessor's shutdown.
-    lockWait: values.attach ? 10_000 : 0,
-    onStatus: values.attach ? message => console.log(message) : undefined });
-  if (command === "pending" || command === "discard") {
-    try {
+  let child: ReturnType<typeof spawn> | undefined;
+  let childDone: Promise<number | null> | undefined;
+  let opened: ReviewBridge | undefined;
+  const stop = () => { controller.abort(); child?.kill("SIGTERM"); };
+  // Registered before the bridge takes its lock, so a stop during startup cannot leave it incomplete.
+  process.once("SIGINT", stop); process.once("SIGTERM", stop);
+  try {
+    const bridge = opened = await ReviewBridge.open({ client, endpoint: connection.endpoint, threadId,
+      mode, baseline: location.revision ? undefined : values.base, pullRequest: values.pr, stateRoot: values["state-dir"], socketPath: values.socket,
+      attach: values.attach, signal: controller.signal,
+      // A restarted sidecar waits out its predecessor's shutdown.
+      lockWait: values.attach ? 10_000 : 0,
+      onStatus: values.attach ? message => console.log(message) : undefined });
+    if (command === "pending" || command === "discard") {
       if (command === "discard") {
         if (!values.batch) throw new Error("Choose a batch from hx-t3 pending, then use hx-t3 discard --batch <name>.");
         await bridge.discard(values.batch);
@@ -414,14 +420,8 @@ async function run({ values, positionals }: ReturnType<typeof parseOptions>): Pr
         const pending = await bridge.pending();
         console.log(pending.length ? pending.join("\n") : "No pending feedback for this thread.");
       }
-    } finally { await bridge.close(); }
-    return;
-  }
-  let child: ReturnType<typeof spawn> | undefined;
-  let childDone: Promise<number | null> | undefined;
-  const stop = () => { controller.abort(); child?.kill("SIGTERM"); };
-  process.once("SIGINT", stop); process.once("SIGTERM", stop);
-  try {
+      return;
+    }
     const thread = await client.readThread(threadId);
     console.log(mode === "review"
       ? `Reviewing ${bridge.pullRequest} · suggestion drafts leave checkout files unchanged`
@@ -479,7 +479,7 @@ async function run({ values, positionals }: ReturnType<typeof parseOptions>): Pr
     process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop);
     controller.abort();
     if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-    await bridge.close();
+    await opened?.close();
   }
 }
 

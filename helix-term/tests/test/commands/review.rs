@@ -5677,6 +5677,29 @@ async fn head_baseline_from_t3_follows_head_after_a_commit() -> anyhow::Result<(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn baseline_from_t3_stays_pinned_when_it_equals_the_hooks() -> anyhow::Result<()> {
+    let repo = Repo::new("head\n", "head\n", "edited\n");
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let old = git_ok(dir, &["rev-parse", "HEAD"]);
+    let mut app = repo.app()?;
+    app.editor.socket_command = true;
+    send_keys(&mut app, &format!(":review-baseline {old}<ret>")).await?;
+    app.editor.socket_command = false;
+    let location = serde_json::json!({"baseline": old, "filePath": "file.txt"});
+    send_keys(&mut app, &format!(":review-open '{location}'<ret>")).await?;
+    assert_eq!(app.editor.review_baseline.as_deref(), Some(old.as_str()));
+    git_ok(dir, &["commit", "-am", "edited"]);
+    let new = git_ok(dir, &["rev-parse", "HEAD"]);
+    // A new thread's bridge sends its own baseline after T3's open.
+    app.editor.socket_command = true;
+    send_keys(&mut app, &format!(":review-baseline {new}<ret>")).await?;
+    app.editor.socket_command = false;
+    assert_eq!(app.editor.review_baseline.as_deref(), Some(old.as_str()));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn conversation_checkpoint_rejects_non_checkpoint_refs_outside_history() -> anyhow::Result<()>
 {
     let repo = Repo::new("head\n", "before\n", "after\n");
