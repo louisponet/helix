@@ -24,9 +24,12 @@ use crate::{CommitBase, CommitEntry, CommitInfo, FileChange};
 #[cfg(test)]
 mod test;
 
-#[inline]
+/// The directory to discover `file`'s repository from. A deleted file's directory may be gone too;
+/// the repository is found from what is left.
 fn get_repo_dir(file: &Path) -> Result<&Path> {
-    file.parent().context("file has no parent directory")
+    (file.ancestors().skip(1))
+        .find(|dir| dir.is_dir())
+        .context("file has no parent directory")
 }
 
 pub fn get_diff_base(file: &Path, trust_full: bool) -> Result<Vec<u8>> {
@@ -49,8 +52,8 @@ pub fn get_diff_base(file: &Path, trust_full: bool) -> Result<Vec<u8>> {
 }
 
 /// Returns the content of `file` staged in the git index (converted to its worktree form) and
-/// the id of the index blob.
-pub fn get_index_base(file: &Path, trust_full: bool) -> Result<(Vec<u8>, ObjectId)> {
+/// the id of the index blob, or `None` when the index has no entry for it.
+pub fn get_index_base(file: &Path, trust_full: bool) -> Result<Option<(Vec<u8>, ObjectId)>> {
     debug_assert!(file.is_absolute());
     let file = gix::path::realpath(file).context("resolve symlinks")?;
 
@@ -66,7 +69,7 @@ pub fn get_index_base(file: &Path, trust_full: bool) -> Result<(Vec<u8>, ObjectI
         .entry_range(rela_path.as_ref())
         .map_or(&[][..], |range| &index.entries()[range]);
     let entry = match entries {
-        [] => bail!("{} is not in the git index", file.display()),
+        [] => return Ok(None),
         [entry] if entry.stage() == Stage::Unconflicted => entry,
         _ => bail!("{} has unmerged entries in the git index", file.display()),
     };
@@ -80,7 +83,7 @@ pub fn get_index_base(file: &Path, trust_full: bool) -> Result<(Vec<u8>, ObjectI
     } else {
         repo.find_object(entry.id)?.detach().data
     };
-    Ok((convert_to_worktree(&repo, &file, data)?, entry.id))
+    Ok(Some((convert_to_worktree(&repo, &file, data)?, entry.id)))
 }
 
 /// Replaces the content of `file`'s git index entry, which must still have the blob `expected`,
@@ -306,11 +309,7 @@ pub fn stage_paths(cwd: &Path, paths: &[std::path::PathBuf], trust_full: bool) -
 
 pub fn get_commit_base(file: &Path, revision: &str, trust_full: bool) -> Result<CommitBase> {
     let file = gix::path::realpath(file).context("resolve symlinks")?;
-    // A deleted file's directory may be gone too; the repository is found from what is left.
-    let dir = (file.ancestors().skip(1))
-        .find(|dir| dir.is_dir())
-        .context("file has no parent directory")?;
-    let repo = open_repo(dir, trust_full)?.to_thread_local();
+    let repo = open_repo(get_repo_dir(&file)?, trust_full)?.to_thread_local();
     let commit = repo
         .rev_parse_single(revision)?
         .object()?

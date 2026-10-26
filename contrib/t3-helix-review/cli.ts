@@ -350,6 +350,7 @@ async function run({ values, positionals }: ReturnType<typeof parseOptions>): Pr
   }
   const bridge = await ReviewBridge.open({ client, endpoint: connection.endpoint, threadId,
     mode, baseline: location.revision ? undefined : values.base, pullRequest: values.pr, stateRoot: values["state-dir"], socketPath: values.socket,
+    attach: values.attach,
     // A restarted sidecar waits out its predecessor's shutdown.
     lockWait: values.attach ? 10_000 : 0,
     onStatus: values.attach ? message => console.log(message) : undefined });

@@ -424,7 +424,7 @@ pub(super) fn open_terminal_location(
                 .get_commit_base(&path, "HEAD", trust)?
                 .blob_id
                 .is_none();
-            let in_index = providers.get_index_base(&path, trust)?.0.is_empty();
+            let in_index = providers.get_index_base(&path, trust)?.is_none();
             open_review_nav_file(
                 cx,
                 &NavFile {
@@ -1089,7 +1089,9 @@ fn review_nav(cx: &mut compositor::Context) -> anyhow::Result<ReviewNav> {
                 .is_ok_and(|head| head.blob_id.is_some() && worktree.as_ref() == Some(&head.data));
             let in_index = providers
                 .get_index_base(&path, trust_full)
-                .is_ok_and(|(index, _)| worktree.as_ref() == Some(&index));
+                .is_ok_and(|entry| {
+                    entry.is_some_and(|(index, _)| worktree.as_ref() == Some(&index))
+                });
             NavFile {
                 added: matches!(change, FileChange::Untracked { .. }),
                 path,
@@ -2386,7 +2388,7 @@ fn ensure_review(cx: &mut compositor::Context) -> anyhow::Result<()> {
 /// Rereads the git index and `HEAD` content of `path` into its open review, so its hunks are marked
 /// staged or committed as git has them now.
 fn refresh_staging(editor: &mut Editor, path: &Path, trust_full: bool) {
-    let Ok((index, _)) = editor.diff_providers.get_index_base(path, trust_full) else {
+    let Ok(Some((index, _))) = editor.diff_providers.get_index_base(path, trust_full) else {
         return;
     };
     let head = editor
@@ -2886,8 +2888,7 @@ pub(crate) fn document_written(editor: &mut Editor, doc_id: DocumentId) {
         return;
     };
     let Some(dir) = editor.review_handoff_dir() else {
-        editor.review_batch.absorb(ask);
-        editor.share_review_comments();
+        keep_failed_ask(editor, ask);
         return;
     };
     let comments = ask.comments().len();
@@ -2906,10 +2907,22 @@ fn export_ask(editor: &mut Editor, mut batch: ReviewBatch, dir: &Path) -> anyhow
     let result = refuse_unsaved(editor, ":review-comment", asked)
         .and_then(|()| export_batch(editor, &mut batch, dir));
     if result.is_err() {
-        editor.review_batch.absorb(batch);
-        editor.share_review_comments();
+        keep_failed_ask(editor, batch);
     }
     result
+}
+
+/// Puts an ask that could not go out back with the pending comments. Outside a T3 work session it
+/// stays an ask for the next export; inside one, pending comments wait for an explicit send, so the
+/// ask's request and target must not turn that send into an ask.
+fn keep_failed_ask(editor: &mut Editor, ask: ReviewBatch) {
+    let ask = if editor.review_mode == Some(ReviewMode::Work) {
+        ask.into_pending()
+    } else {
+        ask
+    };
+    editor.review_batch.absorb(ask);
+    editor.share_review_comments();
 }
 
 /// Exports the pending review batch to a new file in `dir`.
@@ -3196,6 +3209,7 @@ fn review_diff_text(editor: &Editor, commit: &str) -> anyhow::Result<(String, us
             .diff_providers
             .get_index_base(path, trust_full)
             .ok()
+            .flatten()
             .filter(|_| editor.review_mode != Some(ReviewMode::Review))
         {
             hunks = mark_staged_hunks(&hunks, &helix_vcs::line_hunks(&index, after.as_bytes()));
@@ -3488,7 +3502,10 @@ fn change_staging(editor: &mut Editor, staging: Staging) -> anyhow::Result<bool>
         .workspace_trust
         .query(&helix_loader::find_workspace().0, TrustQuery::Git)
         .is_trusted();
-    let (index, expected) = editor.diff_providers.get_index_base(&path, trust_full)?;
+    let (index, expected) = editor
+        .diff_providers
+        .get_index_base(&path, trust_full)?
+        .with_context(|| format!("{} is not in the git index", path.display()))?;
     let worktree = std::fs::read(&path)?;
     let base = staging_base(editor, &path, &index, trust_full);
     let head = editor
@@ -3731,8 +3748,8 @@ fn file_stats(editor: &Editor, path: &Path, commit: &str, trust_full: bool) -> O
         });
     }
     let staged = match editor.diff_providers.get_index_base(path, trust_full) {
-        Ok((index, _)) => helix_vcs::staged_hunk_count(&before, &index, &after).0,
-        Err(_) => 0,
+        Ok(Some((index, _))) => helix_vcs::staged_hunk_count(&before, &index, &after).0,
+        _ => 0,
     };
     let committed = match editor
         .diff_providers
@@ -3913,7 +3930,7 @@ fn on_unstaged_change(editor: &Editor) -> bool {
         .workspace_trust
         .query(&workspace, TrustQuery::Git)
         .is_trusted();
-    let (Ok((index, _)), Ok(worktree)) = (
+    let (Ok(Some((index, _))), Ok(worktree)) = (
         editor.diff_providers.get_index_base(path, trust_full),
         std::fs::read(path),
     ) else {

@@ -38,6 +38,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   };
   const commands: string[] = [];
   let attachError: string | undefined;
+  const failures = new Map<string, string>();
   const socketPath = join(dir, "hx.sock");
   const server = createServer(socket => {
     let pending = "";
@@ -45,7 +46,8 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
       const lines = (pending + bytes.toString()).split("\n"); pending = lines.pop()!;
       for (const line of lines) {
         commands.push(line);
-        socket.write(attachError && line.startsWith("review-pr-attach ") ? `error ${attachError}\n` : "ok\n");
+        const failure = failures.get(line) ?? (line.startsWith("review-pr-attach ") ? attachError : undefined);
+        socket.write(failure ? `error ${failure}\n` : "ok\n");
       }
     });
   });
@@ -64,6 +66,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   return { dir, repo, baseline, blob, thread, linked, client, calls, commands, options, batch, writeBatch,
     get bridge() { return bridge; }, fail(value: boolean) { failure = value; },
     failAttach(message: string) { attachError = message; },
+    failCommand(command: string, message: string) { failures.set(command, message); },
     async reopen(mode: "work" | "review" = "work") { await bridge.close(); bridge = await ReviewBridge.open({ ...options, mode }); return bridge; } };
 }
 
@@ -604,4 +607,51 @@ test("a tick reports whether anything changed, so an idle bridge can sync less o
   await f.batch();
   assert.equal(await f.bridge.tick(), true, "a batch to deliver");
   assert.equal(f.calls.length, 1);
+});
+
+test("an amended HEAD reviews from the new HEAD and still delivers a pending batch", async t => {
+  const f = await fixture(t);
+  await f.bridge.tick();
+  await writeFile(join(f.repo, "file.txt"), "keep\nnew check\nend\n");
+  await git(f.repo, ["commit", "-a", "--amend", "-m", "amended"]);
+  const head = (await git(f.repo, ["rev-parse", "HEAD"])).trim();
+  f.failCommand(`review-baseline ${f.baseline}`, `commit ${f.baseline.slice(0, 8)} is not in this branch's history`);
+  await f.batch();
+  await f.bridge.tick();
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(await f.bridge.pending(), []);
+  assert.equal(f.bridge.baseline, head);
+  assert.equal(f.commands.filter(command => command.startsWith("review-baseline ")).at(-1), `review-baseline ${head}`);
+  await f.reopen();
+  assert.equal(f.bridge.baseline, head);
+});
+
+test("a refresh HX refuses does not hold back pending feedback", async t => {
+  const f = await fixture(t);
+  await f.bridge.tick();
+  await writeFile(join(f.repo, "file.txt"), "keep\nnew check\nend\n");
+  f.failCommand(`review-baseline ${f.baseline}`, "unsaved buffer");
+  await f.batch();
+  await f.bridge.tick();
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(await f.bridge.pending(), []);
+  assert.equal(f.bridge.baseline, f.baseline);
+  assert(f.commands.some(command => command.startsWith("echo ") && command.includes("unsaved buffer")));
+});
+
+test("an attached bridge restarted after HEAD was rewritten reviews from HEAD and keeps pending feedback", async t => {
+  const f = await fixture(t);
+  await f.batch();
+  await f.bridge.close();
+  await git(f.repo, ["commit", "--amend", "-m", "rewritten"]);
+  const head = (await git(f.repo, ["rev-parse", "HEAD"])).trim();
+  await assert.rejects(ReviewBridge.open(f.options), /Reopen with --base/u);
+  await assert.rejects(ReviewBridge.open({ ...f.options, attach: true, baseline: f.baseline }), /Reopen with --base/u);
+  const bridge = await ReviewBridge.open({ ...f.options, attach: true });
+  t.after(() => bridge.close());
+  assert.equal(bridge.baseline, head);
+  assert.deepEqual(await bridge.pending(), ["review.json"]);
+  await bridge.tick();
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(await bridge.pending(), []);
 });

@@ -24,6 +24,11 @@ export interface BridgeOptions {
   baseline?: string;
   pullRequest?: string;
   mode?: ReviewMode;
+  /**
+   * An attached bridge is restarted by T3, which cannot pass --base, so a saved baseline that a
+   * rewritten HEAD (amend, rebase, force-push) dropped from the branch is replaced by HEAD.
+   */
+  attach?: boolean;
   /** How long, in ms, to wait for a live bridge holding this thread's lock to exit. */
   lockWait?: number;
   onStatus?: (message: string) => void;
@@ -45,6 +50,8 @@ interface Delivery { id: string; message: string; indexTree?: string; head?: str
 const active = new Set(["preparing", "queued", "starting", "running", "waiting"]);
 export const isActive = (thread: T3ThreadInfo) => active.has(thread.status);
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+const inHistory = (repo: string, commit: string) =>
+  git(repo, ["merge-base", "--is-ancestor", commit, "HEAD"]).then(() => true, () => false);
 
 export function git(cwd: string, args: string[], input?: string | Buffer): Promise<string> {
   return new Promise((done, fail) => {
@@ -218,10 +225,13 @@ export class ReviewBridge {
       }
       if (previous && previous.branch !== branch) throw new Error("This review belongs to a different branch. Restore that branch to resume its pending feedback.");
       const revision = options.baseline ?? previous?.baseline ?? "HEAD";
-      const baseline = (await git(repo, ["rev-parse", "--verify", "--end-of-options", `${revision}^{commit}`])).trim();
-      await git(repo, ["merge-base", "--is-ancestor", baseline, "HEAD"]).catch(() => {
-        throw new Error("The review baseline is no longer in this branch. Reopen with --base <revision> to choose the review range.");
-      });
+      let baseline = (await git(repo, ["rev-parse", "--verify", "--end-of-options", `${revision}^{commit}`])).trim();
+      if (!await inHistory(repo, baseline)) {
+        if (!options.attach || options.baseline !== undefined) {
+          throw new Error("The review baseline is no longer in this branch. Reopen with --base <revision> to choose the review range.");
+        }
+        baseline = (await git(repo, ["rev-parse", "HEAD"])).trim();
+      }
       const runtime = process.env.XDG_RUNTIME_DIR || join(tmpdir(), `helix-${process.getuid?.() ?? "user"}`);
       const socketPath = options.socketPath ?? join(runtime, "helix", `t3-${id}.sock`);
       if (Buffer.byteLength(socketPath) > 103) throw new Error("HX socket path is too long. Use --socket with a shorter private path.");
@@ -320,7 +330,11 @@ export class ReviewBridge {
         await this.announce(`T3: ${thread.title} — ${thread.status}; review updated`);
       }
       this.thread = thread;
-      const refreshed = await this.refresh();
+      // Feedback goes to the thread even when the editor can't be refreshed.
+      const refreshed = await this.refresh().catch(async (error: Error) => {
+        await this.announce(`T3: ${error.message}`);
+        return false;
+      });
       for (const name of pending) {
         try { await this.deliver(name); }
         catch (error) { await this.announce(`T3: feedback kept — ${(error as Error).message}`); }
@@ -340,7 +354,7 @@ export class ReviewBridge {
     const title = [...`T3: ${this.title.replace(/[\p{Cc}\u2028\u2029]/gu, " ")}`].slice(0, 120).join("");
     const bound = newSocket || title !== this.socketLabel;
     if (bound) {
-      await sendCommands(this.socketPath, [`review-handoff ${quoteCommand(this.outbox)} ${quoteCommand(title)}`,
+      await this.sendWithBaseline(() => [`review-handoff ${quoteCommand(this.outbox)} ${quoteCommand(title)}`,
         ...(this.mode === "work" ? [`review-baseline ${this.baseline}`] : [])]);
       if (newSocket && this.state.pullRequest) {
         await sendCommands(this.socketPath, [`review-pr-attach ${quoteCommand(this.state.pullRequest)}`]);
@@ -358,9 +372,25 @@ export class ReviewBridge {
     }));
     const fingerprint = digest((await git(this.repo, ["rev-parse", "HEAD"])) + files.join("\0") + await git(this.repo, ["diff", "--cached", "--raw", "--"]));
     if (fingerprint === this.fingerprint) return bound;
-    await sendCommands(this.socketPath, [`review-baseline ${this.baseline}`]);
+    await this.sendWithBaseline(() => [`review-baseline ${this.baseline}`]);
     this.fingerprint = fingerprint;
     return true;
+  }
+
+  /**
+   * Sends `commands`, built from the current baseline. When HX refuses the baseline because a
+   * rewritten HEAD (amend, rebase, force-push) dropped it from the branch, reviews from HEAD instead;
+   * resending the stale one would refuse every refresh.
+   */
+  private async sendWithBaseline(commands: () => string[]): Promise<void> {
+    try { await sendCommands(this.socketPath, commands()); }
+    catch (error) {
+      if (!/not in this branch's history/u.test((error as Error).message) || await inHistory(this.repo, this.baseline)) throw error;
+      this.state.baseline = (await git(this.repo, ["rev-parse", "HEAD"])).trim();
+      await this.save();
+      await this.announce(`T3: HEAD was rewritten; reviewing from ${this.baseline.slice(0, 8)}`);
+      await sendCommands(this.socketPath, commands());
+    }
   }
 
   async deliver(name: string, prepareOnly = false): Promise<T3SendResult | undefined> {

@@ -79,7 +79,8 @@ bridge; opening the thread again resumes retained feedback.
 
 - First use reviews from `HEAD`. Pass `--base main` (or a commit) to review
   work already committed. The bridge keeps that baseline across agent commits
-  and restarts.
+  and restarts. If an amend, rebase or force-push drops it from the branch,
+  the running bridge reviews from the new `HEAD` instead.
 - `Space A f` picks a changed file and `Space A b` inspects another baseline.
 - `hx-t3 --mode review` (or `--pr <url>`) opens a separate editor whose code
   buffers are suggestion drafts from the pull request's head, leaving checkout

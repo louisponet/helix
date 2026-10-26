@@ -1381,6 +1381,15 @@ impl ReviewBatch {
         }
     }
 
+    /// This batch's files and comments alone, without its request or target.
+    pub fn into_pending(self) -> Self {
+        Self {
+            request: None,
+            target: None,
+            ..self
+        }
+    }
+
     /// Sets the request the next export carries, replacing any earlier one.
     pub fn set_request(&mut self, request: ReviewRequest) {
         self.request = Some(request);

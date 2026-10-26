@@ -2116,7 +2116,9 @@ impl Document {
                 )
             }
             None => {
-                let (data, blob_oid) = provider_registry.get_index_base(path, trust_full)?;
+                let (data, blob_oid) = provider_registry
+                    .get_index_base(path, trust_full)?
+                    .ok_or_else(|| anyhow!("{} is not in the git index", path.display()))?;
                 (data, ReviewBaseline::GitIndex { blob_oid })
             }
         };
@@ -2124,7 +2126,7 @@ impl Document {
         let mut review = Review::new(snapshot, baseline, &self.text)?;
         // Against a commit, part of the change may already be in the index, or even committed.
         if revision.is_some() {
-            if let Ok((index, _)) = provider_registry.get_index_base(path, trust_full) {
+            if let Ok(Some((index, _))) = provider_registry.get_index_base(path, trust_full) {
                 let head = provider_registry
                     .get_commit_base(path, "HEAD", trust_full)
                     .ok();
