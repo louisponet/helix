@@ -512,7 +512,7 @@ impl MappableCommand {
         review_prev_change, "Go to the previous review change, across changed files",
         review_baseline_older, "Move the review baseline one commit older",
         review_baseline_newer, "Move the review baseline one commit newer",
-        review_comment_prompt, "Send a comment on the selections to the agent (a pending comment on a pull request)",
+        review_comment_prompt, "Send a comment on the selections to the agent (pending until Space A S or Space A P in a T3 work session; a pending comment on a pull request)",
         review_ask_prompt, "Send a comment on the selections to the agent, also while reviewing a pull request",
         redo, "Redo change",
         earlier, "Move backward in history",

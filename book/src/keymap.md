@@ -369,7 +369,7 @@ the [inline review](./review.md) and start one against `HEAD` when needed.
 | `d` | Show the review as one diff                                  | `review_diff_buffer`     |
 | `g` | Open the file of the review diff hunk under the cursor       | `review_diff_open_hunk`  |
 | `o` | Focus the old review text nearest the cursor                 | `review_old_text`        |
-| `c` | Send a comment on the selections (opens `:review-comment `)  | `review_comment_prompt`  |
+| `c` | Send a comment on the selections to the agent, pending in a T3 work session (until `S` or `P`) or on a pull request (opens `:review-comment `) | `review_comment_prompt`  |
 | `a` | Send a comment to the agent, also on a pull request (opens `:review-ask `) | `review_ask_prompt`      |
 | `C` | Pick a pending review comment                                | `review_comments_picker` |
 | `u` | Drop the latest pending review comment                       | `review_uncomment_latest`|

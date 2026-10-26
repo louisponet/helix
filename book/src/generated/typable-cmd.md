@@ -97,11 +97,14 @@
 | `:review-uncomment` | Drop the most recently added pending review comment, or the given number of latest ones. |
 | `:review-export` | Write pending review comments and reviewed files as JSON to a new file. Reviewed buffers must be written first. |
 | `:review-revert` | Replace the changed lines under the cursor, or the focused old text's change, with the review baseline's lines. |
+| `:review-mark`, `:review-mark-reviewed` | Mark the current primary committed or pull request change reviewed without changing the git index, then advance to the next unreviewed change. |
+| `:review-unmark`, `:review-unmark-reviewed` | Mark the current primary change unreviewed without moving or changing the git index. |
 | `:review-stage` | Stage the unstaged hunks the selections touch (or the focused old text's, or the :review-diff hunk under the cursor) in the git index, like git add -p. Refuses unsaved buffers. |
 | `:review-unstage` | Unstage the staged hunks the selections touch (or the focused old text's, or the :review-diff hunk under the cursor): the index gets the baseline's lines back for them. |
 | `:review-toggle-stage` | Stage the hunks the selections touch, or unstage them all if all are already staged (Enter while reviewing). |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept for :review-export. |
 | `:review-pr` | Review a GitHub pull request (number or URL) with gh: check it out and review every buffer against its merge base with the base branch. An optional directory receives the review batch :review-submit hands to gtc. `close` leaves the pull request review and checks out the previous branch. |
+| `:review-pr-attach` | Attach the current checkout to a GitHub pull request without changing branches or saved edits. The checked-out commit must equal the PR head. Takes a PR URL or number. |
 | `:review-submit` | Hand the pending pull request comments and edits to reviewed buffers (as suggested changes) to gtc as a review batch in the directory given to :review-pr: [approve|request-changes|comment] [summary]. Without arguments, opens the submit dialog. |
 | `:review-commit-all` | Stage every file changed since the review baseline (modified, deleted and untracked, like git add -A limited to them), then hand back like :review-commit with an optional subject and a leading @label to address a pi session. |
 | `:review-next` | Go to the next changed block not yet committed (any block when everything is committed), continuing with the first block of the next file changed since the review baseline (in :review-files order, wrapping around). |
@@ -109,8 +112,10 @@
 | `:review-baseline-pick` | Pick the review baseline from the first-parent history of HEAD (up to 300 commits), with the current baseline, the merge base with the base branch and HEAD marked. |
 | `:review-older` | Move the review baseline one commit older (its first parent), pinning HEAD first when none is set, and refresh every review. |
 | `:review-newer` | Move the review baseline one commit newer, towards HEAD on its ancestry path, and refresh every review. |
+| `:review-launch-ready` | Release the launcher's review protocol after its initial location and optional expected PR are ready. |
+| `:review-open` | Open a thread-bound file location or immutable checkpoint comparison supplied as JSON. |
 | `:review-baseline` | Review every unmodified buffer in the workspace, and buffers opened later, against a commit revision such as HEAD. Repeating the same commit refreshes the reviews; `clear` closes them. A trailing `force` adopts the commit even over a baseline pinned by you. |
-| `:review-handoff` | Set the directory the explicit handoffs (:review-comment, :review-send, :review-commit, :review-commit-all) export review batches to. Without it, batches go to `<workspace>/.pi/helix-review/outbox` when that directory exists and every reviewed file is in the workspace. `clear` returns to that default. |
+| `:review-handoff` | Set the directory the explicit handoffs (:review-comment, :review-send, :review-send-pr, :review-commit, :review-commit-all) export review batches to, with an optional display label shown in the review statusline. Quote labels containing spaces. The label does not address a session. Without a directory, batches go to `<workspace>/.pi/helix-review/outbox` when it exists and every reviewed file is in the workspace. `clear` returns to that default and clears the label; setting a directory without a label also clears the label. Refuses directory changes while a review comment is being saved. |
 | `:review-send` | Export a review batch to the handoff directory now, as a write would, without writing any file, with optional text as an instruction to the agent, addressed to a pi session by a leading @label. Refuses while a reviewed buffer has unsaved changes. |
 | `:review-send-pr` | Hand the review back like :review-send, asking the agent to post the pending comments and saved edits on the pull request as one review (comments inline, edits as suggestions), with optional text as the review summary and a leading @label to address a pi session. |
 | `:review-commit` | Hand the review back like :review-send, asking the agent to commit exactly what is staged in the git index, with an optional commit subject and a leading @label to address a pi session. Refuses when nothing is staged. |
