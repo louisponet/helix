@@ -5689,6 +5689,11 @@ async fn baseline_from_t3_stays_pinned_when_it_equals_the_hooks() -> anyhow::Res
     let location = serde_json::json!({"baseline": old, "filePath": "file.txt"});
     send_keys(&mut app, &format!(":review-open '{location}'<ret>")).await?;
     assert_eq!(app.editor.review_baseline.as_deref(), Some(old.as_str()));
+    // The attached bridge re-sends the same baseline after a saved edit.
+    app.editor.socket_command = true;
+    send_keys(&mut app, &format!(":review-baseline {old}<ret>")).await?;
+    app.editor.socket_command = false;
+    assert_eq!(app.editor.review_baseline.as_deref(), Some(old.as_str()));
     git_ok(dir, &["commit", "-am", "edited"]);
     let new = git_ok(dir, &["rev-parse", "HEAD"]);
     // A new thread's bridge sends its own baseline after T3's open.

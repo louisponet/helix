@@ -453,8 +453,8 @@ everything stays pending and the status shows the error.
 - `:review-files` says `no files changed since <commit>` although the agent did
   work: it committed, and after your last handoff the next turn moved the
   baseline to that commit. `:review-baseline <commit>` (for example
-  `:review-baseline HEAD~1`) re-pins an earlier one, until pi's next refresh
-  sends its own baseline again.
+  `:review-baseline HEAD~1`) pins an earlier one, which pi's refreshes keep
+  until you pick the `pi` row in `Space A b` or run `:review-baseline clear`.
 - `... also changed on disk: :reload discards your edits, :w! overwrites the
   agent's`: you and the agent edited the same file. `:reload` keeps the
   agent's version, `:w!` keeps yours.

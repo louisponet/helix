@@ -2292,17 +2292,11 @@ pub(super) fn review_baseline(
         return pin_review_baseline(cx.editor, &commit);
     }
     if cx.editor.socket_command {
-        // The hook never overrides a baseline the reviewer chose: it only refreshes it, and a
-        // `HEAD` pin resolves to the current HEAD.
-        if let Some(pin) = cx
-            .editor
-            .review_user_pin
-            .clone()
-            .filter(|pin| *pin != commit)
-        {
+        // The hook never overrides a baseline the reviewer chose, whatever commit it sends: it
+        // only refreshes it, and a `HEAD` pin resolves to the current HEAD.
+        if let Some(pin) = cx.editor.review_user_pin.clone() {
             return pin_review_baseline(cx.editor, &pin);
         }
-        cx.editor.review_user_pin = None;
         return pin_review_baseline(cx.editor, &commit);
     }
     pin_review_baseline(cx.editor, &commit)?;
