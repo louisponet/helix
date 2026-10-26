@@ -397,9 +397,10 @@ async function run({ values, positionals }: ReturnType<typeof parseOptions>): Pr
       committed: async () => await gitHistory(boundThread.cwd) === "committed" });
     if (!committed) return;
   }
+  const controller = new AbortController();
   const bridge = await ReviewBridge.open({ client, endpoint: connection.endpoint, threadId,
     mode, baseline: location.revision ? undefined : values.base, pullRequest: values.pr, stateRoot: values["state-dir"], socketPath: values.socket,
-    attach: values.attach,
+    attach: values.attach, signal: controller.signal,
     // A restarted sidecar waits out its predecessor's shutdown.
     lockWait: values.attach ? 10_000 : 0,
     onStatus: values.attach ? message => console.log(message) : undefined });
@@ -416,7 +417,6 @@ async function run({ values, positionals }: ReturnType<typeof parseOptions>): Pr
     } finally { await bridge.close(); }
     return;
   }
-  const controller = new AbortController();
   let child: ReturnType<typeof spawn> | undefined;
   let childDone: Promise<number | null> | undefined;
   const stop = () => { controller.abort(); child?.kill("SIGTERM"); };
@@ -438,19 +438,26 @@ async function run({ values, positionals }: ReturnType<typeof parseOptions>): Pr
       listening: () => editorListening(bridge.socketPath),
       tick: () => bridge.tick(),
       open: async () => {
+        // A stopped sidecar returns rather than throws: a failure would clear its successor's binding.
+        const { signal } = controller;
         try {
+          if (signal.aborted) return false;
           if (values.attach) await sendCommands(bridge.socketPath, [`review-open ${quoteCommand(JSON.stringify({ mode }))}`]);
           await bridge.refresh();
           if (Object.keys(location).some(key => key !== "mode")) {
             if (location.worktreePath && await realpath(location.worktreePath) !== await realpath(thread.cwd)) throw new Error("The requested location belongs to another worktree.");
+            if (signal.aborted) return false;
             await sendCommands(bridge.socketPath, [`review-open ${quoteCommand(JSON.stringify(location))}`]);
           } else if (!values.attach) {
             // An attached editor's client chooses what it shows.
+            if (signal.aborted) return false;
             await sendCommands(bridge.socketPath, ["review-next"]).catch(error => {
               if (!/no (uncommitted )?changes/u.test(error.message)) throw error;
+              if (signal.aborted) return [];
               return sendCommands(bridge.socketPath, [`echo ${quoteCommand("No changes in this review range. Space A b chooses an earlier baseline.")}`]);
             });
           }
+          if (signal.aborted) return false;
           await sendCommands(bridge.socketPath, [`review-launch-ready${bridge.pullRequest ? ` ${quoteCommand(bridge.pullRequest)}` : ""}`]);
           return true;
         } catch (error) {
@@ -464,6 +471,10 @@ async function run({ values, positionals }: ReturnType<typeof parseOptions>): Pr
       const code = await childDone;
       if (code) throw new Error(`HX exited with status ${code}.`);
     }
+  } catch (error) {
+    // A sidecar stopped for a restart must not reach main()'s clear of its successor's binding.
+    if (values.attach && controller.signal.aborted) return;
+    throw error;
   } finally {
     process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop);
     controller.abort();

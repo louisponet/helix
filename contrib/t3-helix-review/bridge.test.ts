@@ -434,6 +434,20 @@ test("renaming a bound thread refreshes the visible HX label without reconnectin
   assert.equal(f.calls.length, 0);
 });
 
+test("a stopped bridge sends nothing more to the editor, even for a new socket or title", async t => {
+  const f = await fixture(t);
+  const controller = new AbortController();
+  await f.bridge.close();
+  const bridge = await ReviewBridge.open({ ...f.options, signal: controller.signal }); t.after(() => bridge.close());
+  controller.abort();
+  f.thread.title = "Renamed after stop";
+  assert.equal(await bridge.refresh(), true);
+  await writeFile(join(f.repo, "file.txt"), "keep\nchanged after stop\nend\n");
+  f.thread.latestRunId = "run-2";
+  await bridge.tick();
+  assert.deepEqual(f.commands, []);
+});
+
 test("an accepted commit with a lost response retries after HEAD advances using the same frozen queue request", async t => {
   const f = await fixture(t);
   const file = join(f.repo, "file.txt");

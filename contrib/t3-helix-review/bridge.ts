@@ -31,6 +31,8 @@ export interface BridgeOptions {
   attach?: boolean;
   /** How long, in ms, to wait for a live bridge holding this thread's lock to exit. */
   lockWait?: number;
+  /** Once aborted, the bridge sends nothing more to the editor. */
+  signal?: AbortSignal;
   onStatus?: (message: string) => void;
 }
 interface State {
@@ -259,6 +261,10 @@ export class ReviewBridge {
 
   private save(): Promise<void> { return writeJson(join(this.dir, "state.json"), this.state); }
 
+  private send(commands: string[]): Promise<string[]> {
+    return this.options.signal?.aborted ? Promise.resolve([]) : sendCommands(this.socketPath, commands);
+  }
+
   private async paths(): Promise<string[]> {
     const tracked = await git(this.repo, ["diff", "--name-only", "-z", this.baseline, "--"]);
     const untracked = await git(this.repo, ["ls-files", "--others", "--exclude-standard", "-z"]);
@@ -303,7 +309,7 @@ export class ReviewBridge {
     if (message === this.lastStatus) return;
     this.lastStatus = message;
     this.options.onStatus?.(message);
-    await sendCommands(this.socketPath, [`echo ${quoteCommand(message)}`]).catch(() => undefined);
+    await this.send([`echo ${quoteCommand(message)}`]).catch(() => undefined);
   }
 
   private async validateBinding(): Promise<T3ThreadInfo> {
@@ -367,7 +373,7 @@ export class ReviewBridge {
       await this.sendWithBaseline(() => [`review-handoff ${quoteCommand(this.outbox)} ${quoteCommand(title)}`,
         ...(this.mode === "work" ? [`review-baseline ${this.baseline}`] : [])]);
       if (newSocket && this.state.pullRequest) {
-        await sendCommands(this.socketPath, [`review-pr-attach ${quoteCommand(this.state.pullRequest)}`]);
+        await this.send([`review-pr-attach ${quoteCommand(this.state.pullRequest)}`]);
       }
       this.socketIdentity = identity;
       this.socketLabel = title;
@@ -393,13 +399,13 @@ export class ReviewBridge {
    * resending the stale one would refuse every refresh.
    */
   private async sendWithBaseline(commands: () => string[]): Promise<void> {
-    try { await sendCommands(this.socketPath, commands()); }
+    try { await this.send(commands()); }
     catch (error) {
       if (!/not in this branch's history/u.test((error as Error).message) || await inHistory(this.repo, this.baseline)) throw error;
       this.state.baseline = (await git(this.repo, ["rev-parse", "HEAD"])).trim();
       await this.save();
       await this.announce(`T3: HEAD was rewritten; reviewing from ${this.baseline.slice(0, 8)}`);
-      await sendCommands(this.socketPath, commands());
+      await this.send(commands());
     }
   }
 
