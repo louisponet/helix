@@ -4039,7 +4039,7 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "review-comment",
         aliases: &[],
-        doc: "Send a comment on every selection (or the selected old text) to the agent at once, writing the buffer first if modified; a leading @label addresses that pi session. While reviewing a pull request, add a pending pull request comment on the primary selection instead. Use %% for a literal %.",
+        doc: "Send a comment on every selection (or the selected old text) to the agent at once, writing the buffer first if modified; a leading @label addresses that pi session. In a T3 Work together session (HELIX_REVIEW_MODE=work), add pending comments for :review-send or :review-send-pr instead. While reviewing a pull request, add a pending pull request comment on the primary selection instead. Use %% for a literal %.",
         fun: review::review_comment,
         completer: CommandCompleter::none(),
         signature: Signature {
@@ -4301,7 +4301,7 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "review-handoff",
         aliases: &[],
-        doc: "Set the directory the explicit handoffs (:review-comment, :review-send, :review-commit, :review-commit-all) export review batches to, with an optional display label shown in the review statusline. Quote labels containing spaces. The label does not address a session. Without a directory, batches go to `<workspace>/.pi/helix-review/outbox` when it exists and every reviewed file is in the workspace. `clear` returns to that default and clears the label; setting a directory without a label also clears the label. Refuses directory changes while a review comment is being saved.",
+        doc: "Set the directory the explicit handoffs (:review-comment, :review-send, :review-send-pr, :review-commit, :review-commit-all) export review batches to, with an optional display label shown in the review statusline. Quote labels containing spaces. The label does not address a session. Without a directory, batches go to `<workspace>/.pi/helix-review/outbox` when it exists and every reviewed file is in the workspace. `clear` returns to that default and clears the label; setting a directory without a label also clears the label. Refuses directory changes while a review comment is being saved.",
         fun: review::review_handoff,
         completer: CommandCompleter::positional(&[completers::directory]),
         signature: Signature {
@@ -4314,6 +4314,18 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         aliases: &[],
         doc: "Export a review batch to the handoff directory now, as a write would, without writing any file, with optional text as an instruction to the agent, addressed to a pi session by a leading @label. Refuses while a reviewed buffer has unsaved changes.",
         fun: review::review_send,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(1)),
+            raw_after: Some(0),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "review-send-pr",
+        aliases: &[],
+        doc: "Hand the review back like :review-send, asking the agent to post the pending comments and saved edits on the pull request as one review (comments inline, edits as suggestions), with optional text as the review summary and a leading @label to address a pi session.",
+        fun: review::review_send_pr,
         completer: CommandCompleter::none(),
         signature: Signature {
             positionals: (0, Some(1)),

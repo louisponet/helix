@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { watch } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, readFile, realpath, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -8,9 +9,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { createInterface } from "node:readline/promises";
 import { setTimeout as delay } from "node:timers/promises";
-import { ReviewBridge, quoteCommand, sendCommands, writeJson } from "./bridge.ts";
+import { ReviewBridge, editorListening, quoteCommand, sendCommands, writeJson } from "./bridge.ts";
 import type { ReviewMode } from "./bridge.ts";
-import { T3Client, connectionFromEnvironment, defaultT3BaseDir, discoverLocalEndpoint, readEnvironment } from "./t3.ts";
+import { T3Client, T3Error, connectionFromEnvironment, defaultT3BaseDir, discoverLocalEndpoint, readEnvironment } from "./t3.ts";
 import type { T3Connection, T3ThreadInfo } from "./t3.ts";
 import { pairLocalClient } from "./auth.ts";
 
@@ -27,10 +28,10 @@ const help = `Work together or review a pull request in Helix.
   hx-t3 pending                 List feedback waiting to be delivered
   hx-t3 discard --batch <name>  Cancel a pending batch (keeps an archive)
 
-In HX: Space A a asks about the selection; Space A f picks a changed file.
-Work together: save corrections, then Send to agent or :review-send <instruction>.
+In HX: Space A a asks about the selection; Space A c adds a comment; Space A f picks a changed file.
+Work together: save corrections, then Space A S (:review-send [instruction]) sends them
+with your comments, or Space A P (:review-send-pr [summary]) has the agent post them as a PR review.
 Review a PR: edit suggestion buffers without saving over source files.
-Draft PR comments and suggestions, then preview and publish the review in T3.
 Ask agent discusses your selection in either mode; saving alone never starts a turn.
 Answers appear in the T3 thread. Quitting HX stops the bridge.
 
@@ -41,13 +42,13 @@ Options:
   --pr <url>       GitHub PR to review; --mode review uses the thread's linked PR
   --file <path>    Relative to the bound worktree; basic editing also works before the first Git commit
   --hx <program>   HX executable (default: hx or HELIX_BIN)
-  --attach        Attach to an existing editor instead of launching HX
+  --attach        Attach to an existing editor instead of launching HX; exits when it closes
   --socket <path>  Override this thread's private HX socket
   --state-dir     Override the private review state directory
   --config <path>  Override the private connection file
   --t3 <program>  T3 CLI used for local setup
   --base-dir      T3 home directory (default: T3CODE_HOME or ~/.t3)
-  --environment-id <id>  Require this T3 environment (set by Review in HX)
+  --environment-id <id>  Require this T3 environment (set when T3 opens a file in Helix)
   --batch <name>   Batch from pending to cancel with discard
   --help          Show this help
 
@@ -125,7 +126,7 @@ async function install(): Promise<void> {
   if (previous && !previous.startsWith("#!/bin/sh\n# Helix review for T3 Code\n")) throw new Error(`${path} already exists and is not this launcher's file.`);
   await writeFile(path, script, { mode: 0o755 });
   await chmod(path, 0o755);
-  console.log(`Installed ${path}. Run hx-t3 from a T3 terminal, or use Review in HX.`);
+  console.log(`Installed ${path}. Open a file in T3 with Use Helix on, or run hx-t3 from a T3 terminal.`);
 }
 
 export function spawnReviewEditor(program: string, cwd: string, socketPath: string,
@@ -148,7 +149,9 @@ export function spawnReviewEditor(program: string, cwd: string, socketPath: stri
   return { child, done };
 }
 
-export async function hasReviewCommit(cwd: string): Promise<boolean> {
+export type GitHistory = "not-a-repository" | "unborn" | "committed";
+
+export async function gitHistory(cwd: string): Promise<GitHistory> {
   const git = (args: string[]) => new Promise<string>((done, fail) => {
     execFile("git", ["-C", cwd, ...args], { encoding: "utf8" }, (error, stdout, stderr) => {
       if (error) fail(Object.assign(error, { stderr })); else done(stdout.trim());
@@ -157,16 +160,16 @@ export async function hasReviewCommit(cwd: string): Promise<boolean> {
   try { await git(["rev-parse", "--show-toplevel"]); }
   catch (error) {
     const failure = error as NodeJS.ErrnoException & { stderr?: string };
-    if (failure.code === "ENOENT" || /not a git repository/iu.test(failure.stderr ?? "")) return false;
+    if (failure.code === "ENOENT" || /not a git repository/iu.test(failure.stderr ?? "")) return "not-a-repository";
     throw error;
   }
-  try { await git(["rev-parse", "--verify", "HEAD^{commit}"]); return true; }
+  try { await git(["rev-parse", "--verify", "HEAD^{commit}"]); return "committed"; }
   catch (error) {
     // A missing symbolic branch is an unborn checkout; other HEAD failures stay errors.
     const branch = await git(["symbolic-ref", "--quiet", "HEAD"]).catch(() => undefined);
     if (!branch) throw error;
     try { await git(["show-ref", "--verify", "--quiet", branch]); }
-    catch (missing) { if ((missing as { code?: number }).code === 1) return false; throw error; }
+    catch (missing) { if ((missing as { code?: number }).code === 1) return "unborn"; throw error; }
     throw error;
   }
 }
@@ -204,13 +207,124 @@ async function openPlainEditor(program: string, cwd: string, location: object, a
   }
 }
 
-export async function main(args = process.argv.slice(2)): Promise<void> {
-  const { values, positionals } = parseArgs({ args, allowPositionals: true, options: {
+const CHECK_INTERVAL = 1500;
+// Consecutive checks without a listening socket after which an attached editor counts as gone;
+// one starting alongside this process gets longer to bind its socket.
+const EDITOR_GONE_CHECKS = 3;
+const EDITOR_START_CHECKS = 20;
+// An idle attached bridge syncs at least every 10 checks (15 s).
+const MAX_IDLE_CHECKS = 10;
+
+const pause = (ms: number, signal: AbortSignal) => delay(ms, undefined, { signal }).catch(() => {});
+
+export interface CommitWaitOptions {
+  signal: AbortSignal;
+  listening(): Promise<boolean>;
+  committed(): Promise<boolean>;
+  sleep?(ms: number, signal: AbortSignal): Promise<void>;
+}
+
+/**
+ * Waits for the first commit in an attached editor's checkout, checking less often while none
+ * appears, as an idle {@link syncLoop} does. Resolves to false once the editor is gone.
+ */
+export async function waitForFirstCommit({ signal, listening, committed, sleep = pause }: CommitWaitOptions): Promise<boolean> {
+  let answered = false, misses = 0, interval = 1, due = 0;
+  while (!signal.aborted) {
+    if (!await listening()) {
+      if (++misses >= (answered ? EDITOR_GONE_CHECKS : EDITOR_START_CHECKS)) return false;
+    } else {
+      answered = true; misses = 0;
+      if (--due <= 0) {
+        if (await committed()) return true;
+        interval = Math.min(interval * 2, MAX_IDLE_CHECKS);
+        due = interval;
+      }
+    }
+    await sleep(CHECK_INTERVAL, signal);
+  }
+  return false;
+}
+
+export interface SyncLoopOptions {
+  signal: AbortSignal;
+  /** An attached bridge watches for its editor to go away, and syncs less often while idle. */
+  attach: boolean;
+  /** New batches here wake the loop. */
+  outbox: string;
+  listening(): Promise<boolean>;
+  /** Sets up the editor; resolves to false while it is not ready for that yet. */
+  open(): Promise<boolean>;
+  /** Syncs with the thread; resolves to whether anything changed. */
+  tick(): Promise<boolean>;
+  sleep?(ms: number, signal: AbortSignal): Promise<void>;
+}
+
+/**
+ * Checks the editor every 1.5 s and syncs with the thread after each check, or, while an attached
+ * bridge finds nothing changed, after twice as many checks as the last time, up to 15 s. A batch
+ * landing in the outbox syncs at once.
+ */
+export async function syncLoop({ signal, attach, outbox, listening, open, tick, sleep = pause }: SyncLoopOptions): Promise<void> {
+  let woken = false;
+  let wakeUp = () => {};
+  const watcher = watch(outbox, () => { woken = true; wakeUp(); });
+  watcher.on("error", () => watcher.close());
+  let opened = false, answered = false, misses = 0, interval = 1, due = 0;
+  try {
+    while (!signal.aborted) {
+      if (attach && !await listening()) {
+        if (++misses >= (answered ? EDITOR_GONE_CHECKS : EDITOR_START_CHECKS)) break;
+      } else {
+        answered = true; misses = 0;
+        if (!opened) opened = await open();
+        else if (woken || --due <= 0) {
+          woken = false;
+          interval = (await tick()) || !attach ? 1 : Math.min(interval * 2, MAX_IDLE_CHECKS);
+          due = interval;
+        }
+      }
+      // Only a wake the next check can act on cuts the wait short.
+      const wakeable = opened && misses === 0;
+      await new Promise<void>(done => {
+        if (wakeable && woken) return done();
+        if (wakeable) wakeUp = done;
+        void sleep(CHECK_INTERVAL, signal).then(done);
+      });
+      wakeUp = () => {};
+    }
+  } finally { watcher.close(); }
+}
+
+function parseOptions(args: string[]) {
+  return parseArgs({ args, allowPositionals: true, options: {
     help: { type: "boolean", short: "h" }, thread: { type: "string" }, base: { type: "string" }, pr: { type: "string" }, mode: { type: "string" }, file: { type: "string" }, line: { type: "string" }, column: { type: "string" }, worktree: { type: "string" }, revision: { type: "string" }, location: { type: "string" },
     hx: { type: "string" }, attach: { type: "boolean" }, socket: { type: "string" }, "state-dir": { type: "string" },
     config: { type: "string" }, t3: { type: "string" }, "base-dir": { type: "string" },
     "environment-id": { type: "string" }, batch: { type: "string" },
   } });
+}
+
+export async function main(args = process.argv.slice(2)): Promise<void> {
+  const options = parseOptions(args);
+  try { await run(options); }
+  catch (error) {
+    // An attached bridge runs in a terminal nobody may be watching; say why in the editor.
+    const socket = options.values.attach ? options.values.socket : undefined;
+    if (!socket) throw error;
+    const message = error instanceof T3Error && error.code === "authentication"
+      ? "Your T3 login expired or was revoked. Run hx-t3 setup in a T3 terminal, then open the file in T3 again."
+      : (error as Error).message;
+    const reason = `hx-t3: ${message}`.replace(/[\p{Cc}\u2028\u2029]/gu, " ").slice(0, 500);
+    // The editor may still hand feedback to a previous thread's outbox that no bridge drains now.
+    // Only failure clears it: a sidecar stopped for a restart leaves its successor's binding alone.
+    await sendCommands(socket, ["review-handoff clear"]).catch(() => undefined);
+    await sendCommands(socket, [`echo ${quoteCommand(reason)}`]).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function run({ values, positionals }: ReturnType<typeof parseOptions>): Promise<void> {
   if (values.help) { console.log(help); return; }
   if (process.platform === "win32") throw new Error("HX review requires a Unix command socket. Run hx-t3 in WSL or on your Linux/macOS workspace host.");
   const location = values.location ? JSON.parse(values.location) : {
@@ -235,10 +349,10 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   let environmentId = values["environment-id"];
   let endpoint: string | undefined;
   if (environmentId || values["base-dir"] || runtimeStatePath) {
-    if (environmentId && !runtimeStatePath && !values["base-dir"]) throw new Error("The T3 terminal did not supply its environment. Relaunch Review in HX from the updated T3 server, or pass --base-dir explicitly.");
+    if (environmentId && !runtimeStatePath && !values["base-dir"]) throw new Error("The T3 terminal did not supply its environment. Open the file in T3 again from the updated T3 server, or pass --base-dir explicitly.");
     endpoint = await discoverLocalEndpoint(baseDir, runtimeStatePath);
     const actual = await readEnvironment(endpoint);
-    if (environmentId && environmentId !== actual.environmentId) throw new Error("This terminal belongs to a different T3 environment. Reopen Review in HX in the intended environment.");
+    if (environmentId && environmentId !== actual.environmentId) throw new Error("This terminal belongs to a different T3 environment. Open the file in T3 from the intended environment.");
     environmentId = actual.environmentId;
   }
   const path = values.config ?? configPath(environmentId, endpoint);
@@ -248,6 +362,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (actual.environmentId !== environmentId) throw new Error("The configured MCP connection belongs to another T3 environment. Remove conflicting MCP environment variables or run hx-t3 setup with the intended --base-dir.");
   }
   if (!connection) {
+    if (values.attach) throw new Error("No saved T3 connection. Run hx-t3 setup in a T3 terminal, then open the file in T3 again.");
     console.log("Connecting Helix review to your local T3 server…");
     connection = await pairLocalClient({ baseDir, endpoint, runtimeStatePath, environmentId,
       cliPath: values.t3 ?? process.env.T3CODE_CLI_PATH ?? join(homedir(), ".t3", "bin", "t3") });
@@ -264,19 +379,39 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (await realpath(location.worktreePath) !== await realpath(thread.cwd)) throw new Error("The requested location belongs to another worktree.");
   }
   const boundThread = await client.readThread(threadId);
-  if (boundThread.archived) throw new Error("This T3 thread is archived. Reopen it before editing.");
-  if (command === "open" && !await hasReviewCommit(boundThread.cwd)) {
+  if (boundThread.archived) throw new Error("This T3 thread is archived. Unarchive it, then open the file in T3 again.");
+  const history = command === "open" ? await gitHistory(boundThread.cwd) : "committed";
+  if (history !== "committed") {
     if (mode === "review" || location.baseline || location.revision || values.base || values.pr)
       throw new Error("Review comparisons need a Git repository with a commit. Open a current file without a comparison to edit it.");
     console.log(`Editing ${boundThread.title || "Untitled"} in ${boundThread.cwd} · review feedback becomes available after the first Git commit`);
-    await openPlainEditor(values.hx ?? process.env.HELIX_BIN ?? "hx", boundThread.cwd, location, values.attach ?? false, values.socket);
-    return;
+    if (!values.attach || history === "not-a-repository") {
+      await openPlainEditor(values.hx ?? process.env.HELIX_BIN ?? "hx", boundThread.cwd, location, values.attach ?? false, values.socket);
+      return;
+    }
+    // An attached editor stays open across the first commit (usually the agent's), so wait for it.
+    const socket = values.socket;
+    if (!socket) throw new Error("Attaching before the first Git commit needs --socket.");
+    const committed = await waitForFirstCommit({ signal: new AbortController().signal,
+      listening: () => editorListening(socket),
+      committed: async () => await gitHistory(boundThread.cwd) === "committed" });
+    if (!committed) return;
   }
-  const bridge = await ReviewBridge.open({ client, endpoint: connection.endpoint, threadId,
-    mode, baseline: location.revision ? undefined : values.base, pullRequest: values.pr, stateRoot: values["state-dir"], socketPath: values.socket,
-    onStatus: values.attach ? message => console.log(message) : undefined });
-  if (command === "pending" || command === "discard") {
-    try {
+  const controller = new AbortController();
+  let child: ReturnType<typeof spawn> | undefined;
+  let childDone: Promise<number | null> | undefined;
+  let opened: ReviewBridge | undefined;
+  const stop = () => { controller.abort(); child?.kill("SIGTERM"); };
+  // Registered before the bridge takes its lock, so a stop during startup cannot leave it incomplete.
+  process.once("SIGINT", stop); process.once("SIGTERM", stop);
+  try {
+    const bridge = opened = await ReviewBridge.open({ client, endpoint: connection.endpoint, threadId,
+      mode, baseline: location.revision ? undefined : values.base, pullRequest: values.pr, stateRoot: values["state-dir"], socketPath: values.socket,
+      attach: values.attach, signal: controller.signal,
+      // A restarted sidecar waits out its predecessor's shutdown.
+      lockWait: values.attach ? 10_000 : 0,
+      onStatus: values.attach ? message => console.log(message) : undefined });
+    if (command === "pending" || command === "discard") {
       if (command === "discard") {
         if (!values.batch) throw new Error("Choose a batch from hx-t3 pending, then use hx-t3 discard --batch <name>.");
         await bridge.discard(values.batch);
@@ -285,16 +420,8 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         const pending = await bridge.pending();
         console.log(pending.length ? pending.join("\n") : "No pending feedback for this thread.");
       }
-    } finally { await bridge.close(); }
-    return;
-  }
-  const controller = new AbortController();
-  let child: ReturnType<typeof spawn> | undefined;
-  let childDone: Promise<number | null> | undefined;
-  const stop = () => { controller.abort(); child?.kill("SIGTERM"); };
-  process.once("SIGINT", stop); process.once("SIGTERM", stop);
-  try {
-    if (values.attach) await sendCommands(bridge.socketPath, [`review-open ${quoteCommand(JSON.stringify({ mode }))}`]);
+      return;
+    }
     const thread = await client.readThread(threadId);
     console.log(mode === "review"
       ? `Reviewing ${bridge.pullRequest} · suggestion drafts leave checkout files unchanged`
@@ -307,39 +434,52 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       // Keep the rejection observed while the bridge waits for the socket.
       void childDone.catch(() => {});
     }
-    let opened = false;
-    while (!controller.signal.aborted) {
-      if (!opened) {
+    await syncLoop({ signal: controller.signal, attach: values.attach ?? false, outbox: bridge.outbox,
+      listening: () => editorListening(bridge.socketPath),
+      tick: () => bridge.tick(),
+      open: async () => {
+        // A stopped sidecar returns rather than throws: a failure would clear its successor's binding.
+        const { signal } = controller;
         try {
+          if (signal.aborted) return false;
+          if (values.attach) await sendCommands(bridge.socketPath, [`review-open ${quoteCommand(JSON.stringify({ mode }))}`]);
           await bridge.refresh();
           if (Object.keys(location).some(key => key !== "mode")) {
             if (location.worktreePath && await realpath(location.worktreePath) !== await realpath(thread.cwd)) throw new Error("The requested location belongs to another worktree.");
+            if (signal.aborted) return false;
             await sendCommands(bridge.socketPath, [`review-open ${quoteCommand(JSON.stringify(location))}`]);
-          } else {
+          } else if (!values.attach) {
+            // An attached editor's client chooses what it shows.
+            if (signal.aborted) return false;
             await sendCommands(bridge.socketPath, ["review-next"]).catch(error => {
               if (!/no (uncommitted )?changes/u.test(error.message)) throw error;
+              if (signal.aborted) return [];
               return sendCommands(bridge.socketPath, [`echo ${quoteCommand("No changes in this review range. Space A b chooses an earlier baseline.")}`]);
             });
           }
+          if (signal.aborted) return false;
           await sendCommands(bridge.socketPath, [`review-launch-ready${bridge.pullRequest ? ` ${quoteCommand(bridge.pullRequest)}` : ""}`]);
-          opened = true;
+          return true;
         } catch (error) {
           // HX may still be loading its runtime or refreshing a large review.
           // Keep the editor open while these read-only startup commands retry.
-          if (!/ENOENT|ECONNREFUSED|did not acknowledge|closed before acknowledging|pull request is loading; navigation will be ready when checkout finishes/u.test((error as Error).message)) throw error;
+          if (!/ENOENT|ECONNREFUSED|did not acknowledge|closed before acknowledging|pull request is loading; navigation will be ready when checkout finishes|review comment is being saved/u.test((error as Error).message)) throw error;
+          return false;
         }
-      } else await bridge.tick();
-      await delay(1500, undefined, { signal: controller.signal }).catch(() => {});
-    }
+      } });
     if (childDone) {
       const code = await childDone;
       if (code) throw new Error(`HX exited with status ${code}.`);
     }
+  } catch (error) {
+    // A sidecar stopped for a restart must not reach main()'s clear of its successor's binding.
+    if (values.attach && controller.signal.aborted) return;
+    throw error;
   } finally {
     process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop);
     controller.abort();
     if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-    await bridge.close();
+    await opened?.close();
   }
 }
 

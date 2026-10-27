@@ -39,7 +39,7 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-commits` | Choose a baseline by hash or subject from the latest 200 commits reachable from `HEAD`. |
 | `:review-old` | Focus the old text nearest the cursor. |
 | `:review-refresh` | Reload the buffer from disk; reread the index in index mode, or retain the selected commit in commit mode. Refuses unsaved changes. |
-| `:review-comment <text>` | Send a comment to the agent at once: one comment per selection, or on the selected old text while it is focused, then hands the review off (writing the buffer first if it is modified). Needs a handoff directory (`:review-handoff` or the pi mailbox). A leading `@label` (`:review-comment @pi-2 rename this`) addresses the pi session with that label. While reviewing a pull request it adds a pending pull request comment on the primary selection instead. Use `%%` for a literal `%`. |
+| `:review-comment <text>` | Send a comment to the agent at once: one comment per selection, or on the selected old text while it is focused, writing the buffer first if it is modified. Pending comments are not included; they wait for the next `:review-send`. Needs a handoff directory (`:review-handoff` or the pi mailbox). A leading `@label` (`:review-comment @pi-2 rename this`) addresses the pi session with that label. In a T3 Work together session (`HELIX_REVIEW_MODE=work`) it adds pending comments instead, which `:review-send` or `:review-send-pr` hands off; a leading `@label` addresses that send. While reviewing a pull request it adds a pending pull request comment on the primary selection instead. Use `%%` for a literal `%`. |
 | `:review-ask <text>` | Like `:review-comment` outside a pull request review, also while reviewing one: the comment always goes to the agent and is never posted to GitHub. |
 | `:review-comments` | Pick a pending comment (kind `pi` for the agent, `pr` or `reply` for the pull request), or while reviewing a pull request one of its comment threads, by kind, author, place or text, and jump to its line in the current text. |
 | `:review-uncomment [count]` | Drop the latest pending comment of either kind, or the `count` latest ones, and show how many remain. |
@@ -61,8 +61,9 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-baseline-pick` | Pick the baseline from the first-parent history of `HEAD` (up to 300 commits: commit, age, author, subject), with `●` on the current baseline, `base` on the merge base with the base branch (the pull request's while reviewing one, else `origin/HEAD`, `develop`, `main` or `master`), `pi` on the baseline the pi hook last sent and `HEAD` marked; the current baseline is preselected. Choosing a commit works like `:review-baseline <commit>` and pins it as yours (`*`), except the `pi` row, which follows the hook again. `Space A b` in the default keymap; `Space A B` refreshes the buffer's review. |
 | `:review-older` | Move the baseline to its first parent (pinning `HEAD` first when none is set) and refresh every review; the status shows `Baseline <commit> <subject> (N behind HEAD)`. `Space A -` in the default keymap. |
 | `:review-newer` | Move the baseline to the next commit towards `HEAD` on its ancestry path and refresh every review. `Space A +` in the default keymap. |
-| `:review-handoff <dir> [label]` | Export the batches of the explicit handoffs (`:review-comment`, `:review-send`, `:review-commit`, `:review-commit-all`) to `<dir>`. An optional quoted display label stays in the `review` statusline element, including in scratch buffers; it does not set the batch's `@target`. Setting a directory without a label clears the previous label. Writing a buffer never hands anything off. Without it, the default is `<workspace>/.pi/helix-review/outbox` when that directory exists (the pi extension creates it) and every reviewed file and pending comment is in the workspace. `clear` returns to that default and clears the label. Directory changes are refused while a comment save is in progress. |
+| `:review-handoff <dir> [label]` | Export the batches of the explicit handoffs (`:review-comment`, `:review-send`, `:review-send-pr`, `:review-commit`, `:review-commit-all`) to `<dir>`. An optional quoted display label stays in the `review` statusline element, including in scratch buffers; it does not set the batch's `@target`. Setting a directory without a label clears the previous label. Writing a buffer never hands anything off. Without it, the default is `<workspace>/.pi/helix-review/outbox` when that directory exists (the pi extension creates it) and every reviewed file and pending comment is in the workspace. `clear` returns to that default and clears the label. Directory changes are refused while a comment save is in progress. |
 | `:review-send [text]` | Export the handoff batch now without writing any file, for example to acknowledge a review without edits; optional text goes to the agent as an instruction (the batch's `request`). A leading `@label` (`:review-send @pi-2 [text]`) addresses one of several pi sessions (the batch's `target`). |
+| `:review-send-pr [summary]` | Hand back like `:review-send`, asking the agent to publish the pending comments and saved edits (of every file changed since `HEAD`, open in a buffer or not) as one review on the checkout's pull request: each comment inline on its lines, each edit as a suggestion on the lines it replaces (the edits are diffed against `HEAD`, the pull request's head), and the summary as the review body. The agent does not commit, stage, push or revert your edits. Refuses when there are no pending comments, no changes since `HEAD` and no summary. A leading `@label` addresses a pi session. `Space A P` in the default keymap. |
 | `:review-commit [subject]` | Hand back like `:review-send`, asking the agent to commit exactly what is staged in the git index (optionally with that subject, and addressed to a session with a leading `@label`). Refuses when nothing is staged, naming how many of the buffer's hunks are already committed in `HEAD` if any. |
 | `:review-diff` | Show one unified diff of every file changed since the review baseline (with none set, `HEAD` is pinned as it, like `:review-baseline HEAD`) in a read-only scratch buffer; running it again, or `:review-baseline` (as the pi hook does after each edit), refreshes that buffer in place. File headers are workspace-relative paths (`--- <path>`), so `gf` opens a file. |
 | `:review-diff-open` | In the `:review-diff` buffer, open the file of the hunk under the cursor at the current line it shows (the next current line on a removed line). |
@@ -147,23 +148,26 @@ comments; the next explicit handoff sends them to the selected directory.
 
 ### Handing a review to T3 Code
 
-The `contrib/t3-helix-review` integration opens HX bound to one T3 thread and its
-worktree. Install its launcher with
-`node contrib/t3-helix-review/cli.ts install`, then run `hx-t3 setup` and `hx-t3`
-from the checkout. `hx-t3 --thread <thread-link-or-id>` chooses a destination
-explicitly; `--base <revision>` chooses the retained review range.
+The `contrib/t3-helix-review` integration binds HX to one T3 thread and its
+worktree. With **Use Helix** on, T3 starts one HX per checkout and opens files
+and diffs in it; its `hx-t3` bridge delivers your feedback to the thread you are
+viewing. Install the bridge with `node contrib/t3-helix-review/cli.ts install`
+and run `hx-t3 setup` once in a T3 terminal. In a plain terminal, `hx-t3` from
+the checkout opens HX itself; `hx-t3 --thread <thread-link-or-id>` chooses a
+destination explicitly and `--base <revision>` the retained review range.
 
 Ask about selected code with `Space A a`, including deleted text focused with
-`:review-old`. Save corrections normally, then use `:review-send [instruction]`
-to hand them back. Replies appear in the T3 thread. `:review-commit [subject]`
-asks the agent to commit exactly the staged content. Saving alone sends nothing.
-This is **Work together** mode. The bridge retains its baseline across agent
-commits and editor restarts. **Review a PR** (`hx-t3 --mode review`, or `--pr <url>`)
-opens a separate editor whose code buffers are suggestion drafts based on the
-PR head. Editing them leaves checkout files unchanged; preview and publish
-comments and included suggestions through T3's review controls. Ask requests
-analysis and proposed code from the agent. Linking a PR does not change modes.
-See the integration's README for native T3 actions and connection options.
+`:review-old`. `Space A c` adds a pending comment. Save corrections normally,
+then use `:review-send [instruction]` (`Space A S`) to hand the comments and
+edits back. To review the thread's pull request, `:review-send-pr [summary]`
+(`Space A P`) asks the agent to post the comments as inline review comments and
+the edits as suggestions; your edits stay uncommitted in the checkout. Replies
+appear in the T3 thread. `:review-commit [subject]` asks the agent to commit
+exactly the staged content. Saving alone sends nothing. This is **Work together**
+mode. **Review a PR** (`hx-t3 --mode review`, or `--pr <url>`) opens a separate
+editor whose code buffers are suggestion drafts based on the PR head; editing
+them leaves checkout files unchanged. See the integration's README for
+connection options.
 
 ### Handing a review to pi
 
@@ -261,7 +265,7 @@ like this:
    (`Sent 2 comments to the agent`). You watch the agent's edits arrive and
    read its answer in pi. A comment that could not be sent (another reviewed
    buffer has unsaved changes, say) stays pending and goes with the next
-   handoff: `:review-comments` lists pending comments and jumps to one;
+   `:review-send`: `:review-comments` lists pending comments and jumps to one;
    `:review-uncomment [count]` drops the latest. A pending comment is shown
    below the last line it covers (below the old lines for a comment on old
    text), pointing up at it: `▲ pi │ text` (`pr`, or `reply` for a reply to a
@@ -302,7 +306,7 @@ on to it.
 
 These commands are built into the default keymap under `Space A` in normal mode
 (see [review mode](./keymap.md#review-mode)): `Space A f` picks a file, `Space A d` shows the
-diff, `Space A o` focuses old text, `Space A c` and `Space A a` send a comment to the agent (`Space A C` lists pending ones), `Space A s` stages, `Space A m` asks the agent
+diff, `Space A o` focuses old text, `Space A c` and `Space A a` send a comment to the agent (`Space A C` lists pending ones), `Space A s` stages, `Space A S` hands the review back (`Space A P` as a pull request review), `Space A m` asks the agent
 to commit (`Space A M` stages everything first), and `Space A v` / `Space A V`
 mark or unmark the current committed or pull request change. `Space A n` /
 `Space A N` move between uncommitted changes, or all changes while reviewing
@@ -449,8 +453,8 @@ everything stays pending and the status shows the error.
 - `:review-files` says `no files changed since <commit>` although the agent did
   work: it committed, and after your last handoff the next turn moved the
   baseline to that commit. `:review-baseline <commit>` (for example
-  `:review-baseline HEAD~1`) re-pins an earlier one, until pi's next refresh
-  sends its own baseline again.
+  `:review-baseline HEAD~1`) pins an earlier one, which pi's refreshes keep
+  until you pick the `pi` row in `Space A b` or run `:review-baseline clear`.
 - `... also changed on disk: :reload discards your edits, :w! overwrites the
   agent's`: you and the agent edited the same file. `:reload` keeps the
   agent's version, `:w!` keeps yours.

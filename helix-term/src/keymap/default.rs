@@ -246,6 +246,7 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
                 "m" => review_commit_staged,
                 "M" => review_commit_all,
                 "S" => review_send_handoff,
+                "P" => review_send_pr_review,
                 "-" => review_baseline_older,
                 "+" => review_baseline_newer,
                 "n" => review_next_change,

@@ -19,7 +19,7 @@ use helix_view::{
     editor::{AutoSaveAfterDelay, Severity, StatusLineElement},
     graphics::Rect,
     input::parse_macro,
-    review::{HunkStage, OldBlock, ReviewBaseline},
+    review::{HunkStage, OldBlock, ReviewBaseline, ReviewBatch},
 };
 use tempfile::TempDir;
 #[cfg(not(windows))]
@@ -4618,6 +4618,207 @@ async fn review_send_exports_the_handoff_batch_without_writing() -> anyhow::Resu
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn work_session_comments_wait_for_a_send_as_pull_request_review() -> anyhow::Result<()> {
+    use helix_view::editor::ReviewMode;
+    let repo = Repo::new("a\nb\n", "a\nb\n", "a\nB\n");
+    let _cwd = Cwd::enter(repo.dir.path());
+    let outbox = tempfile::tempdir()?;
+    let mut app = repo.app()?;
+    app.editor.review_mode = Some(ReviewMode::Work);
+    let keys = format!(
+        ":review-handoff {}<ret>:review HEAD<ret>2gg:review-comment rename this<ret>",
+        outbox.path().display()
+    );
+    send_keys(&mut app, &keys).await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(app.editor.review_batch.comments().len(), 1);
+    assert!(take_batches(outbox.path()).is_empty());
+
+    send_keys(&mut app, ":review-send-pr Looks close<ret>").await?;
+    assert_status_not_error(&app.editor);
+    let batches = take_batches(outbox.path());
+    assert_eq!(batches.len(), 1);
+    assert_eq!(
+        batches[0]["request"],
+        serde_json::json!({ "kind": "pr-review", "summary": "Looks close" })
+    );
+    assert_eq!(batches[0]["comments"][0]["comment"], "rename this");
+    assert_eq!(batches[0]["comments"][0]["start_line"], 2);
+    assert_eq!(
+        batches[0]["files"][0]["path"],
+        serde_json::json!(helix_stdx::path::canonicalize(&repo.file))
+    );
+    assert!(app.editor.review_batch.comments().is_empty());
+
+    send_keys(&mut app, "<space>AP").await?;
+    assert_status_not_error(&app.editor);
+    let batches = take_batches(outbox.path());
+    assert_eq!(batches.len(), 1);
+    assert_eq!(
+        batches[0]["request"],
+        serde_json::json!({ "kind": "pr-review" })
+    );
+    assert_eq!(batches[0]["comments"], serde_json::json!([]));
+
+    // Without comments, changes since HEAD or a summary there is nothing to publish.
+    git_ok(repo.dir.path(), &["commit", "-am", "edit"]);
+    send_keys(&mut app, "<space>AP").await?;
+    assert_error(&app, "nothing to publish");
+    assert!(take_batches(outbox.path()).is_empty());
+    send_keys(&mut app, ":review-send-pr Ship it<ret>").await?;
+    assert_status_not_error(&app.editor);
+    let batches = take_batches(outbox.path());
+    assert_eq!(batches.len(), 1);
+    assert_eq!(
+        batches[0]["request"],
+        serde_json::json!({ "kind": "pr-review", "summary": "Ship it" })
+    );
+
+    app.editor.review_mode = Some(ReviewMode::Review);
+    send_keys(&mut app, ":review-send-pr<ret>").await?;
+    assert_error(&app, "Publish review");
+    assert!(take_batches(outbox.path()).is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn work_session_asks_leave_pending_comments_and_their_target_for_the_review(
+) -> anyhow::Result<()> {
+    use helix_view::editor::ReviewMode;
+    let repo = Repo::new("a\nb\nc\n", "a\nb\nc\n", "a\nb\nc\n");
+    let _cwd = Cwd::enter(repo.dir.path());
+    let outbox = tempfile::tempdir()?;
+    let mut app = repo.app()?;
+    app.editor.review_mode = Some(ReviewMode::Work);
+    let keys = format!(
+        ":review-handoff {}<ret>:review HEAD<ret>2gg:review-comment @t3-abcd1234 rename this<ret>",
+        outbox.path().display()
+    );
+    send_keys(&mut app, &keys).await?;
+    assert_status_not_error(&app.editor);
+    let pending: Vec<_> = (app.editor.review_batch.comments().iter())
+        .map(|comment| comment.comment.as_str())
+        .collect();
+    assert_eq!(pending, ["rename this"]);
+    assert!(take_batches(outbox.path()).is_empty());
+
+    // An ask about another selection, sent once the edit before it is saved, carries only itself.
+    send_keys(&mut app, "3ggiC<esc>:review-ask why?<ret>").await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(repo.disk(), "a\nb\nCc\n");
+    let batches = take_batches(outbox.path());
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0]["request"], serde_json::json!({ "kind": "ask" }));
+    let comments = batches[0]["comments"].as_array().unwrap();
+    assert_eq!(comments.len(), 1, "{comments:?}");
+    assert_eq!(comments[0]["comment"], "why?");
+    assert!(batches[0]
+        .get("target")
+        .is_none_or(serde_json::Value::is_null));
+    assert_eq!(app.editor.review_batch.comments().len(), 1);
+
+    send_keys(&mut app, "<space>AP").await?;
+    assert_status_not_error(&app.editor);
+    let batches = take_batches(outbox.path());
+    assert_eq!(batches.len(), 1);
+    assert_eq!(
+        batches[0]["request"],
+        serde_json::json!({ "kind": "pr-review" })
+    );
+    assert_eq!(batches[0]["target"], "t3-abcd1234");
+    let comments = batches[0]["comments"].as_array().unwrap();
+    assert_eq!(comments.len(), 1, "{comments:?}");
+    assert_eq!(comments[0]["comment"], "rename this");
+    assert_eq!(comments[0]["start_line"], 2);
+    assert!(app.editor.review_batch.comments().is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_ask_leaves_its_comments_but_not_its_request_or_target() -> anyhow::Result<()> {
+    let repo = Repo::new("a\nb\nc\n", "a\nb\nc\n", "a\nb\nc\n");
+    let _cwd = Cwd::enter(repo.dir.path());
+    let outbox = tempfile::tempdir()?;
+    let mut app = repo.app()?;
+    app.editor.review_mode = Some(helix_view::editor::ReviewMode::Work);
+    break_handoff(&mut app, repo.dir.path()).await?;
+    send_keys(&mut app, ":review HEAD<ret>3gg:review-comment pending<ret>").await?;
+    assert_status_not_error(&app.editor);
+    send_keys(&mut app, "2gg:review-ask @t3-abcd1234 why?<ret>").await?;
+    assert_eq!(app.editor.review_batch.comments().len(), 2);
+
+    let send = format!(
+        ":review-handoff {}<ret>:review-send<ret>",
+        outbox.path().display()
+    );
+    send_keys(&mut app, &send).await?;
+    assert_status_not_error(&app.editor);
+    let batches = take_batches(outbox.path());
+    assert_eq!(batches.len(), 1);
+    assert!(batches[0].get("request").is_none(), "{}", batches[0]);
+    assert!(batches[0].get("target").is_none(), "{}", batches[0]);
+    let comments: Vec<_> = (batches[0]["comments"].as_array().unwrap().iter())
+        .map(|comment| comment["comment"].as_str().unwrap())
+        .collect();
+    assert_eq!(comments, ["pending", "why?"]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pull_request_reviews_carry_saved_edits_whose_buffers_are_closed() -> anyhow::Result<()> {
+    use helix_view::editor::ReviewMode;
+    let repo = Repo::new("a\n", "a\n", "a\n");
+    let dir = repo.dir.path();
+    let other = dir.join("other.txt");
+    fs::write(&other, "x\n")?;
+    fs::create_dir_all(dir.join("gone/deeper"))?;
+    fs::write(dir.join("gone/deeper/removed.txt"), "removed\n")?;
+    git_ok(dir, &["add", "other.txt", "gone"]);
+    git_ok(dir, &["commit", "-m", "more"]);
+    let head = git_ok(dir, &["rev-parse", "HEAD"]);
+    let other_blob = git_ok(dir, &["rev-parse", "HEAD:other.txt"]);
+    let removed_blob = git_ok(dir, &["rev-parse", "HEAD:gone/deeper/removed.txt"]);
+    // A deletion that removes its whole directory.
+    fs::remove_dir_all(dir.join("gone"))?;
+    let _cwd = Cwd::enter(dir);
+    let outbox = tempfile::tempdir()?;
+    let mut app = repo.app()?;
+    app.editor.review_mode = Some(ReviewMode::Work);
+    let keys = format!(
+        ":review-handoff {}<ret>:o other.txt<ret>iX<esc>:w<ret>",
+        outbox.path().display()
+    );
+    send_keys(&mut app, &keys).await?;
+    assert_eq!(fs::read_to_string(&other)?, "Xx\n");
+    send_keys(&mut app, ":buffer-close<ret>").await?;
+    assert_status_not_error(&app.editor);
+    assert_eq!(app.editor.documents().count(), 1);
+
+    send_keys(&mut app, "<space>AP").await?;
+    assert_status_not_error(&app.editor);
+    let batches = take_batches(outbox.path());
+    assert_eq!(batches.len(), 1);
+    let files = batches[0]["files"].as_array().unwrap();
+    let baseline = |name: &str| {
+        (files.iter())
+            .find(|file| file["path"].as_str().unwrap().ends_with(name))
+            .map(|file| file["baseline"].clone())
+    };
+    let at_head = |blob: &str| serde_json::json!({ "kind": "git-commit", "commit_oid": head, "blob_oid": blob });
+    assert_eq!(
+        baseline("/other.txt"),
+        Some(at_head(&other_blob)),
+        "{files:?}"
+    );
+    assert_eq!(
+        baseline("/gone/deeper/removed.txt"),
+        Some(at_head(&removed_blob)),
+        "{files:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn handoff_labels_stay_visible_without_review_and_do_not_address_batches(
 ) -> anyhow::Result<()> {
     let repo = Repo::new("old\n", "old\n", "new\n");
@@ -5032,7 +5233,7 @@ async fn handoff_rebinding_waits_for_an_in_flight_comment_save() -> anyhow::Resu
     )
     .await?;
     // Hold the marker that :review-comment sets until its asynchronous write finishes.
-    app.editor.review_send_on_write = Some(doc!(app.editor).id());
+    app.editor.review_send_on_write = Some((doc!(app.editor).id(), ReviewBatch::default()));
     send_keys(
         &mut app,
         &format!(
@@ -5455,6 +5656,55 @@ async fn conversation_checkpoint_opens_editable_current_file_and_keeps_its_pin(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn head_baseline_from_t3_follows_head_after_a_commit() -> anyhow::Result<()> {
+    let repo = Repo::new("head\n", "head\n", "edited\n");
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let old = git_ok(dir, &["rev-parse", "HEAD"]);
+    let mut app = repo.app()?;
+    let location = serde_json::json!({"baseline": "HEAD", "filePath": "file.txt"});
+    send_keys(&mut app, &format!(":review-open '{location}'<ret>")).await?;
+    assert_eq!(app.editor.review_baseline.as_deref(), Some(old.as_str()));
+    assert_eq!(app.editor.review_user_pin.as_deref(), Some("HEAD"));
+    git_ok(dir, &["commit", "-am", "edited"]);
+    let new = git_ok(dir, &["rev-parse", "HEAD"]);
+    // The attached bridge re-sends its own fixed baseline after the commit.
+    app.editor.socket_command = true;
+    send_keys(&mut app, &format!(":review-baseline {old}<ret>")).await?;
+    app.editor.socket_command = false;
+    assert_eq!(app.editor.review_baseline.as_deref(), Some(new.as_str()));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn baseline_from_t3_stays_pinned_when_it_equals_the_hooks() -> anyhow::Result<()> {
+    let repo = Repo::new("head\n", "head\n", "edited\n");
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let old = git_ok(dir, &["rev-parse", "HEAD"]);
+    let mut app = repo.app()?;
+    app.editor.socket_command = true;
+    send_keys(&mut app, &format!(":review-baseline {old}<ret>")).await?;
+    app.editor.socket_command = false;
+    let location = serde_json::json!({"baseline": old, "filePath": "file.txt"});
+    send_keys(&mut app, &format!(":review-open '{location}'<ret>")).await?;
+    assert_eq!(app.editor.review_baseline.as_deref(), Some(old.as_str()));
+    // The attached bridge re-sends the same baseline after a saved edit.
+    app.editor.socket_command = true;
+    send_keys(&mut app, &format!(":review-baseline {old}<ret>")).await?;
+    app.editor.socket_command = false;
+    assert_eq!(app.editor.review_baseline.as_deref(), Some(old.as_str()));
+    git_ok(dir, &["commit", "-am", "edited"]);
+    let new = git_ok(dir, &["rev-parse", "HEAD"]);
+    // A new thread's bridge sends its own baseline after T3's open.
+    app.editor.socket_command = true;
+    send_keys(&mut app, &format!(":review-baseline {new}<ret>")).await?;
+    app.editor.socket_command = false;
+    assert_eq!(app.editor.review_baseline.as_deref(), Some(old.as_str()));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn conversation_checkpoint_rejects_non_checkpoint_refs_outside_history() -> anyhow::Result<()>
 {
     let repo = Repo::new("head\n", "before\n", "after\n");
@@ -5500,6 +5750,48 @@ async fn conversation_checkpoint_opens_deleted_current_file_without_recreating_i
     assert!(doc.review.is_some());
     assert!(!repo.file.exists());
     assert!(!doc.is_modified());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_open_shows_deletions_missing_from_the_index_or_their_directory(
+) -> anyhow::Result<()> {
+    let repo = Repo::new("base\n", "base\n", "base\n");
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    fs::create_dir_all(dir.join("gone"))?;
+    for file in ["committed.txt", "gone/nested.txt", "staged.txt"] {
+        fs::write(dir.join(file), "deleted text\n")?;
+    }
+    git_ok(dir, &["add", "."]);
+    git_ok(dir, &["commit", "-m", "merge base"]);
+    let merge_base = git_ok(dir, &["rev-parse", "HEAD"]);
+    git_ok(dir, &["rm", "-q", "committed.txt", "gone/nested.txt"]);
+    git_ok(dir, &["commit", "-m", "delete"]);
+    git_ok(dir, &["rm", "-q", "staged.txt"]);
+    assert!(!dir.join("gone").exists());
+    for (file, baseline) in [
+        ("committed.txt", merge_base.as_str()),
+        ("gone/nested.txt", merge_base.as_str()),
+        ("staged.txt", merge_base.as_str()),
+        ("staged.txt", "HEAD"),
+    ] {
+        let mut app = AppBuilder::new().build()?;
+        let location = serde_json::json!({"baseline": baseline, "filePath": file});
+        send_keys(&mut app, &format!(":review-open '{location}'<ret>")).await?;
+        assert_status_not_error(&app.editor);
+        let path = dir.join(file);
+        let doc = doc!(app.editor);
+        assert_eq!(
+            doc.path(),
+            Some(path.as_path()),
+            "{file} against {baseline}"
+        );
+        assert!(doc.readonly);
+        assert_eq!(doc.text().len_bytes(), 0);
+        assert!(doc.review.as_ref().unwrap().is_deleted_file());
+        assert!(!path.exists());
+    }
     Ok(())
 }
 

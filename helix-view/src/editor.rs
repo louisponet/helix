@@ -1304,12 +1304,14 @@ pub struct Editor {
     /// Display name for the handoff destination, independent of a batch's `@target`.
     pub review_handoff_label: Option<String>,
     /// The baseline the reviewer chose (`G b`, `G -`, `G +` or a typed `:review-baseline`) over
-    /// the one the pi hook sent; while set, the hook's `:review-baseline` only refreshes it.
+    /// the one the pi hook sent; while set, the hook's `:review-baseline` only refreshes it. `HEAD`,
+    /// set by a T3 open against HEAD, follows HEAD.
     pub review_user_pin: Option<String>,
     /// The baseline the pi hook last sent over the command socket.
     pub review_hook_baseline: Option<String>,
-    /// The document `:review-comment` is writing, whose save exports the review batch.
-    pub review_send_on_write: Option<DocumentId>,
+    /// The document an ask (`:review-ask`) is writing, and the ask's own batch, exported once the
+    /// save is done.
+    pub review_send_on_write: Option<(DocumentId, ReviewBatch)>,
     /// What `search_next_or_review_next` and `search_prev_or_review_prev` move between: the last
     /// used of searching and walking review changes.
     pub nav_mode: NavMode,

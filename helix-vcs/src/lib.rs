@@ -80,8 +80,13 @@ impl DiffProviderRegistry {
     }
 
     /// Get the given file's content staged in the VCS index together with a hex identifier of
-    /// that content. Unlike [`Self::get_diff_base`] the reason for a failure is returned.
-    pub fn get_index_base(&self, file: &Path, trust_full: bool) -> Result<(Vec<u8>, String)> {
+    /// that content, or `None` when the index has no entry for it. Unlike [`Self::get_diff_base`]
+    /// the reason for a failure is returned.
+    pub fn get_index_base(
+        &self,
+        file: &Path,
+        trust_full: bool,
+    ) -> Result<Option<(Vec<u8>, String)>> {
         let mut first_err = None;
         for provider in &self.providers {
             match provider.get_index_base(file, trust_full) {
@@ -369,11 +374,11 @@ impl DiffProvider {
         }
     }
 
-    fn get_index_base(&self, file: &Path, trust_full: bool) -> Result<(Vec<u8>, String)> {
+    fn get_index_base(&self, file: &Path, trust_full: bool) -> Result<Option<(Vec<u8>, String)>> {
         match self {
             #[cfg(feature = "git")]
             Self::Git => git::get_index_base(file, trust_full)
-                .map(|(data, oid)| (data, oid.to_hex().to_string())),
+                .map(|entry| entry.map(|(data, oid)| (data, oid.to_hex().to_string()))),
             Self::None => bail!("No diff support compiled in"),
         }
     }

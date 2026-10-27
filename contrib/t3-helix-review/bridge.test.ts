@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createServer } from "node:net";
 import { mkdtemp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { ReviewBridge, git, quoteCommand, sendCommands } from "./bridge.ts";
 import type { ReviewClient } from "./bridge.ts";
+import { T3Error } from "./t3.ts";
 import type { T3ThreadInfo, T3SendResult } from "./t3.ts";
 import { threadIdFromArgument } from "./cli.ts";
 
@@ -38,6 +39,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   };
   const commands: string[] = [];
   let attachError: string | undefined;
+  const failures = new Map<string, string>();
   const socketPath = join(dir, "hx.sock");
   const server = createServer(socket => {
     let pending = "";
@@ -45,7 +47,8 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
       const lines = (pending + bytes.toString()).split("\n"); pending = lines.pop()!;
       for (const line of lines) {
         commands.push(line);
-        socket.write(attachError && line.startsWith("review-pr-attach ") ? `error ${attachError}\n` : "ok\n");
+        const failure = failures.get(line) ?? (line.startsWith("review-pr-attach ") ? attachError : undefined);
+        socket.write(failure ? `error ${failure}\n` : "ok\n");
       }
     });
   });
@@ -64,6 +67,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   return { dir, repo, baseline, blob, thread, linked, client, calls, commands, options, batch, writeBatch,
     get bridge() { return bridge; }, fail(value: boolean) { failure = value; },
     failAttach(message: string) { attachError = message; },
+    failCommand(command: string, message: string) { failures.set(command, message); },
     async reopen(mode: "work" | "review" = "work") { await bridge.close(); bridge = await ReviewBridge.open({ ...options, mode }); return bridge; } };
 }
 
@@ -275,6 +279,24 @@ test("simultaneous stale-lock recovery cannot rename the new owner's lock", { ti
   finally { await reopened.close(); }
 });
 
+test("a bridge allowed to wait takes the lock once its live predecessor closes", async t => {
+  const f = await fixture(t);
+  const originalKill = process.kill;
+  let liveOwnerSeen!: () => void;
+  const ownerChecked = new Promise<void>(done => { liveOwnerSeen = done; });
+  t.mock.method(process, "kill", (pid: number, signal?: NodeJS.Signals | number) => {
+    if (pid === process.pid && signal === 0) liveOwnerSeen();
+    return originalKill(pid, signal);
+  });
+  const opening = ReviewBridge.open({ ...f.options, lockWait: 10_000 });
+  await ownerChecked;
+  await f.bridge.close();
+  const successor = await opening;
+  t.after(() => successor.close());
+  assert.equal(successor.baseline, f.baseline);
+  await assert.rejects(ReviewBridge.open({ ...f.options, lockWait: 1 }), /already has an HX review open/u);
+});
+
 test("legacy and incomplete lock owners require explicit cleanup", async t => {
   const f = await fixture(t);
   await f.bridge.close();
@@ -412,6 +434,20 @@ test("renaming a bound thread refreshes the visible HX label without reconnectin
   assert.equal(f.calls.length, 0);
 });
 
+test("a stopped bridge sends nothing more to the editor, even for a new socket or title", async t => {
+  const f = await fixture(t);
+  const controller = new AbortController();
+  await f.bridge.close();
+  const bridge = await ReviewBridge.open({ ...f.options, signal: controller.signal }); t.after(() => bridge.close());
+  controller.abort();
+  f.thread.title = "Renamed after stop";
+  assert.equal(await bridge.refresh(), true);
+  await writeFile(join(f.repo, "file.txt"), "keep\nchanged after stop\nend\n");
+  f.thread.latestRunId = "run-2";
+  await bridge.tick();
+  assert.deepEqual(f.commands, []);
+});
+
 test("an accepted commit with a lost response retries after HEAD advances using the same frozen queue request", async t => {
   const f = await fixture(t);
   const file = join(f.repo, "file.txt");
@@ -488,4 +524,178 @@ test("pending lists only batches in order and discard archives the original with
   assert.match(f.calls[0].message, /Keep this pending/u);
   assert.ok(!f.calls[0].message.includes("Discard this request"));
   assert.deepEqual(await f.bridge.pending(), []);
+});
+
+test("a pull request review waits for a linked PR, then asks the agent to publish it through T3", async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.repo, "file.txt"), "keep\nnew check\nend\n");
+  await f.writeBatch("pr.json", { request: { kind: "pr-review", summary: "Two nits" } });
+  await f.bridge.tick();
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(await f.bridge.pending(), ["pr.json"]);
+  assert.deepEqual(await readdir(join(f.bridge.dir, "deliveries")), []);
+  assert(f.commands.some(command => command.startsWith("echo ") && command.includes("Link a pull request to this thread first")));
+
+  f.linked.push("https://github.com/team/project/pull/7");
+  await f.bridge.tick();
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].mode, "auto");
+  const { message } = f.calls[0];
+  assert(message.includes("Publish the review on https://github.com/team/project/pull/7 with T3's submit_pull_request_review MCP tool"));
+  assert(message.includes(`headSha "${f.baseline}"`));
+  assert(message.includes(`If the tool reports that the pull request's head is not ${f.baseline}, stop and tell the user`));
+  assert.match(message, /suggestion fence/u);
+  assert.match(message, /Only if that tool is unavailable, publish the same review with the host's CLI/u);
+  const details = handoffDetails(message);
+  assert.deepEqual(details.request, { kind: "pr-review", summary: "Two nits" });
+  assert.equal(details.files[0].user_edits.against, "head");
+  assert.match(details.files[0].user_edits.hunks.join(""), /^@@ -2 \+2 @@.*\n-old check\n\+new check\n$/u);
+  assert.deepEqual(await f.bridge.pending(), []);
+});
+
+test("an empty pull request review is dropped without asking the agent to publish anything", async t => {
+  const f = await fixture(t);
+  f.linked.push("https://github.com/team/project/pull/7");
+  await f.writeBatch("empty.json", { request: { kind: "pr-review" } });
+  await f.bridge.tick();
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(await f.bridge.pending(), []);
+  assert.deepEqual(await readdir(join(f.bridge.dir, "deliveries")), []);
+  assert(f.commands.some(command => command.startsWith("echo ") && command.includes("nothing published")));
+});
+
+test("a pull request review on a thread with several linked PRs targets the checkout's branch", async t => {
+  const f = await fixture(t);
+  f.linked.push("https://github.com/team/project/pull/7", "https://github.com/team/project/pull/8");
+  await writeFile(join(f.repo, "file.txt"), "keep\nnew check\nend\n");
+  await f.writeBatch("pr.json", { request: { kind: "pr-review" } });
+  await f.bridge.tick();
+  assert.equal(f.calls.length, 1);
+  assert(f.calls[0].message.includes("Publish the review on the one of https://github.com/team/project/pull/7, https://github.com/team/project/pull/8 whose head branch is main"));
+});
+
+test("a pull request review is prepared again when HEAD moves while it is built", async t => {
+  const f = await fixture(t);
+  f.linked.push("https://github.com/team/project/pull/7");
+  const file = join(f.repo, "file.txt");
+  const other = join(f.repo, "other.txt");
+  await writeFile(other, "other\n");
+  await git(f.repo, ["add", "other.txt"]); await git(f.repo, ["commit", "-m", "other"]);
+  const head = (await git(f.repo, ["rev-parse", "HEAD"])).trim();
+  const files = await Promise.all([file, other].map(async path => ({ path,
+    baseline: { kind: "git-commit", commit_oid: head, blob_oid: (await git(f.repo, ["rev-parse", `${head}:${relative(f.repo, path)}`])).trim() } })));
+  await writeFile(file, "keep\nnew check\nend\n");
+  await writeFile(other, "OTHER\n");
+  await f.writeBatch("pr.json", { files, request: { kind: "pr-review" } });
+  // The agent commits file.txt's edit after the handoff read file.txt against HEAD.
+  const originalStat = fs.stat;
+  let reads = 0;
+  const probe = t.mock.method(fs, "stat", async (...args: Parameters<typeof originalStat>) => {
+    if (args[0] === other && ++reads === 2) { await git(f.repo, ["add", "file.txt"]); await git(f.repo, ["commit", "-m", "agent"]); }
+    return originalStat(...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { probe.mock.restore(); syncBuiltinESMExports(); });
+  await f.bridge.tick();
+  assert(f.commands.some(command => command.startsWith("echo ") && command.includes("HEAD moved while the pull request review was prepared")));
+  const moved = (await git(f.repo, ["rev-parse", "HEAD"])).trim();
+  assert.notEqual(moved, head);
+  assert.equal(f.calls.length, 1);
+  assert(f.calls[0].message.includes(`headSha "${moved}"`));
+  assert(!f.calls[0].message.includes(head));
+  // file.txt's edit is in the new HEAD, so only other.txt's edit is left to suggest.
+  assert.deepEqual(handoffDetails(f.calls[0].message).files.map((entry: { path: string }) => entry.path), [other]);
+  assert.equal((await readdir(join(f.bridge.dir, "deliveries"))).length, 1);
+  assert.deepEqual(await f.bridge.pending(), []);
+});
+
+test("a tick reports whether anything changed, so an idle bridge can sync less often", async t => {
+  const f = await fixture(t);
+  assert.equal(await f.bridge.tick(), true, "connecting the editor");
+  assert.equal(await f.bridge.tick(), false);
+  await writeFile(join(f.repo, "file.txt"), "keep\nnew check\nend\n");
+  assert.equal(await f.bridge.tick(), true, "a saved edit");
+  assert.equal(await f.bridge.tick(), false);
+  f.thread.status = "running"; f.thread.activeRunId = "run-2"; f.thread.latestRunId = "run-2";
+  assert.equal(await f.bridge.tick(), true, "a new run");
+  assert.equal(await f.bridge.tick(), false);
+  await f.batch();
+  assert.equal(await f.bridge.tick(), true, "a batch to deliver");
+  assert.equal(f.calls.length, 1);
+});
+
+test("a tick with only an undeliverable batch reports no change, so the bridge can back off while it waits", async t => {
+  const f = await fixture(t);
+  await f.bridge.tick();
+  await writeFile(join(f.repo, "file.txt"), "keep\nnew check\nend\n");
+  await f.bridge.tick();
+  await f.writeBatch("pr.json", { request: { kind: "pr-review" } });
+  assert.equal(await f.bridge.tick(), false, "a pull request review waiting for a linked PR");
+  assert.deepEqual(await f.bridge.pending(), ["pr.json"]);
+  f.linked.push("https://github.com/team/project/pull/7");
+  assert.equal(await f.bridge.tick(), true, "the review delivered");
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(await f.bridge.pending(), []);
+});
+
+test("an amended HEAD reviews from the new HEAD and still delivers a pending batch", async t => {
+  const f = await fixture(t);
+  await f.bridge.tick();
+  await writeFile(join(f.repo, "file.txt"), "keep\nnew check\nend\n");
+  await git(f.repo, ["commit", "-a", "--amend", "-m", "amended"]);
+  const head = (await git(f.repo, ["rev-parse", "HEAD"])).trim();
+  f.failCommand(`review-baseline ${f.baseline}`, `commit ${f.baseline.slice(0, 8)} is not in this branch's history`);
+  await f.batch();
+  await f.bridge.tick();
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(await f.bridge.pending(), []);
+  assert.equal(f.bridge.baseline, head);
+  assert.equal(f.commands.filter(command => command.startsWith("review-baseline ")).at(-1), `review-baseline ${head}`);
+  await f.reopen();
+  assert.equal(f.bridge.baseline, head);
+});
+
+test("a refresh HX refuses does not hold back pending feedback", async t => {
+  const f = await fixture(t);
+  await f.bridge.tick();
+  await writeFile(join(f.repo, "file.txt"), "keep\nnew check\nend\n");
+  f.failCommand(`review-baseline ${f.baseline}`, "unsaved buffer");
+  await f.batch();
+  await f.bridge.tick();
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(await f.bridge.pending(), []);
+  assert.equal(f.bridge.baseline, f.baseline);
+  assert(f.commands.some(command => command.startsWith("echo ") && command.includes("unsaved buffer")));
+});
+
+test("an attached bridge restarted after HEAD was rewritten reviews from HEAD and keeps pending feedback", async t => {
+  const f = await fixture(t);
+  await f.batch();
+  await f.bridge.close();
+  await git(f.repo, ["commit", "--amend", "-m", "rewritten"]);
+  const head = (await git(f.repo, ["rev-parse", "HEAD"])).trim();
+  await assert.rejects(ReviewBridge.open(f.options), /Reopen with --base/u);
+  await assert.rejects(ReviewBridge.open({ ...f.options, attach: true, baseline: f.baseline }), /Reopen with --base/u);
+  const bridge = await ReviewBridge.open({ ...f.options, attach: true });
+  t.after(() => bridge.close());
+  assert.equal(bridge.baseline, head);
+  assert.deepEqual(await bridge.pending(), ["review.json"]);
+  await bridge.tick();
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(await bridge.pending(), []);
+});
+
+test("a rejected login ends an attached bridge, while a launched one keeps reporting it", async t => {
+  const f = await fixture(t);
+  const readThread = f.client.readThread;
+  const rejected = async () => { throw new T3Error("authentication", "T3 MCP returned HTTP 401."); };
+  f.client.readThread = rejected;
+  assert.equal(await f.bridge.tick(), false);
+  assert(f.commands.some(command => command.startsWith("echo ") && command.includes("HTTP 401")));
+  f.client.readThread = readThread;
+  await f.bridge.close();
+  const bridge = await ReviewBridge.open({ ...f.options, attach: true });
+  t.after(() => bridge.close());
+  f.client.readThread = rejected;
+  await assert.rejects(bridge.tick(), (error: unknown) => error instanceof T3Error && error.code === "authentication");
 });

@@ -183,7 +183,9 @@
 | `kill_to_line_start` | Delete till start of line | insert: `` <C-u> `` |
 | `kill_to_line_end` | Delete till end of line | insert: `` <C-k> `` |
 | `undo` | Undo change | normal: `` u ``, select: `` u `` |
-| `review_stage_hunk` | Stage or unstage the review hunk under the cursor (only while reviewing) | normal: `` <ret> ``, select: `` <ret> `` |
+| `review_stage_hunk` | Stage or unstage an uncommitted review hunk; mark a committed or pull request change reviewed and advance | normal: `` <ret> ``, select: `` <ret> `` |
+| `review_mark_change` | Mark the current committed or pull request change reviewed and advance | normal: `` <space>Av ``, select: `` <space>Av `` |
+| `review_unmark_change` | Mark the current change unreviewed without advancing | normal: `` <space>AV ``, select: `` <space>AV `` |
 | `review_jump_prev` | Go back to the previous unstaged review hunk (only while reviewing) | normal: `` <S-ret> ``, select: `` <S-ret> `` |
 | `review_files_picker` | Pick a file changed since the review baseline | normal: `` <space>Af ``, select: `` <space>Af `` |
 | `review_diff_buffer` | Show the review as one diff | normal: `` <space>Ad ``, select: `` <space>Ad `` |
@@ -191,19 +193,20 @@
 | `review_old_text` | Focus the old review text nearest the cursor | normal: `` <space>Ao ``, select: `` <space>Ao `` |
 | `review_comments_picker` | Pick a pending review comment | normal: `` <space>AC ``, select: `` <space>AC `` |
 | `review_uncomment_latest` | Drop the latest pending review comment | normal: `` <space>Au ``, select: `` <space>Au `` |
-| `review_toggle_stage` | Stage or unstage the review hunks the selections touch | normal: `` <space>As ``, select: `` <space>As `` |
+| `review_toggle_stage` | Stage or unstage uncommitted changes; mark a committed or pull request change reviewed and advance | normal: `` <space>As ``, select: `` <space>As `` |
 | `review_revert_change` | Revert the change under the cursor to the review baseline | normal: `` <space>Ar ``, select: `` <space>Ar `` |
 | `review_close_buffer` | Close the review of the buffer | normal: `` <space>Ax ``, select: `` <space>Ax `` |
 | `review_refresh_buffer` | Refresh the review of the buffer | normal: `` <space>AB ``, select: `` <space>AB `` |
 | `review_baseline_picker` | Pick the review baseline from the history of HEAD | normal: `` <space>Ab ``, select: `` <space>Ab `` |
 | `review_commit_staged` | Hand the review back asking to commit the staged hunks | normal: `` <space>Am ``, select: `` <space>Am `` |
 | `review_send_handoff` | Hand the review back now | normal: `` <space>AS ``, select: `` <space>AS `` |
+| `review_send_pr_review` | Send as PR review | normal: `` <space>AP ``, select: `` <space>AP `` |
 | `review_commit_all` | Stage every changed file and hand the review back asking to commit | normal: `` <space>AM ``, select: `` <space>AM `` |
 | `review_next_change` | Go to the next review change, across changed files | normal: `` <space>An ``, select: `` <space>An `` |
 | `review_prev_change` | Go to the previous review change, across changed files | normal: `` <space>AN ``, select: `` <space>AN `` |
 | `review_baseline_older` | Move the review baseline one commit older | normal: `` <space>A<minus> ``, select: `` <space>A<minus> `` |
 | `review_baseline_newer` | Move the review baseline one commit newer | normal: `` <space>A+ ``, select: `` <space>A+ `` |
-| `review_comment_prompt` | Send a comment on the selections to the agent (a pending comment on a pull request) | normal: `` <space>Ac ``, select: `` <space>Ac `` |
+| `review_comment_prompt` | Send a comment on the selections to the agent (pending until Space A S or Space A P in a T3 work session; a pending comment on a pull request) | normal: `` <space>Ac ``, select: `` <space>Ac `` |
 | `review_ask_prompt` | Send a comment on the selections to the agent, also while reviewing a pull request | normal: `` <space>Aa ``, select: `` <space>Aa `` |
 | `redo` | Redo change | normal: `` U ``, select: `` U `` |
 | `earlier` | Move backward in history | normal: `` <A-u> ``, select: `` <A-u> `` |

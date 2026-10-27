@@ -1315,6 +1315,11 @@ pub enum ReviewRequest {
     Message { text: String },
     /// Do what the batch's comments ask (`:review-ask`).
     Ask,
+    /// Publish the comments and saved edits as a pull request review, with an optional summary.
+    PrReview {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+    },
 }
 
 /// Pending review comments and reviewed files, exported together as one batch.
@@ -1358,6 +1363,31 @@ impl ReviewBatch {
 
     pub fn is_empty(&self) -> bool {
         self.files.is_empty() && self.comments.is_empty() && self.request.is_none()
+    }
+
+    /// Adds the files and comments of the later batch `other`, keeping comments in the order they
+    /// were made; its request and target replace this batch's.
+    pub fn absorb(&mut self, other: ReviewBatch) {
+        for (path, baseline) in other.files {
+            self.files.entry(path).or_insert(baseline);
+        }
+        self.comments.extend(other.comments);
+        self.comments.sort_by_key(|comment| comment.created);
+        if let Some(request) = other.request {
+            self.request = Some(request);
+        }
+        if let Some(target) = other.target {
+            self.target = Some(target);
+        }
+    }
+
+    /// This batch's files and comments alone, without its request or target.
+    pub fn into_pending(self) -> Self {
+        Self {
+            request: None,
+            target: None,
+            ..self
+        }
     }
 
     /// Sets the request the next export carries, replacing any earlier one.

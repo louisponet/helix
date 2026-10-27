@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { BatchError, ReviewBatch, buildHandoff } from "./index.ts";
+import { BatchError, EmptyReviewError, ReviewBatch, buildHandoff } from "./index.ts";
 
 const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
 function workspace(t: TestContext) {
@@ -66,6 +66,7 @@ test("invalid versions, old selections from absent files, invalid requests and e
 		[doc([file], [comment(file.path, commit("a".repeat(40), null), { side: "old" })]), /cannot select old text from an absent file/],
 		[doc([file], [], { kind: "shell", text: "ignored" }), /request.kind/],
 		[doc([file], [], { kind: "message", text: 3 }), /request.text must be a string/],
+		[doc([file], [], { kind: "pr-review", summary: 3 }), /request.summary must be a string/],
 		[doc([file, file]), /more than once/],
 		[doc(Array(1001).fill(file)), /more than 1000/],
 		[doc([], [comment(file.path, file.baseline, { start_line: 0 })]), /1-based line number/],
@@ -159,6 +160,87 @@ test("request-only handoffs preserve fenced text and spell out staged commit con
 	assert.match(staged!.content, /git commit` without `-a` and without staging anything first/);
 	assert.match(staged!.content, /Use this subject: "fix: correction"/);
 	assert.match(staged!.content, /leave unstaged changes alone, and report the commit hash/);
+});
+
+test("pull request reviews diff saved files against HEAD without context and ask for inline comments and suggestions", async (t) => {
+	const w = workspace(t);
+	const path = join(w.repo, "a.rs");
+	const added = join(w.repo, "new.rs");
+	const mergeBase = w.stage("a.rs", "zero\n");
+	const base = w.commit();
+	w.stage("a.rs", "one\ntwo\nthree\nfour\nfive\nsix\nseven\n");
+	const head = w.commit();
+	writeFileSync(path, "one\nTWO\nthree\nfour\nfive\nsix\nSEVEN\n");
+	writeFileSync(added, "fresh\n");
+	const files = [{ path, baseline: commit(base, mergeBase) }, { path: added, baseline: commit(base, null) }];
+	const note = comment(path, commit(base, mergeBase), {
+		start_line: 2, end_line: 2, current_line: 2, selected_text: "TWO\n", context_before: "one\n", context_after: "three\n", comment: "Name this better.",
+	});
+	const batch = parse(doc(files, [note], { kind: "pr-review", summary: "Close, two nits." }));
+	assert.deepEqual(batch.request, { kind: "pr-review", summary: "Close, two nits." });
+	const before = readFileSync(path);
+	const staged = w.git("rev-parse", ":a.rs");
+	// The turn snapshot and the comment baseline are not the pull request's lines; HEAD is.
+	const handoff = await buildHandoff(batch, { repo: w.repo, snapshots: { [path]: mergeBase } });
+	assert.ok(handoff);
+	assert.deepEqual(handoff.files.map((file) => [file.path, file.user_edits.against]), [[path, "head"], [added, "head"]]);
+	assert.match(handoff.files[0].user_edits.hunks.join(""), /^@@ -2 \+2 @@.*\n-two\n\+TWO\n@@ -7 \+7 @@.*\n-seven\n\+SEVEN\n$/);
+	assert.match(handoff.files[1].user_edits.hunks.join(""), /^@@ -0,0 \+1 @@.*\n\+fresh\n$/);
+	assert.equal(handoff.files[0].review_comments[0].comment, "Name this better.");
+	assert.deepEqual(handoff.details.request, { kind: "pr-review", summary: "Close, two nits." });
+	assert.match(handoff.content, /head commit is the local HEAD/);
+	assert.match(handoff.content, /```suggestion fence/);
+	assert.match(handoff.content, /do not commit, stage, push or revert them/);
+	assert.ok(!handoff.content.includes("continue editing or committing normally"));
+	assert.ok(handoff.content.includes("Review body:\n```\nClose, two nits.\n```"));
+	assert.deepEqual(readFileSync(path), before);
+	assert.equal(w.git("rev-parse", ":a.rs"), staged);
+	assert.equal(w.git("rev-parse", "HEAD"), head);
+	const unsummarized = await buildHandoff(parse(doc(files, [], { kind: "pr-review" })), { repo: w.repo });
+	assert.deepEqual(unsummarized!.details.request, { kind: "pr-review" });
+	assert.match(unsummarized!.content, /write a short summary/);
+});
+
+test("pull request reviews read HEAD from the repository root after a deletion removed the file's directory", async (t) => {
+	const w = workspace(t);
+	mkdirSync(join(w.repo, "gone", "deeper"), { recursive: true });
+	const path = join(w.repo, "gone", "deeper", "a.rs");
+	const blob = w.stage("gone/deeper/a.rs", "removed\n");
+	const head = w.commit();
+	rmSync(join(w.repo, "gone"), { recursive: true });
+	const batch = parse(doc([{ path, baseline: commit(head, blob) }], [], { kind: "pr-review" }));
+	assert.deepEqual(batch.render("batch.json", await batch.inspect(w.repo)).warnings, [`${JSON.stringify(path)} is missing on disk.`]);
+	const handoff = await buildHandoff(batch, { repo: w.repo, strictCurrentReads: true });
+	assert.equal(handoff!.files[0].user_edits.against, "head");
+	assert.match(handoff!.files[0].user_edits.hunks.join(""), /^@@ -1 \+0,0 @@.*\n-removed\n$/);
+});
+
+test("pull request reviews diff every file against the head they are given, not a HEAD that moved since", async (t) => {
+	const w = workspace(t);
+	const path = join(w.repo, "a.rs");
+	const blob = w.stage("a.rs", "one\n");
+	const head = w.commit();
+	w.stage("a.rs", "two\n");
+	w.commit();
+	writeFileSync(path, "three\n");
+	const batch = parse(doc([{ path, baseline: commit(head, blob) }], [], { kind: "pr-review" }));
+	const handoff = await buildHandoff(batch, { repo: w.repo, head });
+	assert.match(handoff!.files[0].user_edits.hunks.join(""), /^@@ -1 \+1 @@.*\n-one\n\+three\n$/);
+});
+
+test("an empty pull request review is refused, but a summary alone is a review", async (t) => {
+	const w = workspace(t);
+	const path = join(w.repo, "a.rs");
+	const blob = w.stage("a.rs", "unchanged\n");
+	const head = w.commit();
+	const files = [{ path, baseline: commit(head, blob) }];
+	await assert.rejects(
+		buildHandoff(parse(doc(files, [], { kind: "pr-review" })), { repo: w.repo }),
+		(error) => error instanceof EmptyReviewError && /no comments, no edits against HEAD and no summary/.test(error.message),
+	);
+	const summarized = await buildHandoff(parse(doc(files, [], { kind: "pr-review", summary: "Looks good." })), { repo: w.repo });
+	assert.deepEqual(summarized!.files, []);
+	assert.deepEqual(summarized!.details.request, { kind: "pr-review", summary: "Looks good." });
 });
 
 test("ask handoffs use relocated selections and nearest hunks, excluding distant edits, other files and enclosing code", async (t) => {

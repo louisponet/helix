@@ -1155,7 +1155,7 @@ function receipt(
 ): string {
 	const count = (n: number, one: string, many: string) => (n > 0 ? [`${n} ${n === 1 ? one : many}`] : []);
 	const parts = [
-		...(request ? [{ "commit-staged": "commit request", message: "message", ask: "question" }[request.kind]] : []),
+		...(request ? [{ "commit-staged": "commit request", message: "message", ask: "question", "pr-review": "pull request review" }[request.kind]] : []),
 		...count(files.filter((file) => file.user_edits.hunks.length > 0).length, "file with edits", "files with edits"),
 		...count(files.reduce((n, file) => n + file.review_comments.length, 0), "review comment", "review comments"),
 	];

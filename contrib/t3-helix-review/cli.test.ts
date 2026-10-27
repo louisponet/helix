@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
-import { hasReviewCommit, spawnReviewEditor } from "./cli.ts";
+import { gitHistory, spawnReviewEditor, syncLoop, waitForFirstCommit } from "./cli.ts";
 
 const execute = promisify(execFile);
 async function environment(t: { after(fn: () => Promise<void>): void }, id: string) {
@@ -117,12 +117,12 @@ test("a killed or missing HX still closes its own control session without advert
 
 test("basic editing fallback distinguishes non-Git and unborn repositories from reviewable history", async t => {
   const f = await fixture(t);
-  assert.equal(await hasReviewCommit(f.dir), false);
+  assert.equal(await gitHistory(f.dir), "not-a-repository");
   await execute("git", ["-C", f.dir, "init", "-q"]);
-  assert.equal(await hasReviewCommit(f.dir), false);
+  assert.equal(await gitHistory(f.dir), "unborn");
   await execute("git", ["-C", f.dir, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "first"]);
-  assert.equal(await hasReviewCommit(f.dir), true);
-  await assert.rejects(hasReviewCommit(join(f.dir, "missing-directory")), /cannot change to/u);
+  assert.equal(await gitHistory(f.dir), "committed");
+  await assert.rejects(gitHistory(join(f.dir, "missing-directory")), /cannot change to/u);
 });
 
 test("startup retries an asynchronous PR attachment before opening its file and advertising readiness", async t => {
@@ -177,4 +177,164 @@ test("startup retries an asynchronous PR attachment before opening its file and 
   assert.equal(attempts, 2);
   assert.equal(commands.filter(command => command.startsWith("review-pr-attach ")).length, 1);
   assert.equal(commands.filter(command => command.startsWith("review-launch-ready ")).length, 1);
+});
+
+async function fakeEditor(t: { after(fn: () => Promise<void>): void }, path: string, onLine: (line: string) => void = () => {}) {
+  const commands: string[] = [];
+  const server = createSocketServer(socket => {
+    let pending = "";
+    socket.on("data", bytes => {
+      const lines = (pending + bytes.toString()).split("\n");
+      pending = lines.pop()!;
+      for (const line of lines) { commands.push(line); socket.write("ok\n"); onLine(line); }
+    });
+  });
+  await new Promise<void>(done => server.listen(path, done));
+  t.after(() => new Promise<void>(done => server.close(() => done())));
+  return { commands, server };
+}
+
+test("an attached bridge leaves navigation to its client and exits cleanly once the editor is gone", async t => {
+  const f = await fixture(t);
+  const repo = join(f.dir, "repo");
+  await mkdir(repo);
+  await execute("git", ["-C", repo, "init", "-q", "-b", "main"]);
+  await execute("git", ["-C", repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "first"]);
+  const socketPath = join(f.dir, "hx.sock");
+  // The editor quits after the bridge's startup commands.
+  const editor = await fakeEditor(t, socketPath, line => { if (line.startsWith("review-launch-ready")) editor.server.close(); });
+  const thread = { threadId: "thread", title: "Test", status: "completed", latestRunId: null, cwd: repo, branch: "main", archived: false };
+  const script = `
+    import { T3Client } from './contrib/t3-helix-review/t3.ts';
+    import { main } from './contrib/t3-helix-review/cli.ts';
+    T3Client.prototype.readThread = async () => (${JSON.stringify(thread)});
+    await main(${JSON.stringify(["--thread", "thread", "--attach", "--socket", socketPath, "--state-dir", join(f.dir, "state")])});
+  `;
+  await execute(process.execPath, ["--input-type=module", "-e", script], {
+    env: { ...f.env, HX_T3_MCP_URL: "http://127.0.0.1:1/mcp", HX_T3_MCP_TOKEN: "test" }, timeout: 15000,
+  });
+  assert.equal(editor.commands[0], `review-open '{"mode":"work"}'`);
+  assert(editor.commands.some(command => command.startsWith("review-handoff ")));
+  assert(!editor.commands.some(command => command === "review-next" || command.startsWith("review-open '{\"filePath\"")));
+});
+
+test("an attached bridge retries its startup while the editor saves a review comment", async t => {
+  const f = await fixture(t);
+  const repo = join(f.dir, "repo");
+  await mkdir(repo);
+  await execute("git", ["-C", repo, "init", "-q", "-b", "main"]);
+  await execute("git", ["-C", repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "first"]);
+  const socketPath = join(f.dir, "hx.sock");
+  const commands: string[] = [];
+  let saving = true;
+  const server = createSocketServer(socket => {
+    let pending = "";
+    // The bridge hangs up on the refusal while the rest of its batch is still being answered.
+    socket.on("error", () => {});
+    socket.on("data", bytes => {
+      const lines = (pending + bytes.toString()).split("\n");
+      pending = lines.pop()!;
+      for (const line of lines) {
+        commands.push(line);
+        if (line.startsWith("review-handoff ") && saving) {
+          saving = false;
+          socket.write("error a review comment is being saved; wait before changing the handoff directory\n");
+          continue;
+        }
+        socket.write("ok\n");
+        // The editor quits after the bridge's startup commands.
+        if (line.startsWith("review-launch-ready")) server.close();
+      }
+    });
+  });
+  await new Promise<void>(done => server.listen(socketPath, done));
+  t.after(() => new Promise<void>(done => server.close(() => done())));
+  const thread = { threadId: "thread", title: "Test", status: "completed", latestRunId: null, cwd: repo, branch: "main", archived: false };
+  const script = `
+    import { T3Client } from './contrib/t3-helix-review/t3.ts';
+    import { main } from './contrib/t3-helix-review/cli.ts';
+    T3Client.prototype.readThread = async () => (${JSON.stringify(thread)});
+    await main(${JSON.stringify(["--thread", "thread", "--attach", "--socket", socketPath, "--state-dir", join(f.dir, "state")])});
+  `;
+  await execute(process.execPath, ["--input-type=module", "-e", script], {
+    env: { ...f.env, HX_T3_MCP_URL: "http://127.0.0.1:1/mcp", HX_T3_MCP_TOKEN: "test" }, timeout: 15000,
+  });
+  assert.equal(commands.filter(command => command.startsWith("review-handoff ")).length, 2);
+  assert.equal(commands.filter(command => command.startsWith("review-launch-ready")).length, 1);
+});
+
+test("an attached bridge without a saved login says so in the editor instead of pairing", async t => {
+  const f = await fixture(t);
+  const socketPath = join(f.dir, "hx.sock");
+  const editor = await fakeEditor(t, socketPath);
+  await assert.rejects(f.run(["--attach", "--socket", socketPath, "--thread", "thread"]), /No saved T3 connection/u);
+  // No bridge drains the outbox the editor may still hand feedback to.
+  assert.equal(editor.commands.length, 2);
+  assert.equal(editor.commands[0], "review-handoff clear");
+  assert.match(editor.commands[1], /^echo 'hx-t3: No saved T3 connection\. Run hx-t3 setup in a T3 terminal/u);
+});
+
+test("an idle attached bridge syncs less often, catches up on a change and still notices its editor leave", async t => {
+  const outbox = await mkdtemp(join(tmpdir(), "hx-outbox-"));
+  t.after(() => rm(outbox, { recursive: true, force: true }));
+  const changes = [false, false, false, false, false, true, false, false];
+  const ticks: number[] = [];
+  const sleeps: number[] = [];
+  let checks = 0;
+  await syncLoop({ signal: new AbortController().signal, attach: true, outbox,
+    listening: async () => { checks++; return ticks.length < changes.length; },
+    open: async () => true,
+    tick: async () => { ticks.push(checks); return changes[ticks.length - 1]; },
+    sleep: async ms => { sleeps.push(ms); } });
+  // Checks between syncs double up to the 15 s cap and drop back after a change.
+  assert.deepEqual(ticks.slice(1).map((check, i) => check - ticks[i]), [2, 4, 8, 10, 10, 1, 2]);
+  // The editor still counts as gone after three 1.5 s checks without it.
+  assert.equal(checks - ticks.at(-1)!, 3);
+  assert(sleeps.every(ms => ms === 1500));
+});
+
+test("a batch landing in the outbox wakes a waiting bridge at once", { timeout: 10_000 }, async t => {
+  const outbox = await mkdtemp(join(tmpdir(), "hx-outbox-"));
+  t.after(() => rm(outbox, { recursive: true, force: true }));
+  const controller = new AbortController();
+  let opened!: () => void;
+  const ready = new Promise<void>(done => { opened = done; });
+  let synced!: () => void;
+  const ticked = new Promise<void>(done => { synced = done; });
+  const loop = syncLoop({ signal: controller.signal, attach: true, outbox,
+    listening: async () => true,
+    open: async () => { opened(); return true; },
+    tick: async () => { synced(); return false; },
+    // No time passes: only the outbox, or stopping, ends a wait.
+    sleep: (_ms, signal) => new Promise<void>(done => {
+      if (signal.aborted) return done();
+      signal.addEventListener("abort", () => done(), { once: true });
+    }) });
+  await ready;
+  await writeFile(join(outbox, "batch.json"), "{}");
+  await ticked;
+  controller.abort();
+  await loop;
+});
+
+test("an attached editor without a commit checks for one less often, then continues once it lands", async () => {
+  const commits: number[] = [];
+  let checks = 0;
+  const committed = await waitForFirstCommit({ signal: new AbortController().signal,
+    listening: async () => { checks++; return true; },
+    committed: async () => { commits.push(checks); return commits.length === 5; },
+    sleep: async () => {} });
+  assert.equal(committed, true);
+  assert.deepEqual(commits.slice(1).map((check, i) => check - commits[i]), [2, 4, 8, 10]);
+});
+
+test("waiting for a first commit ends quietly once the editor is gone", async () => {
+  let checks = 0, commits = 0;
+  const committed = await waitForFirstCommit({ signal: new AbortController().signal,
+    listening: async () => ++checks <= 2,
+    committed: async () => { commits++; return false; },
+    sleep: async () => {} });
+  assert.equal(committed, false);
+  assert.equal(checks, 5);
+  assert.equal(commits, 1);
 });

@@ -506,12 +506,13 @@ impl MappableCommand {
         review_baseline_picker, "Pick the review baseline from the history of HEAD",
         review_commit_staged, "Hand the review back asking to commit the staged hunks",
         review_send_handoff, "Hand the review back now",
+        review_send_pr_review, "Send as PR review",
         review_commit_all, "Stage every changed file and hand the review back asking to commit",
         review_next_change, "Go to the next review change, across changed files",
         review_prev_change, "Go to the previous review change, across changed files",
         review_baseline_older, "Move the review baseline one commit older",
         review_baseline_newer, "Move the review baseline one commit newer",
-        review_comment_prompt, "Send a comment on the selections to the agent (a pending comment on a pull request)",
+        review_comment_prompt, "Send a comment on the selections to the agent (pending until Space A S or Space A P in a T3 work session; a pending comment on a pull request)",
         review_ask_prompt, "Send a comment on the selections to the agent, also while reviewing a pull request",
         redo, "Redo change",
         earlier, "Move backward in history",
@@ -4920,6 +4921,10 @@ fn review_commit_staged(cx: &mut Context) {
 
 fn review_send_handoff(cx: &mut Context) {
     review::run_typed(cx, review::review_send)
+}
+
+fn review_send_pr_review(cx: &mut Context) {
+    review::run_typed(cx, review::review_send_pr)
 }
 
 fn review_commit_all(cx: &mut Context) {
