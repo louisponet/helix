@@ -97,7 +97,7 @@
 | `:review-uncomment` | Drop the most recently added pending review comment, or the given number of latest ones. |
 | `:review-export` | Write pending review comments and reviewed files as JSON to a new file. Reviewed buffers must be written first. |
 | `:review-revert` | Replace the changed lines under the cursor, or the focused old text's change, with the review baseline's lines. |
-| `:review-mark`, `:review-mark-reviewed` | Mark the current primary committed or pull request change reviewed without changing the git index, then advance to the next unreviewed change. |
+| `:review-mark`, `:review-mark-reviewed` | Mark the current primary committed or pull request change reviewed without changing the git index, then advance to the next unreviewed change. With a comment, first add it on the primary selection as :review-comment does. Use %% for a literal %. |
 | `:review-unmark`, `:review-unmark-reviewed` | Mark the current primary change unreviewed without moving or changing the git index. |
 | `:review-stage` | Stage the unstaged hunks the selections touch (or the focused old text's, or the :review-diff hunk under the cursor) in the git index, like git add -p. Refuses unsaved buffers. |
 | `:review-unstage` | Unstage the staged hunks the selections touch (or the focused old text's, or the :review-diff hunk under the cursor): the index gets the baseline's lines back for them. |

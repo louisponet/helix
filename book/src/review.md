@@ -48,9 +48,10 @@ label such as `old lines 1-2 removed before line 1:`.
 | `:review-stage` | Stage the unstaged hunk (index to worktree) under the cursor in the git index, like `git add -p`: in a reviewed buffer every hunk any selection touches (a selection spanning several hunks stages them all) or the hunk of the focused old text, in the `:review-diff` buffer the hunk under the cursor. Refuses buffers with unsaved changes, a locked index (`index.lock`), and files git converts (filters, line endings). |
 | `:review-unstage` | Unstage the staged hunks the selections touch (same places as `:review-stage`): the index gets the review baseline's lines back for it. |
 | `:review-toggle-stage` | Stage the hunks the selections touch, or unstage them all if every one is already staged, so hunks can be toggled in any order; hunks committed since the baseline are skipped and counted. All changes go into one index write. |
-| `:review-mark` | Mark the current primary committed or pull request change reviewed, then advance to the next unreviewed change across files. Leaves the git index untouched. `Space A v` in the default keymap. |
+| `:review-mark [comment]` | Mark the current primary committed or pull request change reviewed, then advance to the next unreviewed change across files. With a comment, first add it on the selection as `:review-comment` does. Leaves the git index untouched. `Space A v` in the default keymap. |
 | `:review-unmark` | Mark the current change unreviewed without moving. `Space A V` in the default keymap. |
-| `Enter` | In normal mode, mark the current committed or pull request change reviewed and advance; on uncommitted work, toggle staging and move on. |
+| `Enter` | In normal mode, mark the current committed or pull request change reviewed and advance to the next unreviewed change; on uncommitted work, toggle staging and move on. |
+| `Shift-Enter` | In normal mode, on a committed or pull request change, open `:review-mark ` to comment on it, mark it reviewed and advance; on uncommitted work, go back to the previous unstaged hunk. |
 | `:review-close` | Stop reviewing the buffer. Pending comments are kept. Under a `:review-baseline`, the buffer is not reviewed again until a different baseline, `:review-baseline clear`, or an explicit `:review` on it. |
 | `:review-baseline <revision>` | Review all unmodified workspace buffers, and buffers opened later, against a commit. Refuses a commit that is not `HEAD` or one of its ancestors (`commit <commit> is not in this branch's history`), such as a branch tip a rebase rewrote. `clear` closes all reviews. `:review-baseline <revision> force` adopts the commit even over a baseline pinned by you, ending the pin (the pi hook sends it after a commit you asked for). |
 | `:review-pr <number\|url> [dir]` | Review a GitHub pull request: check it out with `gh pr checkout` and review every buffer against its merge base with the base branch. `dir` is where `:review-submit` hands the review to gtc. Refuses uncommitted changes and unsaved reviewed buffers. `close` leaves the pull request review and checks out the branch that was checked out before, unless the worktree has uncommitted changes. See [Reviewing pull requests](#reviewing-pull-requests). |
@@ -161,7 +162,12 @@ Ask about selected code with `Space A a`, including deleted text focused with
 then use `:review-send [instruction]` (`Space A S`) to hand the comments and
 edits back. To review the thread's pull request, `:review-send-pr [summary]`
 (`Space A P`) asks the agent to post the comments as inline review comments and
-the edits as suggestions; your edits stay uncommitted in the checkout. Replies
+the edits as suggestions; your edits stay uncommitted in the checkout. While
+reviewing a pull request, `Enter` marks the change under the cursor reviewed and
+moves on, and `Shift-Enter` first adds a pending comment on it, which
+`Space A P` sends with the others. With `HELIX_REVIEW_PROGRESS` naming a file,
+HX keeps it updated with each reviewed file's progress, which T3 uses to mark
+files viewed. Replies
 appear in the T3 thread. `:review-commit [subject]` asks the agent to commit
 exactly the staged content. Saving alone sends nothing. This is **Work together**
 mode. **Review a PR** (`hx-t3 --mode review`, or `--pr <url>`) opens a separate
@@ -254,7 +260,8 @@ like this:
    tint in the default theme, falling back to the staged ones) and is counted as committed, and staging or unstaging it fails
    with `already committed in <commit>`. On a committed block, `Enter` instead
    marks it reviewed and advances to the next unreviewed committed change.
-   `Shift-Enter` revisits the previous change without changing its mark;
+   `Shift-Enter` comments on it first (`:review-mark <comment>`);
+   `Space A N` revisits the previous change without changing its mark and
    `Space A V` clears that mark. A block that mixes committed lines
    with newer edits next to them acts as one unit: `Enter` anywhere in it
    stages its uncommitted part (`Staged 1 hunk, 1 already committed`). While reviewing, `Enter` in
@@ -354,7 +361,8 @@ buffer, `:review-files`, `:review-diff` and `Space A n` show exactly the pull
 request's changes. In PR mode, `n` / `N` always walk all hunks against that
 baseline across its files (`file.rs: hunk 2 of 5`), including while you edit
 suggested changes. `Enter` marks the current change reviewed and moves to the
-next unreviewed change, across files. `Shift-Enter` goes back; `Space A V`
+next unreviewed change, across files. `Shift-Enter` adds a pending comment on
+it first, then does the same. `Space A N` goes back; `Space A V`
 unmarks the current change. These marks track your progress in the current HX
 session without changing the git index or submitting a GitHub review.
 Navigation and phone reconnects preserve the marks; editing a marked change

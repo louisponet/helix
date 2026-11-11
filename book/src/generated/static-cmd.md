@@ -186,7 +186,7 @@
 | `review_stage_hunk` | Stage or unstage an uncommitted review hunk; mark a committed or pull request change reviewed and advance | normal: `` <ret> ``, select: `` <ret> `` |
 | `review_mark_change` | Mark the current committed or pull request change reviewed and advance | normal: `` <space>Av ``, select: `` <space>Av `` |
 | `review_unmark_change` | Mark the current change unreviewed without advancing | normal: `` <space>AV ``, select: `` <space>AV `` |
-| `review_jump_prev` | Go back to the previous unstaged review hunk (only while reviewing) | normal: `` <S-ret> ``, select: `` <S-ret> `` |
+| `review_comment_or_jump_prev` | Comment on the current committed or pull request change, mark it reviewed and advance; elsewhere go back to the previous unstaged review hunk (only while reviewing) | normal: `` <S-ret> ``, select: `` <S-ret> `` |
 | `review_files_picker` | Pick a file changed since the review baseline | normal: `` <space>Af ``, select: `` <space>Af `` |
 | `review_diff_buffer` | Show the review as one diff | normal: `` <space>Ad ``, select: `` <space>Ad `` |
 | `review_diff_open_hunk` | Open the file of the review diff hunk under the cursor | normal: `` <space>Ag ``, select: `` <space>Ag `` |

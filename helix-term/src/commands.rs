@@ -492,7 +492,7 @@ impl MappableCommand {
         review_stage_hunk, "Stage or unstage an uncommitted review hunk; mark a committed or pull request change reviewed and advance",
         review_mark_change, "Mark the current committed or pull request change reviewed and advance",
         review_unmark_change, "Mark the current change unreviewed without advancing",
-        review_jump_prev, "Go back to the previous unstaged review hunk (only while reviewing)",
+        review_comment_or_jump_prev, "Comment on the current committed or pull request change, mark it reviewed and advance; elsewhere go back to the previous unstaged review hunk (only while reviewing)",
         review_files_picker, "Pick a file changed since the review baseline",
         review_diff_buffer, "Show the review as one diff",
         review_diff_open_hunk, "Open the file of the review diff hunk under the cursor",
@@ -4859,8 +4859,8 @@ fn review_unmark_change(cx: &mut Context) {
     review::run_typed(cx, review::review_unmark)
 }
 
-fn review_jump_prev(cx: &mut Context) {
-    review::review_jump_prev(cx)
+fn review_comment_or_jump_prev(cx: &mut Context) {
+    review::review_comment_or_jump_prev(cx)
 }
 
 fn review_files_picker(cx: &mut Context) {

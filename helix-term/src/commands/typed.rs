@@ -4107,11 +4107,12 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "review-mark",
         aliases: &["review-mark-reviewed"],
-        doc: "Mark the current primary committed or pull request change reviewed without changing the git index, then advance to the next unreviewed change.",
+        doc: "Mark the current primary committed or pull request change reviewed without changing the git index, then advance to the next unreviewed change. With a comment, first add it on the primary selection as :review-comment does. Use %% for a literal %.",
         fun: review::review_mark,
         completer: CommandCompleter::none(),
         signature: Signature {
-            positionals: (0, Some(0)),
+            positionals: (0, Some(1)),
+            raw_after: Some(0),
             ..Signature::DEFAULT
         },
     },

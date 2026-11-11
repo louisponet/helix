@@ -83,7 +83,7 @@ Normal mode is the default mode when you launch helix. You can return to it from
 | `.`         | Repeat last insert                                                   | N/A                       |
 | `u`         | Undo change                                                          | `undo`                    |
 | `Enter`     | Stage or unstage uncommitted work; mark a committed or pull request change reviewed and advance (only while [reviewing](./review.md)) | `review_stage_hunk` |
-| `Shift-Enter` | Jump back to the previous unstaged review hunk (any previous block when everything is committed; only while [reviewing](./review.md)) | `review_jump_prev` |
+| `Shift-Enter` | Comment on a committed or pull request change, mark it reviewed and advance; on uncommitted work, jump back to the previous unstaged review hunk (only while [reviewing](./review.md)) | `review_comment_or_jump_prev` |
 | `U`         | Redo change                                                          | `redo`                    |
 | `Alt-u`     | Move backward in history                                             | `earlier`                 |
 | `Alt-U`     | Move forward in history                                              | `later`                   |

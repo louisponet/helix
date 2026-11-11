@@ -12,6 +12,7 @@ pub mod health;
 pub mod job;
 pub mod keymap;
 pub mod logging;
+pub mod review_progress;
 mod review_transport;
 pub mod ui;
 
