@@ -1263,7 +1263,7 @@ fn jump_change_by(cx: &mut compositor::Context, forward: bool, count: usize) -> 
         let status = cx
             .editor
             .get_status()
-            .map(|(status, _)| status.to_owned())
+            .map(|(status, _)| status.to_string())
             .unwrap_or_default();
         announce_review_progress(cx.editor, &status);
     }
