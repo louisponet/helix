@@ -84,6 +84,7 @@ pub struct Application {
 
     command_socket: Option<CommandSocket>,
     review_transport: Option<crate::review_transport::Session>,
+    review_progress: Option<crate::review_progress::Progress>,
 }
 
 #[cfg(feature = "integration")]
@@ -260,6 +261,7 @@ impl Application {
             theme_mode,
             command_socket: CommandSocket::new(),
             review_transport: crate::review_transport::Session::from_env(),
+            review_progress: crate::review_progress::Progress::from_env(),
         };
 
         Ok(app)
@@ -298,6 +300,9 @@ impl Application {
         self.terminal.draw(pos, kind).unwrap();
         if let Some(session) = &mut self.review_transport {
             session.sync_state(&self.editor);
+        }
+        if let Some(progress) = &mut self.review_progress {
+            progress.sync(&self.editor);
         }
     }
 

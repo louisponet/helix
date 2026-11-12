@@ -683,7 +683,7 @@ pub(crate) fn set_change_reviewed(
                 "All committed changes"
             };
             cx.editor.set_status(format!(
-                "{scope} reviewed; Previous revisits a change, :review-unmark undoes its mark"
+                "{scope} reviewed; Space A N revisits a change, :review-unmark undoes its mark"
             ));
         }
         Err(err) => cx.editor.set_status(format!(
@@ -829,16 +829,32 @@ fn open_review_nav_file(
     }
 }
 
+/// With a comment, first comments on the change as `:review-comment` does, then marks it.
 pub(super) fn review_mark(
     cx: &mut compositor::Context,
-    _args: Args,
+    args: Args,
     event: PromptEvent,
 ) -> anyhow::Result<()> {
-    if event == PromptEvent::Validate {
-        set_change_reviewed(cx, true)
-    } else {
-        Ok(())
+    if event != PromptEvent::Validate {
+        return Ok(());
     }
+    if args.first().is_none_or(|text| text.trim().is_empty()) {
+        return set_change_reviewed(cx, true);
+    }
+    ensure!(
+        review_controls(cx.editor).can_mark_reviewed,
+        "Mark reviewed is only available on a committed or pull request change"
+    );
+    review_comment(cx, args, event)?;
+    set_change_reviewed(cx, true)?;
+    if let Some((status, _)) = cx.editor.get_status() {
+        let status = match status.strip_prefix("Marked reviewed") {
+            Some(rest) => format!("Commented and marked reviewed{rest}"),
+            None => format!("Commented; {status}"),
+        };
+        cx.editor.set_status(status);
+    }
+    Ok(())
 }
 
 pub(super) fn review_unmark(
@@ -880,6 +896,7 @@ const OLD_FOCUS_TYPABLE: &[&str] = &[
 /// Static review commands (the `G` menu) allowed while old text is focused; each runs a command
 /// of [`OLD_FOCUS_TYPABLE`] or opens the prompt for one.
 const OLD_FOCUS_STATIC: &[&str] = &[
+    "review_comment_or_jump_prev",
     "review_mark_change",
     "review_unmark_change",
     "review_old_text",
@@ -1246,7 +1263,7 @@ fn jump_change_by(cx: &mut compositor::Context, forward: bool, count: usize) -> 
         let status = cx
             .editor
             .get_status()
-            .map(|(status, _)| status.to_owned())
+            .map(|(status, _)| status.to_string())
             .unwrap_or_default();
         announce_review_progress(cx.editor, &status);
     }
@@ -3856,9 +3873,13 @@ fn toggle_or_jump(cx: &mut compositor::Context) -> anyhow::Result<()> {
     jump_on(cx, true, every)
 }
 
-/// The Shift-Enter key: in a reviewed buffer, jumps back to the previous unstaged hunk, across
+/// The Shift-Enter key: on a committed or pull request change, prompts for `:review-mark` with a
+/// comment. Otherwise, in a reviewed buffer, jumps back to the previous unstaged hunk, across
 /// files, or with everything since the baseline committed to the previous changed block.
-pub(crate) fn review_jump_prev(cx: &mut Context) {
+pub(crate) fn review_comment_or_jump_prev(cx: &mut Context) {
+    if review_controls(cx.editor).can_mark_reviewed {
+        return typed::command_mode_with_line(cx, "review-mark ");
+    }
     let mut cx = compositor::Context {
         editor: cx.editor,
         jobs: cx.jobs,
@@ -3872,10 +3893,7 @@ pub(crate) fn review_jump_prev(cx: &mut Context) {
             .as_ref()
             .is_some_and(|review| review.reviewed_hunks() > 0)
     });
-    let every = cx.editor.review_pr.is_some()
-        || progress
-        || review_controls(cx.editor).can_mark_reviewed
-        || everything_committed(&mut cx);
+    let every = cx.editor.review_pr.is_some() || progress || everything_committed(&mut cx);
     if let Err(err) = jump_on(&mut cx, false, every) {
         cx.editor.set_error(format!("{err:#}"));
     }

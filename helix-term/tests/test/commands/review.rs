@@ -3138,13 +3138,22 @@ async fn review_next_and_enter_walk_the_committed_hunks_of_a_pull_request() -> a
     assert_eq!(at(&app), ("file.txt".to_owned(), 5));
     assert_eq!(status(&app), "file.txt: hunk 2 of 2");
 
-    // Enter records this change as reviewed and advances; Shift-Enter revisits it.
+    // Enter records this change as reviewed and advances; Space A N revisits it.
     send_keys(&mut app, "<ret>").await?;
     assert_status_not_error(&app.editor);
     assert_eq!(at(&app), ("new.txt".to_owned(), 0));
     assert!(status(&app).contains("Marked reviewed; next"));
     assert_eq!(git_ok(dir, &["diff", "--cached"]), "");
-    send_keys(&mut app, "<S-ret>").await?;
+    assert_eq!(
+        helix_term::review_progress::snapshot(&app.editor)["files"][0],
+        serde_json::json!({
+            "path": dir.join("file.txt"),
+            "baseline": fixture.merge_base,
+            "reviewed": 1,
+            "total": 2,
+        })
+    );
+    send_keys(&mut app, "<space>AN").await?;
     assert_eq!(at(&app), ("file.txt".to_owned(), 5));
     assert!(status(&app).contains("reviewed; 1/2 reviewed"));
     Ok(())
@@ -3181,9 +3190,60 @@ async fn review_next_and_enter_walk_a_pull_request_with_a_committed_rename() -> 
         doc!(app.editor).path(),
         Some(dir.join("renamed.txt").as_path())
     );
-    send_keys(&mut app, "<S-ret>").await?;
+    send_keys(&mut app, "<space>AN").await?;
     assert_eq!(doc!(app.editor).path(), Some(dir.join("new.txt").as_path()));
     assert_eq!(git_ok(dir, &["diff", "--cached"]), "");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shift_enter_comments_on_a_committed_change_then_marks_it_and_advances(
+) -> anyhow::Result<()> {
+    use helix_view::editor::ReviewMode;
+    let repo = Repo::new("a\nb\nc\nd\ne\n", "a\nb\nc\nd\ne\n", "a\nb\nc\nd\ne\n");
+    let dir = repo.dir.path();
+    let _cwd = Cwd::enter(dir);
+    let baseline = git_ok(dir, &["rev-parse", "HEAD"]);
+    repo.write("a\nB\nc\nd\nE\n");
+    repo.stage();
+    git_ok(dir, &["commit", "-m", "agent work"]);
+    let outbox = tempfile::tempdir()?;
+    let mut app = repo.app()?;
+    app.editor.review_mode = Some(ReviewMode::Work);
+    let keys = format!(
+        ":review-handoff {}<ret>:review-baseline {baseline}<ret>2gg<S-ret>rename this<ret>",
+        outbox.path().display()
+    );
+    send_keys(&mut app, &keys).await?;
+    assert_status_not_error(&app.editor);
+    let status = app.editor.get_status().unwrap().0.to_string();
+    assert!(
+        status.starts_with("Commented and marked reviewed; next"),
+        "{status}"
+    );
+    let comments = app.editor.review_batch.comments();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0].comment, "rename this");
+    assert_eq!(comments[0].start_line, 2);
+    let review = doc!(app.editor).review.as_ref().unwrap();
+    assert!(review.hunk_reviewed(0));
+    assert!(!review.hunk_reviewed(1));
+    let (view, doc) = current_ref!(app.editor);
+    let cursor = doc
+        .selection(view.id)
+        .primary()
+        .cursor_line(doc.text().slice(..));
+    assert_eq!(cursor, 4);
+
+    // On the focused old text of the next change, the comment goes on the removed line.
+    send_keys(&mut app, ":review-old<ret><S-ret>keep e<ret>").await?;
+    assert_status_not_error(&app.editor);
+    let comments = app.editor.review_batch.comments();
+    assert_eq!(comments.len(), 2);
+    assert_eq!(comments[1].comment, "keep e");
+    assert_eq!(comments[1].side, helix_view::review::ReviewSide::Old);
+    assert!(doc!(app.editor).review.as_ref().unwrap().hunk_reviewed(1));
+    assert!(take_batches(outbox.path()).is_empty());
     Ok(())
 }
 

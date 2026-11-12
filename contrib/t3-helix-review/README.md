@@ -54,6 +54,9 @@ In HX:
   replaces, and the summary as the review body.
   The agent publishes with T3's pull request review tool and leaves your edits
   uncommitted in the checkout.
+- On a pull request change, `Enter` marks it reviewed and moves to the next
+  unreviewed change; `Shift-Enter` first adds a pending comment on it for
+  `Space A P`.
 - `Space A m` (`:review-commit [subject]`) asks the agent to commit exactly
   what you staged with `Enter`.
 

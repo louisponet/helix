@@ -790,7 +790,7 @@ fn anchor(comment: &ReviewComment, file: &File, pr: &PullRequest) -> Result<Anch
         let mut shift = 0isize;
         for hunk in helix_vcs::line_hunks(file.head.as_bytes(), file.saved.as_bytes()) {
             let after = hunk.after.start as usize..hunk.after.end as usize;
-            if after.end <= start - 1 {
+            if after.end < start {
                 shift += hunk.before.len() as isize - hunk.after.len() as isize;
             } else {
                 ensure!(after.start >= line,
